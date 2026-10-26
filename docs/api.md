@@ -109,6 +109,13 @@ responsibility.
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions
   and particle samples.
 
+Galaxy emission uses 16/32/48 bounded disk samples for low/auto/high quality.
+The smooth core is integrated separately with samples concentrated around the
+closest point of the ray. Dust uses mip filtering; analytic spiral arms are
+filtered over the ray/pixel footprint while preserving their periodic mean
+brightness. These rendering changes do not reseed descriptors or star positions.
+Subpixel detail may differ by quality; the spatial layout remains the same.
+
 Generation uses artistic placement. Volume and black-hole rendering uses optical
 approximations. Camera depth compression and local gravity do not form a
 physically consistent galaxy-to-planet simulation.
