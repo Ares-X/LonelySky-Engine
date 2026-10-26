@@ -89,6 +89,18 @@ responsibility.
 
 ## Individual visual primitives
 
+`describeGalaxyAppearance(descriptor)` is exported from `src/three.js`. Pass a
+descriptor from `describeMacro`; the frozen result contains `revision: 1`, a
+`family`, emission/dust/core/arm controls, and `viewing: {offset, fov}`. The offset
+is in galaxy-local radius units; rotate by the descriptor orientation before
+converting to a world position. The function uses a separate seeded stream and
+never changes the descriptor, galaxy address or particle sample sequence. It
+does not select a safe arrival point or manage gameplay navigation.
+
+The six families refine the existing three macro morphologies. Volumes remain
+within the existing galaxy support radius and reuse the same geometry, noise
+texture and program. Quality levels retain 16/32/48 density integration samples.
+
 - `planetMaterial`, `atmosphereMaterial`, `ringMaterial`, `starMaterial` return
   Three.js materials. Dispose them after use. Texture arguments are borrowed.
 - `createNebula(options)` and `createBlackHole(options)` return groups exposing

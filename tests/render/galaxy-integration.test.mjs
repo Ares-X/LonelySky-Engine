@@ -85,3 +85,63 @@ test('analytic arm footprint conserves periodic light and converges to the unres
     assert.ok(Math.abs(left-right)<1e-12,'wrapped arm seams stay continuous');
   }
 });
+
+test('shared broad/lane phase matches independent rotated kernels across axes, seams, footprints and bars', t => {
+  const haze=createGalaxyHaze();haze.userData.setDescriptors(descriptors);
+  const shader=haze.children[0].material.fragmentShader;
+  const body=name=>{
+    const match=shader.match(new RegExp(`(?:float|vec2) ${name}\\([^)]*\\)\\{([\\s\\S]*?)\\n  \\}`));
+    assert.ok(match);return match[1].replace(/\bfloat\b/g,'let').replace(/\bvec3\s+(\w+)\s*=/g,'let $1=')
+      .replace(/vec3\((angularOffset-period,angularOffset,angularOffset\+period)\)\/sigma/g,'vec3($1).map(n=>n/sigma)')
+      .replace(/exp\(-\.5\*offsets\*offsets\)/g,'offsets.map(n=>exp(-.5*n*n))');
+  };
+  const smoothstep=(a,b,n)=>{const f=Math.max(0,Math.min(1,(n-a)/(b-a)));return f*f*(3-2*f);};
+  const scope={sqrt:Math.sqrt,exp:Math.exp,max:Math.max,log:Math.log,sin:Math.sin,cos:Math.cos,floor:Math.floor,
+    atan:Math.atan2,length:p=>Math.hypot(p.x,p.y),vec2:(x,y)=>[x,y],vec3:(...p)=>p.length===1?[p[0],p[0],p[0]]:p,
+    dot:(a,b)=>a.reduce((s,n,i)=>s+n*b[i],0),mix:(a,b,f)=>a*(1-f)+b*f,smoothstep};
+  const lobe=Function('angularOffset','width','angularVariance','period','arms',...Object.keys(scope),body('armLobe'));
+  const paired=Function('p','width','footprint','arms','pitch','armLobe',...Object.keys(scope),body('armDensities'));
+  const run=(p,width,footprint,arms,pitch)=>paired({x:p[0],y:p[1]},width,footprint,arms,pitch,
+    (offset,w,variance,period)=>lobe(offset,w,variance,period,arms,...Object.values(scope)),...Object.values(scope));
+  // Independent pre-optimization implementation, including the actual former
+  // column-major matrix rotation. No shared phase or shared variance is used.
+  const legacy=(p,width,footprint,arms,pitch)=>{
+    const r=Math.hypot(...p);if(r<=.000001)return width*arms*.3989422804;
+    const phase=(Math.atan2(p[1],p[0])-Math.log(r+.06)/pitch)*arms;
+    const offset=Math.atan2(Math.sin(phase),Math.cos(phase))/arms;
+    const gradient=Math.sqrt(1/Math.max(r*r,.000001)+1/(pitch*(r+.06))**2);
+    const sigma=Math.sqrt(width*width+(footprint*gradient)**2/12),period=6.28318530718/arms;
+    const filtered=[offset-period,offset,offset+period].reduce((sum,n)=>sum+Math.exp(-.5*(n/sigma)**2),0)*width/sigma;
+    return filtered*(1-smoothstep(.3,.55,sigma/period))+width*arms*.3989422804*smoothstep(.3,.55,sigma/period);
+  };
+  const reference=(p,width,footprint,arms,pitch)=>{
+    const a=.075,c=Math.cos(a),s=Math.sin(a),rotated=[c*p[0]+s*p[1],-s*p[0]+c*p[1]];
+    return [legacy(p,width,footprint,arms,pitch),legacy(rotated,width*.24,footprint,arms,pitch)];
+  };
+  let maximumError=0,comparisons=0;
+  const check=(actual,expected)=>{
+    for(let i=0;i<2;i++){
+      assert.ok(Number.isFinite(actual[i])&&actual[i]>=0);
+      const error=Math.abs(actual[i]-expected[i]);maximumError=Math.max(maximumError,error);comparisons++;
+      assert.ok(error<5e-10,`shared kernel differs from independent rotated kernel by ${error}`);
+    }
+  };
+  for(const arms of [2,3,4,6])for(const pitch of [.22,.33,.41])for(const width of [.27,.305]){
+    for(const r of [0,1e-12,.999e-6,1.001e-6,.01,.2,.98,2.8])for(const footprint of [0,1e-6,.001,.03,.1,1]){
+      const seam=Math.log(r+.06)/pitch+Math.PI/arms;
+      const angles=[-Math.PI,-2.1,-.3,0,.7,Math.PI,seam-1e-9,seam,seam+1e-9,seam+.075-1e-9,seam+.075,seam+.075+1e-9];
+      for(const angle of angles){
+        const p=[r*Math.cos(angle),r*Math.sin(angle)];
+        check(run(p,width,footprint,arms,pitch),reference(p,width,footprint,arms,pitch));
+        const unbarred=[p[0]/1.6,p[1]/.45],inside=1-smoothstep(.27,.31,Math.hypot(...unbarred));
+        const old=reference(p,width,footprint,arms,pitch),oldBar=reference(unbarred,width,footprint/.45,arms,pitch);
+        const expected=old.map((n,i)=>n*(1-inside)+oldBar[i]*inside);
+        let actual=run(p,width,footprint,arms,pitch);
+        if(inside>0){const next=run(unbarred,width,footprint/.45,arms,pitch);actual=actual.map((n,i)=>n*(1-inside)+next[i]*inside);}
+        check(actual,expected);
+      }
+    }
+  }
+  t.diagnostic(`${comparisons} kernel comparisons; maximum absolute error ${maximumError}`);
+  haze.userData.dispose();
+});
