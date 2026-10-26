@@ -143,6 +143,11 @@ fields. Applications must use this same sampled state for their moving visuals;
 the stock `createUniverseView` does not animate custom orbital providers.
 
 Gravity `sample(index, position, timeSeconds = 0)` samples current orbital poses.
+Since 0.3.1, a non-null `source` includes detached `position` and `velocity`
+vectors evaluated at the requested time. Both use the sampled sector's local
+frame, including across wrapped cell boundaries; static sources have zero
+velocity. These describe the strongest contributor, not a bound-orbit verdict.
+
 Positive finite `body.mu` selects inverse-square attraction outside the surface,
 bounded at the radius, with the existing finite-range taper and total cap. Bodies
 without `mu` retain legacy softening. This is a gameplay field; it does not

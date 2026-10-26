@@ -33,7 +33,10 @@ export function bodyGravity(body, position) {
   return delta.map(n => n * force);
 }
 
-/** Cache generated descriptors and the 27-cell neighborhood until a rebase. */
+/** Cache generated descriptors and the 27-cell neighborhood until a rebase.
+ * sample.source identifies the strongest contributor. Its detached position is
+ * in the sampled sector's local frame; velocity is evaluated at timeSeconds in
+ * the same frame (zero for static bodies), including across wrapped cell seams. */
 export function createGravityField({ world, sector = world && (index => world.sector(index)) } = {}) {
   if (typeof sector !== 'function') throw new TypeError('A sector sphere provider is required');
   const cache = new Map();
@@ -73,7 +76,8 @@ export function createGravityField({ world, sector = world && (index => world.se
         if (strength > strongest) {
           strongest = strength;
           source = { id: body.id, name: body.name, type: body.type, radius: body.radius,
-            distance: Math.hypot(...body.position.map((n, i) => n - position[i])), sectorIndex: body.sectorIndex };
+            distance: Math.hypot(...body.position.map((n, i) => n - position[i])), sectorIndex: body.sectorIndex,
+            position: [...body.position], velocity: [...state.velocity] };
         }
       }
       const total = Math.hypot(...acceleration);

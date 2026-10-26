@@ -111,11 +111,11 @@ export function createCosmos({ seed = 'lonelysky' } = {}) {
   const group = new THREE.Group(); group.name = 'macrocosmos';
   const geometry = new THREE.BufferGeometry();
   const material = new THREE.ShaderMaterial({
-    uniforms: { cameraLocal: { value: new THREE.Vector3() }, pixelHeight: { value: 1 }, brightness: { value: 1 }, sampleWeight: { value: 1 } },
+    uniforms: { cameraLocal: { value: new THREE.Vector3() }, pixelHeight: { value: 1 }, brightness: { value: 1 }, sampleWeight: { value: 1 }, minimumPointSize: { value: 4 } },
     vertexShader: /* glsl */`
       attribute vec3 color;attribute float pointRadius;
-      uniform vec3 cameraLocal;uniform float pixelHeight;
-      varying vec3 tint;varying float alpha;
+      uniform vec3 cameraLocal;uniform float pixelHeight;uniform float minimumPointSize;
+      varying vec3 tint;varying float alpha;varying float rasterWeight;
       void main(){
         vec3 relative=position-cameraLocal;float distanceToCamera=length(relative);
         alpha=1.-smoothstep(420000.,520000.,distanceToCamera);tint=color;
@@ -126,15 +126,19 @@ export function createCosmos({ seed = 'lonelysky' } = {}) {
         vec4 view=modelViewMatrix*vec4(proxy,1.);
         gl_Position=projectionMatrix*view;
         float angularSize=pointRadius*pixelHeight*projectionMatrix[1][1]/max(distanceToCamera,1.);
-        gl_PointSize=clamp(angularSize*.45,.7,2.4);
+        float apparentSize=clamp(angularSize*.45,.7,2.4);
+        // Resolve the radial kernel across several physical pixels. Preserve
+        // integrated light rather than letting small stars brighten as they grow.
+        gl_PointSize=max(apparentSize,minimumPointSize);
+        rasterWeight=pow(apparentSize/gl_PointSize,2.);
       }
     `,
     fragmentShader: /* glsl */`
-      varying vec3 tint;varying float alpha;uniform float brightness;uniform float sampleWeight;
+      varying vec3 tint;varying float alpha;varying float rasterWeight;uniform float brightness;uniform float sampleWeight;
       void main(){float radius=length(gl_PointCoord-.5);
         float glow=exp(-radius*radius*22.)*(1.-smoothstep(.36,.5,radius));
         float opacity=.42*sqrt(sampleWeight);
-        gl_FragColor=vec4(tint*brightness,glow*alpha*opacity);
+        gl_FragColor=vec4(tint*brightness,glow*alpha*opacity*rasterWeight);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
