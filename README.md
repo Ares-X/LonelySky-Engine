@@ -152,3 +152,10 @@ floating-point domains, and removes undefined negative-base powers and the
 undefined central angular phase from galaxy haze. Generation seeds and saved
 coordinates are unchanged. Numerical shader tests cover float32 facing extrema,
 vertical disk symmetry and the finite axis limit; they are not a GPU emulator.
+
+Version 0.4 adds six seeded galaxy appearance families: open spirals, barred
+spirals, dusty edge-on disks, old stellar halos, tidal islands and compact young
+clusters. They share the existing volume and particle renderer. Appearance uses
+its own random stream, leaving galaxy addresses and particle prefixes unchanged.
+`describeGalaxyAppearance` exposes the structural controls and suggested local
+view offset/FOV; the application owns destinations, names and navigation.

@@ -6,3 +6,4 @@ export { createDeepSky, deepSkyUniforms, setDeepSkyEnvironment } from './render/
 export { planetMaterial, atmosphereMaterial, ringMaterial, starMaterial } from './render/materials.js';
 export * from './render/cosmos.js';
 export { createGalaxyHaze, galaxyHazeScale } from './render/galaxy-haze.js';
+export { describeGalaxyAppearance } from './render/galaxy-appearance.js';

@@ -81,17 +81,18 @@ test('galaxy arm axis returns finite light before the undefined atan phase', () 
   const shader=galaxyShader();
   // Run the actual scalar prelude through theta. Stop before the vector-valued
   // Gaussian lobes: the axis must return before it asks atan(0,0) for a phase.
-  const prelude=shader.match(/float armDensity\([^)]*\)\s*\{([\s\S]*?float theta=[^;]+;)/)?.[1];
+  const prelude=shader.match(/vec2 armDensities\([^)]*\)\s*\{([\s\S]*?float theta=[^;]+;)/)?.[1];
   assert.ok(prelude);
   const atan=(y,x)=>y===0&&x===0 ? NaN : Math.atan2(y,x);
-  const run=Function('p','width','arms','length','atan',prelude.replace(/\bfloat\b/g,'let')+'\nreturn theta;');
+  const run=Function('p','width','arms','length','atan','vec2',prelude.replace(/\bfloat\b/g,'let')+'\nreturn theta;');
+  const vec2=(x,y)=>[x,y];
   for(const arms of [2,3,4,6]) for(const width of [.085,.12,.185]) {
     for(const p of [[0,0],[1e-12,0],[0,-1e-8]]) {
-      const value=run({x:p[0],y:p[1]},width,arms,v=>Math.hypot(v.x,v.y),atan);
-      assert.ok(Number.isFinite(value));
-      assert.ok(Math.abs(value-width*arms/Math.sqrt(2*Math.PI))<1e-10,'axis uses the circumferential mean');
+      const value=run({x:p[0],y:p[1]},width,arms,v=>Math.hypot(v.x,v.y),atan,vec2);
+      assert.ok(value.every(Number.isFinite));
+      for(const [i,scale] of [1,.24].entries()) assert.ok(Math.abs(value[i]-width*scale*arms/Math.sqrt(2*Math.PI))<1e-10,'both axis kernels use their circumferential mean');
     }
-    const theta=run({x:0,y:1e-4},width,arms,v=>Math.hypot(v.x,v.y),atan);
+    const theta=run({x:0,y:1e-4},width,arms,v=>Math.hypot(v.x,v.y),atan,vec2);
     assert.equal(theta,Math.PI/2,'resolved off-axis rays retain their angular phase');
   }
 });

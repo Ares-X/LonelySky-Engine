@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { randomFromSeed } from '../random.js';
+import { describeGalaxyAppearance } from './galaxy-appearance.js';
 
 // A bounded emission integral through a real ellipsoid, not a camera-facing
 // painted galaxy. All materials share the same shader program and geometry.
@@ -29,12 +30,24 @@ const fragmentShader = /* glsl */`
   uniform vec3 localCamera;uniform vec3 shapeScale;uniform vec3 tint;
   uniform float radius;uniform float thickness;uniform float arms;uniform float pitch;
   uniform float morphology;uniform float asymmetry;uniform float bar;uniform float brightness;
+  uniform float armStrength;uniform float coreStrength;uniform float dustStrength;uniform float haloStrength;
+  uniform float bridgeStrength;uniform float knotScale;uniform float youngStrength;uniform float emissionStrength;
   uniform sampler2D structureNoise;uniform vec2 noiseOffset;
   uniform int steps;uniform vec2 quadrature[48];uniform vec2 coreQuadrature[48];
-  float armDensity(vec2 p,float width,float footprint){
+  float armLobe(float angularOffset,float width,float angularVariance,float period){
+    float sigma=sqrt(width*width+angularVariance);
+    // Adjacent periods keep the convolution continuous at the phase seam.
+    // Scaling by width/sigma preserves the original arm's integrated light.
+    vec3 offsets=vec3(angularOffset-period,angularOffset,angularOffset+period)/sigma;
+    vec3 lobes=exp(-.5*offsets*offsets);
+    float filtered=dot(lobes,vec3(1.))*width/sigma;
+    float mean=width*arms*.3989422804;
+    return mix(filtered,mean,smoothstep(.3,.55,sigma/period));
+  }
+  vec2 armDensities(vec2 p,float width,float footprint){
     float r=length(p);
     // The axis has no angular phase; its disk contribution is masked below.
-    if(r<=.000001) return width*arms*.3989422804;
+    if(r<=.000001) return vec2(width*arms*.3989422804,width*.24*arms*.3989422804);
     float theta=atan(p.y,p.x);
     // Exact centre phase used by sampleGalaxy: theta=arm*TAU/arms+log(r+.06)/pitch.
     float phase=(theta-log(r+.06)/pitch)*arms;
@@ -42,18 +55,40 @@ const fragmentShader = /* glsl */`
     // Mips only filter the dust texture, not this analytic atan/log phase.
     // Approximate the ray/pixel box footprint by a Gaussian of equal variance.
     // The logarithmic radial and angular gradients are orthogonal.
-    float angularGradient=sqrt(1./max(r*r,.000001)+1./pow(pitch*(r+.06),2.));
-    float sigma=sqrt(width*width+pow(footprint*angularGradient,2.)/12.);
+    float radialSlope=pitch*(r+.06);
+    float angularVariance=footprint*footprint*(1./max(r*r,.000001)+1./(radialSlope*radialSlope))/12.;
     float period=6.28318530718/arms;
-    // Adjacent periods keep the convolution continuous at the phase seam.
-    // Scaling by width/sigma preserves the original arm's integrated light.
-    vec3 offsets=vec3(angularOffset-period,angularOffset,angularOffset+period)/sigma;
-    vec3 lobes=exp(-.5*offsets*offsets);
-    float filtered=dot(lobes,vec3(1.))*width/sigma;
-    float mean=width*arms*.3989422804;
-    // A footprint spanning many arms has no resolvable phase. The exact mean
-    // also avoids truncating the periodic Gaussian's far tails at large sigma.
-    return mix(filtered,mean,smoothstep(.3,.55,sigma/period));
+    // The former mat2(cos(a),-sin(a),sin(a),cos(a)) rotates by -a.
+    // Rotation preserves r and its footprint; only the wrapped phase shifts.
+    float laneOffset=angularOffset-.075;
+    laneOffset-=floor(laneOffset/period+.5)*period;
+    return vec2(armLobe(angularOffset,width,angularVariance,period),armLobe(laneOffset,width*.24,angularVariance,period));
+  }
+  // Analytic foreground extinction through a finite radial dust sheet. The
+  // Lorentzian column has a stable grazing limit and needs no extra ray steps.
+  // Only this volume's emission is absorbed; empty sky remains untouched.
+  float dustTransmission(vec3 q){
+    if(dustStrength<=0.) return 1.;
+    vec3 p=q*shapeScale,camera=localCamera*shapeScale;
+    vec3 delta=camera-p;float reach=length(delta);
+    vec3 direction=delta/max(reach,.000001);
+    // The sheet ends at the existing support sphere. Moving the observer
+    // farther along the same external ray cannot add fictitious foreground dust.
+    float b=dot(p,direction);
+    float supportReach=max(0.,-b+sqrt(max(0.,b*b+1.-dot(p,p))));
+    reach=min(reach,supportReach);camera=p+direction*reach;
+    float sheet=max(thickness*.3,.008);
+    float column;
+    if(abs(direction.y)<.0001) column=reach/(1.+(p.y/sheet)*(p.y/sheet));
+    else column=sheet*(atan(camera.y/sheet)-atan(p.y/sheet))/direction.y;
+    float crossing=abs(direction.y)<.0001?reach*.5:clamp(-p.y/direction.y,0.,reach);
+    vec3 sheetPoint=p+direction*crossing;
+    float radial=exp(-length(sheetPoint.xz)*2.2);
+    return exp(-clamp(max(0.,column)*radial*dustStrength*6.,0.,12.));
+  }
+  vec3 islandCenter(float k){
+    float theta=k*2.1+asymmetry;
+    return vec3(cos(theta)*(.2+k*.17),(k-1.)*.12,sin(theta)*(.2+k*.17));
   }
   vec4 density(vec3 q,float footprint){
     float edge=1.-smoothstep(.8,1.,length(q));
@@ -61,53 +96,97 @@ const fragmentShader = /* glsl */`
     vec3 p=q*shapeScale;
     if(morphology<.5){
       float r=length(p.xz);
-      // Two coherent texture samples create spatially stable dusty gaps and
-      // knots. No per-step hash noise, frame noise or additional scene layers.
-      float coarseLod=max(0.,log2(max(1.,footprint*64.*.11)));
-      float fineLod=max(0.,log2(max(1.,footprint*64.*.73)));
-      float coarse=textureLod(structureNoise,p.xz*.11+noiseOffset,coarseLod).r;
-      float fine=textureLod(structureNoise,p.xz*.73+noiseOffset.yx+vec2(.37,.19),fineLod).r;
-      float angleWarp=(coarse-.5)*.1,radialWarp=1.+(fine-.5)*.045;
+      // Resolved stellar mottling lies inside a continuous arm envelope. The
+      // former low-frequency multiplicative gates broke arms into large beads.
+      // Both existing texture fetches remain mip-filtered in world coordinates.
+      float coarseLod=max(0.,log2(max(1.,footprint*64.*.31)));
+      float fineLod=max(0.,log2(max(1.,footprint*64.*1.71)));
+      float coarse=textureLod(structureNoise,p.xz*.31+noiseOffset,coarseLod).r;
+      float fine=textureLod(structureNoise,p.xz*1.71+noiseOffset.yx+vec2(.37,.19),fineLod).r;
+      float angleWarp=(coarse-.5)*.035,radialWarp=1.+(fine-.5)*.012;
       mat2 warp=mat2(cos(angleWarp),-sin(angleWarp),sin(angleWarp),cos(angleWarp));
       vec2 armPoint=warp*p.xz*radialWarp;
-      float width=.085+.1*clamp((coarse-.25)*2.,0.,1.);
+      float width=.27+.035*clamp((coarse-.25)*2.,0.,1.);
       float vertical=p.y/(thickness*(.4+r));
       float disk=exp(-r*2.8)*exp(-.5*vertical*vertical);
-      float arm=armDensity(armPoint,width,footprint*radialWarp);
+      vec2 armPair=armDensities(armPoint,width,footprint*radialWarp);
       if(bar>.5){
         vec2 unbarred=armPoint/vec2(1.6,.45);
         float inside=1.-smoothstep(.27,.31,length(unbarred));
-        arm=mix(arm,armDensity(unbarred,width,footprint*radialWarp/.45),inside);
+        if(inside>0.) armPair=mix(armPair,armDensities(unbarred,width,footprint*radialWarp/.45),inside);
       }
-      float outer=smoothstep(.3,.85,r);
-      float knots=smoothstep(.3,.72,coarse*.55+fine*.45);
-      // Fine dust modulates a connected arm instead of gating it into blobs.
-      float breakup=mix(.65+coarse*.7,.35+.65*knots,outer);
-      float dust=.18+.82*smoothstep(.32,.62,coarse*.35+fine*.65);
-      float armLight=arm*(.3+1.5*knots)*dust*breakup*(1.-smoothstep(.48,.96,r));
-      float amount=edge*disk*(.035+2.1*armLight)*smoothstep(.025,.08,r);
+      float arm=armPair.x,lane=armPair.y;
+      float mottling=.78+.4*smoothstep(.26,.73,fine);
+      float laneShadow=1.-.58*clamp(lane,0.,1.)*(.65+.35*coarse);
+      float armLight=arm*(.86+.28*coarse)*mottling*laneShadow*(1.-smoothstep(.63,.98,r));
+      // A dim inter-arm population joins the arms without lifting empty sky.
+      // Additional taper avoids thick, equally bright edges in grazing views.
+      float height=p.y/(thickness*.65);
+      float taper=exp(-r*r*1.5)*exp(-.5*height*height);
+      float interarm=.15*(.85+.15*coarse);
+      float amount=edge*disk*taper*(interarm+armStrength*armLight)*smoothstep(.025,.08,r)*dustTransmission(q);
       float core=exp(-r*9.);
-      float cool=smoothstep(.6,.74,fine)*smoothstep(.3,.65,r)*.35;
+      float cool=smoothstep(.46,.68,fine)*smoothstep(.2,.6,r)*youngStrength;
       vec3 population=mix(vec3(1.),vec3(.79,.9,1.12),cool);
       population=mix(population,vec3(1.12,.94,.74),core);
       return vec4(tint*population,amount);
     }
     if(morphology<1.5) return vec4(0.);
-    float result=0.;
+    // The same tiny repeat texture resolves three-dimensional dusty pockets,
+    // not three equal smooth Gaussian lamps. Two fetches per density sample.
+    vec2 dustPlane=p.xz+p.y*vec2(.37,.71);
+    float cloudLod=max(0.,log2(max(1.,footprint*64.*.9)));
+    float grainLod=max(0.,log2(max(1.,footprint*64.*2.7)));
+    float cloud=textureLod(structureNoise,dustPlane*.9+noiseOffset,cloudLod).r;
+    float grain=textureLod(structureNoise,dustPlane*2.7+noiseOffset.yx+vec2(.23,.61),grainLod).r;
+    cloud=clamp((cloud-.5)*2.8+.5,0.,1.);
+    grain=clamp((grain-.5)*4.+.5,0.,1.);
+    float structure=.2+1.25*smoothstep(.35,.65,cloud*.55+grain*.45);
+    float pockets=1.-.72*smoothstep(.51,.68,cloud)*(1.-smoothstep(.37,.57,grain));
+    float result=0.;float knots=0.;
     for(int knot=0;knot<3;knot++){
-      float k=float(knot);float theta=k*2.1+asymmetry;
-      vec3 center=vec3(cos(theta)*(.2+k*.17),(k-1.)*.12,sin(theta)*(.2+k*.17));
-      vec3 delta=(p-center)/vec3(.17,thickness,.19);
-      result+=exp(-.5*dot(delta,delta))*.44;
+      float k=float(knot);vec3 center=islandCenter(k);
+      float individuality=.78+.22*cos(k*2.4+asymmetry*2.);
+      float islandWeight=.65+.35*sin(k*2.3+asymmetry*4.);
+      vec3 delta=(p-center)/(vec3(.17,thickness*.5,.19)*knotScale*individuality);
+      delta.x+=.28*sin(delta.z*2.1+k);
+      float island=exp(-.5*dot(delta,delta));
+      knots+=island;
+      // An offset dense subcluster gives the smaller nursery knots internal
+      // asymmetry. Its envelope stays bounded by the same support sphere.
+      vec3 subcluster=delta-vec3(.7*cos(k*2.7),.4*sin(k*1.3),.6);
+      float detail=exp(-dot(subcluster,subcluster)*2.2)*youngStrength;
+      result+=(island+detail)*islandWeight*.85*structure*pockets/sqrt(knotScale);
+      if(knot<2){
+        vec3 next=islandCenter(k+1.);vec3 span=next-center;
+        float along=clamp(dot(p-center,span)/max(dot(span,span),.000001),0.,1.);
+        vec3 bridge=(p-center-span*along)/vec3(.035,.045,.035);
+        result+=bridgeStrength*exp(-.5*dot(bridge,bridge))*max(0.,sin(along*3.14159265359));
+      }
     }
-    return vec4(tint,edge*result);
+    result+=haloStrength*exp(-dot(p,p)*5.)*.035;
+    vec3 population=mix(vec3(1.08,.96,.84),vec3(.64,.85,1.32),clamp(knots*youngStrength,0.,1.));
+    return vec4(tint*population,edge*result);
   }
-  vec3 coreEmission(vec3 q){
+  vec3 coreEmission(vec3 q,float footprint){
     float edge=1.-smoothstep(.8,1.,length(q));
-    if(morphology>.5) return tint*edge*exp(-length(q)*5.8)*1.8;
+    if(morphology>.5){
+      float stellarRadius=length(q);
+      vec2 stellarPlane=q.xz+q.y*vec2(.41,.63);
+      float stellarLod=max(0.,log2(max(1.,footprint*64.*1.1)));
+      float stellarGrain=textureLod(structureNoise,stellarPlane*1.1+noiseOffset,stellarLod).r;
+      float compactCore=exp(-stellarRadius*8.5)*coreStrength;
+      float envelope=exp(-stellarRadius*3.5)*haloStrength*.03;
+      return tint*edge*(compactCore+envelope)*(.7+.6*stellarGrain);
+    }
     vec3 p=q*shapeScale;
     float bulge=exp(-length(p*vec3(1.,1./.52,1.))*8.);
-    return tint*mix(vec3(1.),vec3(1.12,.94,.74),exp(-length(p.xz)*9.))*edge*bulge*1.8;
+    float halo=exp(-dot(q,q)*4.)*haloStrength*.045;
+    // A real oriented stellar bar, in the exact local x-long / z-short frame
+    // already used by the unchanged particle generator's central bar.
+    vec3 barMetric=p/vec3(.36,.055,.07);
+    float stellarBar=bar*exp(-.5*dot(barMetric,barMetric))*1.6;
+    return tint*mix(vec3(1.),vec3(1.12,.94,.74),exp(-length(p.xz)*9.))*edge*(bulge*coreStrength+halo+stellarBar)*dustTransmission(q);
   }
   void main(){
     vec3 direction=normalize(localExit-localCamera);
@@ -130,7 +209,9 @@ const fragmentShader = /* glsl */`
         vec3 q=localCamera+direction*distanceAlongRay;
         float trueDistance=distanceAlongRay*physicalSpeed*radius;
         float visibility=1.-smoothstep(420000.,520000.,trueDistance);
-        vec4 light=density(q,max(binFootprint,angularFootprint*distanceAlongRay));
+        float sampleFootprint=max(binFootprint,angularFootprint*distanceAlongRay);
+        if(morphology>=1.5) sampleFootprint=max(sampleFootprint,physicalSpeed*rayRange*2./float(steps));
+        vec4 light=density(q,sampleFootprint);
         emission+=light.rgb*light.a*visibility*physicalSpeed*rayRange*node.y;
       }
     }
@@ -148,13 +229,13 @@ const fragmentShader = /* glsl */`
         vec2 node=coreQuadrature[i];float u=node.x;
         vec2 distanceAlongRay=vec2(center)-vec2(reach.x,-reach.y)*u*u;
         vec2 visibility=1.-smoothstep(vec2(420000.),vec2(520000.),distanceAlongRay*physicalSpeed*radius);
-        vec3 nearCore=coreEmission(localCamera+direction*distanceAlongRay.x);
-        vec3 farCore=coreEmission(localCamera+direction*distanceAlongRay.y);
+        vec3 nearCore=coreEmission(localCamera+direction*distanceAlongRay.x,max(binFootprint,angularFootprint*distanceAlongRay.x));
+        vec3 farCore=coreEmission(localCamera+direction*distanceAlongRay.y,max(binFootprint,angularFootprint*distanceAlongRay.y));
         emission+=(nearCore*reach.x*visibility.x+farCore*reach.y*visibility.y)*2.*u*node.y*physicalSpeed;
       }
     }
     // Restrained warm-white emission; no chromatic fog or time-dependent noise.
-    gl_FragColor=vec4(emission*2.4*brightness,1.);
+    gl_FragColor=vec4(emission*2.4*brightness*emissionStrength,1.);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
@@ -193,6 +274,7 @@ export function createGalaxyHaze({ seed = 'lonelysky' } = {}) {
     group.clear(); descriptors = next;
     for (const descriptor of descriptors) {
       const shape = galaxyHazeScale(descriptor);
+      const appearance = describeGalaxyAppearance(descriptor);
       const detail = randomFromSeed(`${descriptor.seed}:dust-offset-v1`);
       const material = new THREE.ShaderMaterial({
         uniforms: { localCamera: { value: new THREE.Vector3() }, shapeScale: { value: new THREE.Vector3(...shape) },
@@ -205,7 +287,9 @@ export function createGalaxyHaze({ seed = 'lonelysky' } = {}) {
         vertexShader, fragmentShader, side: THREE.BackSide, transparent: true,
         blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true,
       });
+      for (const name of ['armStrength', 'coreStrength', 'dustStrength', 'haloStrength', 'bridgeStrength', 'knotScale', 'youngStrength', 'emissionStrength']) material.uniforms[name] = { value: appearance[name] };
       const mesh = new THREE.Mesh(geometry, material); mesh.name = descriptor.id;
+      mesh.userData.appearance = appearance;
       mesh.rotation.fromArray(descriptor.orientation);
       mesh.scale.fromArray(shape).multiplyScalar(descriptor.radius);
       mesh.frustumCulled = false; group.add(mesh);
