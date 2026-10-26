@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { DEEP_SKY_GLSL, deepSkyUniforms, setDeepSkyEnvironment } from './deep-sky.js';
 
 const vertexShader = /* glsl */`
 varying vec3 vLocal;
@@ -23,6 +24,7 @@ const float BOUND = 8.0;
 const vec3 DISK_NORMAL = vec3(0.0, 0.92847669, 0.37139068);
 const vec3 DISK_X = vec3(1.0, 0.0, 0.0);
 const vec3 DISK_Y = vec3(0.0, 0.37139068, -0.92847669);
+${DEEP_SKY_GLSL}
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -37,17 +39,14 @@ float noise(vec2 p) {
 }
 
 vec3 sky(vec3 localDirection) {
-  vec3 d = normalize(uSkyRotation * normalize(mat3(uLocalToWorld) * localDirection));
+  vec3 worldDirection = normalize(mat3(uLocalToWorld) * localDirection);
+  // The escaped optical ray samples the same world-fixed radiance as the sky.
+  // Sky rotation/intensity belong only to the legacy photographic texture path.
+  if (!uHasSky) return deepSky(worldDirection);
+  vec3 d = normalize(uSkyRotation * worldDirection);
   vec2 uv = vec2(atan(d.z, d.x) / (2.0 * PI) + 0.5,
     asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
-  if (uHasSky) return texture2D(uSky, uv).rgb * uSkyIntensity;
-  // A deliberately quiet fallback; the caller's shared sky gives seamless lensing.
-  vec2 grid = uv * vec2(1800.0, 900.0);
-  vec2 cell = floor(grid), f = fract(grid) - 0.5;
-  float star = (1.0 - smoothstep(0.0, 0.05, length(f))) * step(0.997, hash(cell));
-  float dust = noise(uv * vec2(23.0, 12.0) + uSeed);
-  return (vec3(0.0005, 0.0007, 0.0013) + vec3(0.001, 0.0018, 0.003) * dust
-    + vec3(0.6, 0.72, 0.9) * star) * uSkyIntensity;
+  return texture2D(uSky, uv).rgb * uSkyIntensity;
 }
 
 vec3 diskEmission(vec3 p, vec3 lightDirection) {
@@ -171,6 +170,7 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null } = 
   const numericSeed = typeof seed === 'number' ? seed : [...String(seed)]
     .reduce((value, character) => (value * 31 + character.charCodeAt(0)) | 0, 0);
   const uniforms = {
+    ...deepSkyUniforms(),
     visibility: { value: 1 },
     uCamera: { value: new THREE.Vector3(0, 0, 20) },
     uLocalToWorld: { value: new THREE.Matrix4() },
@@ -206,6 +206,12 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null } = 
     uniforms.visibility.value = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
   };
   group.userData.stats = { radius: safeRadius, boundRadius: safeRadius * 8, steps: 120, opticalApproximation: true };
+  group.userData.setEnvironment = (environment, quiet = 0) => {
+    if (disposed || !environment) return;
+    setDeepSkyEnvironment(uniforms, environment, quiet);
+    // An explicit shared environment supersedes any caller-supplied legacy map.
+    uniforms.uHasSky.value = false;
+  };
   group.userData.setSkyTransform = (matrix3, intensity = 1) => {
     if (disposed) return;
     if (matrix3?.isMatrix3) uniforms.uSkyRotation.value.copy(matrix3);

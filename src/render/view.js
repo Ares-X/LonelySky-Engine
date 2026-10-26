@@ -11,6 +11,7 @@ import { planetMaterial, atmosphereMaterial, ringMaterial, starMaterial } from '
 import { createNebula } from './nebula.js';
 import { createBlackHole } from './blackhole.js';
 import { createCosmos } from './cosmos.js';
+import { createDeepSky } from './deep-sky.js';
 
 const QUALITIES = new Set(['auto', 'low', 'high']);
 function checkQuality(value) {
@@ -86,7 +87,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(55, 1, .5, 220000);
   scene.add(camera);
   const resources = [], chunks = new Map();
-  let renderer, composer, bloom, stars, cosmos, sphere, distantSphere, ringGeometry, glow, fallbackTexture;
+  let renderer, composer, bloom, stars, sky, cosmos, sphere, distantSphere, ringGeometry, glow, fallbackTexture;
   let disposed = false, running = false, lost = false, resumeAfterRestore = false, raf = null;
   let width = 1, height = 1, sectorIndex = 0, loadedIndex = -1, loadedRevision, time = 0, epoch = null;
   const cameraPosition = new THREE.Vector3(), bodyPosition = new THREE.Vector3();
@@ -196,6 +197,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     time = elapsedTime;
     scene.updateMatrixWorld(true); camera.getWorldPosition(cameraPosition);
     stars.position.copy(cameraPosition);
+    sky.position.copy(cameraPosition);
     cosmos.userData.update({ sectorIndex, cameraPosition: cameraPosition.toArray(), quality, viewportHeight: height, pixelRatio: renderer.getPixelRatio() });
     for (const chunk of chunks.values()) {
       const nebula = chunk.userData.nebula;
@@ -281,6 +283,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     ringGeometry = own(new THREE.RingGeometry(1.18, 2.26, 256, 1)); glow = own(createGlow());
     fallbackTexture = own(new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1)); fallbackTexture.needsUpdate = true;
     stars = createStarfield(universe.seed); own(stars.geometry); own(stars.material); scene.add(stars);
+    sky = createDeepSky(); resources.push(() => sky.userData.dispose()); scene.add(sky);
     cosmos = createCosmos({ seed: universe.seed }); resources.push(() => cosmos.userData.dispose()); scene.add(cosmos);
     composer = own(new EffectComposer(renderer));
     const renderPass = own(new RenderPass(scene, camera)); bloom = own(new UnrealBloomPass(new THREE.Vector2(1, 1), .32, .65, 1));

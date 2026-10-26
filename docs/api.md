@@ -96,6 +96,14 @@ responsibility.
   Nebula update also accepts visibility; black holes expose `setVisibility`
   and `setSkyTransform`. Shared noise survives until its final user releases it.
   Injected sky textures remain caller-owned.
+- `createDeepSky()` creates the directional background also sampled by the
+  default black-hole lens. Pass the same trusted environment to
+  `sky.userData.update(environment, quiet)` and
+  `hole.userData.setEnvironment(environment, quiet)` to customize both. The
+  environment contains finite `ambientTint` RGB and unit `bandNormal` arrays,
+  plus finite `skyBrightness`, `bandStrength`, and `starDensity` values. An
+  explicit environment supersedes the legacy photographic sky texture path.
+  Both groups expose idempotent `userData.dispose()`.
 - `createCosmos({seed})` creates sparse spiral, elliptical and irregular galaxies.
   Its update takes `{sectorIndex, cameraPosition, viewportHeight, pixelRatio,
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions

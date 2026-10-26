@@ -148,3 +148,33 @@ test('haze replacement releases old materials and retains noise until final disp
     assert.equal(haze.children.length, 0);
   } finally { haze.userData.dispose(); }
 });
+
+test('black-hole lens and directional background share independent environment uniforms', async () => {
+  const { createDeepSky } = await import('../../src/render/deep-sky.js');
+  const hole = createBlackHole(), sky = createDeepSky();
+  const environment = { ambientTint: [.6, .7, .8], bandNormal: [.6, .8, 0], skyBrightness: .02, bandStrength: .4, starDensity: .5 };
+  const source = hole.children[0].material.uniforms, background = sky.children[0].material.uniforms;
+  try {
+    for (const quiet of [0, .5, 1]) {
+      hole.userData.setEnvironment(environment, quiet); sky.userData.update(environment, quiet);
+      for (const key of ['uSkyTint', 'uSkyBandNormal', 'uSkyBrightness', 'uSkyBandStrength', 'uSkyStarDensity']) {
+        const a = source[key].value, b = background[key].value;
+        assert.deepEqual(a.toArray?.() ?? a, b.toArray?.() ?? b);
+      }
+    }
+    environment.ambientTint[0] = 0;
+    assert.equal(source.uSkyTint.value.r, .6);
+    assert.notEqual(source.uSkyTint.value, background.uSkyTint.value);
+  } finally { hole.userData.dispose(); sky.userData.dispose(); }
+});
+
+test('directional sky releases resources once and ignores updates after disposal', async () => {
+  const { createDeepSky } = await import('../../src/render/deep-sky.js');
+  const sky = createDeepSky(), mesh = sky.children[0];
+  const geometryReleased = disposalCount(mesh.geometry), materialReleased = disposalCount(mesh.material);
+  const before = mesh.material.uniforms.uSkyBrightness.value;
+  sky.userData.dispose(); sky.userData.dispose();
+  sky.userData.update({ ambientTint: [1, 1, 1], bandNormal: [1, 0, 0], skyBrightness: 8, bandStrength: 1, starDensity: 1 });
+  assert.equal(geometryReleased(), 1); assert.equal(materialReleased(), 1);
+  assert.equal(mesh.material.uniforms.uSkyBrightness.value, before);
+});
