@@ -114,6 +114,27 @@ Use `setQuality('low' | 'auto' | 'high')`, position the camera yourself, or call
 `render(timeInSeconds)` from your own animation loop. Individual materials and
 volumes are also exported from `src/three.js`.
 
+### Stellar illumination
+
+`setStellarLighting(material, lights, occluders = [])` updates planet, atmosphere
+and ring materials with at most two independent colored sources and two spherical
+occluders. Each light supplies `{ offset: [x,y,z], color, intensity, radius }`;
+occluders supply `{ offset: [x,y,z], radius }`. Offsets use world axes relative to
+the receiving planet's center, so floating-origin translations do not change the
+lighting. Sample both emitters and receivers at the same simulation time. Colors
+are 24-bit sRGB integers; intensity is scene exposure, not SI luminosity.
+
+`setPlanetRingShadow(planetMaterial, { normal, texture, seed, enabled: true })`
+adds the matching annular shadow for a ring with inner/outer radius 1.18/2.26 times
+the planet radius. Supply the actual world-axis ring normal and the same borrowed
+alpha texture and seed as `ringMaterial`. Neither setter owns texture disposal.
+
+The adapter preserves existing directional `lightDir` behavior until the stellar
+setter is called. An empty light list explicitly removes direct illumination.
+Finite-source eclipses and three-sample ring penumbrae are bounded approximations;
+they do not add shadow-map passes or simulate multiple scattering. Source discovery
+and exposure selection remain the consuming world's responsibility.
+
 ## Documentation
 
 - [Generation, rendering and lifecycle API](docs/api.md)
