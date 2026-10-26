@@ -23,11 +23,11 @@ function evaluate(source,values={}) {
 }
 
 test('planet limb and atmosphere remain finite at float32 facing extrema', () => {
-  const planet=planetMaterial({kind:'gas',seed:1,radius:1750,colorA:0xb9a078,colorB:0xf2dfbc});
+  const planet=planetMaterial({kind:'gas',seed:1,radius:100,colorA:0x668899,colorB:0xaabbcc});
   const atmosphere=atmosphereMaterial(0x72bded);
   try {
-    // Opening Saturn's world-space direction. The rounded self dot exceeds one.
-    const n=normalize([-1700,800,4800]);
+    // Independent integer-vector fixture; the rounded self dot exceeds one.
+    const n=normalize([1,1,4]);
     assert.equal(dot(n,n),1.0000001192092896);
     assert.ok(Number.isNaN(pow(f(1-dot(n,n)),4.5)),'fixture reaches the old invalid pow domain');
     const limb=expression(planet.fragmentShader,'limb');
