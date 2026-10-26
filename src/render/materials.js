@@ -94,7 +94,8 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
         float diffuse=max(light,0.);vec3 color=base*(.0025+day*(.045+pow(diffuse,.8)*1.15));
         if(kind==4&&!hasSurface)color+=colorB*pow(1.-abs(sin(fbm(p*5.+seed)*32.)),23.)*.3;
         if(kind==1){float spec=pow(max(dot(reflect(-normalize(lightDir),n),view),0.),75.);color+=spec*.12*day;}
-        float limb=pow(1.-max(dot(n,view),0.),4.5)*day;
+        // Normalized float vectors can still produce a dot slightly above one.
+        float limb=pow(1.-clamp(dot(n,view),0.,1.),4.5)*day;
         if(kind==1||kind==0)color+=vec3(.13,.27,.39)*limb*.5;
         gl_FragColor=vec4(color,visibility);
         #include <tonemapping_fragment>
@@ -108,7 +109,7 @@ export function atmosphereMaterial(color,lightDirection=new THREE.Vector3(-1,.4,
   return new THREE.ShaderMaterial({uniforms:{visibility:{value:1},tint:{value:new THREE.Color(color).lerp(new THREE.Color(0x72bded),.15)},lightDir:{value:lightDirection.clone().normalize()}},vertexShader:sphereVertex,
     fragmentShader:/* glsl */`
       varying vec3 vNormalWorld,vWorld;uniform vec3 tint,lightDir;uniform float visibility;
-      void main(){vec3 n=normalize(vNormalWorld);float facing=abs(dot(n,normalize(cameraPosition-vWorld)));float optical=pow(1.-facing,4.);float day=smoothstep(-.2,.4,dot(n,lightDir));gl_FragColor=vec4(tint*(.4+day*.8),optical*day*.18*visibility);
+      void main(){vec3 n=normalize(vNormalWorld);float facing=clamp(abs(dot(n,normalize(cameraPosition-vWorld))),0.,1.);float optical=pow(1.-facing,4.);float day=smoothstep(-.2,.4,dot(n,lightDir));gl_FragColor=vec4(tint*(.4+day*.8),optical*day*.18*visibility);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
