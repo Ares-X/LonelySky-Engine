@@ -27,7 +27,7 @@ import map. There is no AI service, account requirement, or runtime backend.
 | Generation | Seeded sectors, five planet types, rings, stars, binaries, nebulae and black holes |
 | Rendering | Procedural planet surfaces, atmospheres, rings, volumetric nebulae and black holes, sparse 3D galaxies, bloom |
 | Streaming | 125 neighboring cells, continuous distance fading, floating-origin coordinates, quality levels |
-| Simulation | Deterministic addresses and random streams, softened gravity, continuous sphere collision and safe-pose recovery |
+| Simulation | Elliptic Kepler orbits, sampled gravity, continuous moving-sphere collision and safe-pose recovery |
 
 ## Live showcase
 
@@ -78,6 +78,13 @@ const acceleration = gravity.sample(address, [0, 0, 0]);
 The same seed and options reproduce the same sectors, independent of visit order.
 `getSector()` returns scene data; `sector()` returns spheres for physics.
 `density` controls local content; distant star and galaxy backgrounds are separate.
+
+Version 0.3 adds stateless `evaluateOrbit` and `evaluateBodyState` helpers. A custom
+physics provider can attach an elliptic `orbit` to a body whose `position` is its
+fixed focus; gravity, collision and application visuals sample the same time.
+Units are caller-defined and must be consistent. These are two-body orbits, not
+an N-body ephemeris. The stock rendering example remains static; see the
+[orbital API and bounds](docs/api.md#elliptic-orbital-mechanics-03).
 
 ### Put it on screen
 

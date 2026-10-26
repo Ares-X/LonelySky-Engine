@@ -4,3 +4,4 @@ export * from './gravity.js';
 export * from './collision.js';
 export * from './generator.js';
 export * from './streaming.js';
+export * from './orbits.js';
