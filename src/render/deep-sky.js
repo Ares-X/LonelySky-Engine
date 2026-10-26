@@ -1,5 +1,14 @@
 import * as THREE from 'three';
 
+// The compact power-ten spark kernel has this mean over a unit lattice cell:
+// 4*pi*integral(r^2 * (1 - 2.1*r)^10, r=0..1/2.1).
+export const DEEP_SKY_SPARK_FILTER = Object.freeze({
+  mean: 8 * Math.PI / (2.1 ** 3 * 11 * 12 * 13),
+  densityWidth: .0002,
+  resolvedFootprint: .06,
+  unresolvedFootprint: .3,
+});
+
 // Shared directional radiance for the sky and black-hole lens. World geometry
 // owns its orientation and density; time and camera turning never reseed it.
 export const DEEP_SKY_GLSL = /* glsl */`
@@ -24,7 +33,15 @@ vec3 deepSky(vec3 direction) {
   // Very faint unresolved points keep a lens from showing a painted photograph.
   vec3 cell=floor(d*720.); float star=skyHash(cell);
   float spark=pow(max(0.,1.-length(fract(d*720.)-.5)*2.1),10.);
-  sky+=vec3(.55,.63,.7)*spark*step(1.-uSkyStarDensity*.009,star)*.22;
+  float probability=clamp(uSkyStarDensity,0.,1.)*.009;
+  float densityWidth=min(${DEEP_SKY_SPARK_FILTER.densityWidth},probability);
+  float population=probability>0.?smoothstep(1.-probability-densityWidth,1.-probability+densityWidth,star):0.;
+  // Filter only unresolved spark detail. Clouds and the stellar band retain
+  // their directional radiance; no clock or screen-space random pattern enters.
+  float footprint=length(fwidth(d*720.));
+  float resolved=1.-smoothstep(${DEEP_SKY_SPARK_FILTER.resolvedFootprint},${DEEP_SKY_SPARK_FILTER.unresolvedFootprint},footprint);
+  float filteredSpark=mix(${DEEP_SKY_SPARK_FILTER.mean}*probability,spark*population,resolved);
+  sky+=vec3(.55,.63,.7)*filteredSpark*.22;
   return sky;
 }`;
 

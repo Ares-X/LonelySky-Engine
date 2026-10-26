@@ -86,6 +86,11 @@ Units are caller-defined and must be consistent. These are two-body orbits, not
 an N-body ephemeris. The stock rendering example remains static; see the
 [orbital API and bounds](docs/api.md#elliptic-orbital-mechanics-03).
 
+Version 0.3.1 filters unresolved stellar detail during camera motion and preserves
+integrated light for small star points. Gravity samples also expose the strongest
+source's detached position and velocity in the caller's local coordinate frame,
+so applications can distinguish infall from outward motion around moving bodies.
+
 ### Put it on screen
 
 Configure `three` and `three/addons/` in your application's import map, as shown in
