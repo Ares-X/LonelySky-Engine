@@ -146,3 +146,9 @@ Source code: [Apache-2.0](LICENSE), with attribution in [NOTICE](NOTICE).
 The gameplay screenshots depict separately credited artwork; see
 [showcase credits](docs/showcase-credits.md). Game textures are not distributed
 as engine runtime assets.
+
+Version 0.3.2 keeps the planet limb and atmosphere powers inside their defined
+floating-point domains, and removes undefined negative-base powers and the
+undefined central angular phase from galaxy haze. Generation seeds and saved
+coordinates are unchanged. Numerical shader tests cover float32 facing extrema,
+vertical disk symmetry and the finite axis limit; they are not a GPU emulator.

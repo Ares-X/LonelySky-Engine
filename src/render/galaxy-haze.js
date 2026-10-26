@@ -32,7 +32,10 @@ const fragmentShader = /* glsl */`
   uniform sampler2D structureNoise;uniform vec2 noiseOffset;
   uniform int steps;uniform vec2 quadrature[48];uniform vec2 coreQuadrature[48];
   float armDensity(vec2 p,float width,float footprint){
-    float r=length(p);float theta=atan(p.y,p.x);
+    float r=length(p);
+    // The axis has no angular phase; its disk contribution is masked below.
+    if(r<=.000001) return width*arms*.3989422804;
+    float theta=atan(p.y,p.x);
     // Exact centre phase used by sampleGalaxy: theta=arm*TAU/arms+log(r+.06)/pitch.
     float phase=(theta-log(r+.06)/pitch)*arms;
     float angularOffset=atan(sin(phase),cos(phase))/arms;
@@ -68,7 +71,8 @@ const fragmentShader = /* glsl */`
       mat2 warp=mat2(cos(angleWarp),-sin(angleWarp),sin(angleWarp),cos(angleWarp));
       vec2 armPoint=warp*p.xz*radialWarp;
       float width=.085+.1*clamp((coarse-.25)*2.,0.,1.);
-      float disk=exp(-r*2.8)*exp(-.5*pow(p.y/(thickness*(.4+r)),2.));
+      float vertical=p.y/(thickness*(.4+r));
+      float disk=exp(-r*2.8)*exp(-.5*vertical*vertical);
       float arm=armDensity(armPoint,width,footprint*radialWarp);
       if(bar>.5){
         vec2 unbarred=armPoint/vec2(1.6,.45);
