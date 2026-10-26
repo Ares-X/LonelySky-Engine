@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { NEBULA_APPEARANCE_FAMILIES } from './nebula-appearance.js';
 
 let sharedNoise = null, noiseUsers = 0;
 
@@ -57,7 +58,9 @@ uniform sampler3D uNoise;
 uniform vec3 uCamera,uColorA,uColorB,uNoiseOffset;
 uniform mat4 uLocalToWorld,uViewProjection;
 uniform float uVisibility,uDensity,uTime;
-uniform int uSteps,uMorphology;
+uniform int uSteps,uMorphology,uAppearance;
+uniform vec3 uLightDirection;
+uniform float uEmission,uScattering,uExcitation,uRimStrength,uExtinction,uPhase;
 const vec3 LIGHT=vec3(-0.650945,0.650945,0.390567);
 
 float field(vec3 p){
@@ -74,6 +77,14 @@ float field(vec3 p){
       // A disrupted ellipsoidal envelope with a hollow, dark interior.
       float r=length(q*vec3(1.0,1.6,1.25));
       shape=(1.0-smoothstep(0.055,0.23,abs(r-0.62)))*(0.36+eroded*0.64);
+      if(uAppearance==4){
+        // The optional shell has a genuinely empty cavity and a smooth outer rim;
+        // high-frequency displacement would turn this into disconnected blobs.
+        float shellRadius=length(p*vec3(1.0,1.6,1.25));
+        float shellOffset=(broad-0.5)*0.045+(fine-0.5)*0.012;
+        shape=(1.0-smoothstep(0.015,0.065,abs(shellRadius-0.62+shellOffset)))
+          *(0.52+eroded*0.3);
+      }
     }else if(uMorphology==2){
       // Three separated knots connected only by thin turbulent material.
       float a=length(q-vec3(-0.46,-0.19,0.04));
@@ -90,6 +101,19 @@ float field(vec3 p){
       float shell=1.0-smoothstep(0.026,0.12,abs(length(q*vec3(1.0,1.15,1.0))-0.65));
       float broken=smoothstep(0.38,0.65,broad+fine*0.13);
       shape=shell*broken*(0.34+eroded*0.7);
+      if(uAppearance==5){
+        // Thin shock fronts on a mostly open shell. Angular gaps and ridges reuse
+        // the same three noise samples; the old geometric family stays intact.
+        vec3 shock=p*vec3(1.0,1.15,1.0);
+        float radius=length(shock);
+        float theta=atan(shock.z,shock.x);
+        float latitude=asin(clamp(shock.y/max(radius,0.0001),-1.0,1.0));
+        float sectors=smoothstep(0.12,0.6,sin(theta*3.0+uPhase+(broad-0.5)*1.3));
+        float ridge=1.0-smoothstep(0.055,0.2,abs(sin(latitude*7.0+theta*2.0+(fine-0.5)*1.8)));
+        float shockOffset=(broad-0.5)*0.032+(fine-0.5)*0.01;
+        float front=1.0-smoothstep(0.012,0.06,abs(radius-0.65+shockOffset));
+        shape=front*sectors*ridge*(0.58+micro*0.5);
+      }
     }else if(uMorphology==5){
       float stream=length(vec2(q.y-0.23*sin(q.x*3.4),q.z+0.14*cos(q.x*2.5)));
       shape=(1.0-smoothstep(0.045,0.2,stream))*(0.24+eroded);
@@ -131,9 +155,15 @@ void main(){
     float distance=entry+(float(i)+0.5)*stepSize;
     vec3 p=uCamera+rd*distance;
     float rho=field(p);
+    if(uAppearance==4||uAppearance==5){
+      vec3 shellNormal=normalize(p*(uAppearance==4?vec3(1.0,2.56,1.5625):vec3(1.0,1.3225,1.0))+vec3(0.000001));
+      float limb=1.0-abs(dot(shellNormal,rd));
+      // Suppress front/back haze so the empty shell reads through its centre.
+      rho*=0.06+0.94*limb*limb;
+    }
     if(rho>0.012){
       if(firstCloud<0.0)firstCloud=distance;
-      float towardLight=field(p+LIGHT*0.13);
+      float towardLight=field(p+(uAppearance==0?LIGHT:uLightDirection)*0.13);
       float illumination=0.015+0.985*exp(-towardLight*12.0);
       float rim=clamp((rho-towardLight)*4.0,0.0,1.0);
       float structure=texture(uNoise,p*0.65+uNoiseOffset+vec3(0.11)).r;
@@ -141,9 +171,27 @@ void main(){
       vec3 source=tint*(0.025+illumination*1.3);
       source+=vec3(0.09,0.29,0.37)*rim*illumination*0.6;
       source+=vec3(0.62,0.29,0.07)*pow(rim,2.0)*0.15;
-      // Almost imperceptible excitation change; the cloud field itself never swims.
-      source*=0.97+0.03*sin(uTime*0.035+structure*6.0);
-      float opacity=1.0-exp(-rho*stepSize*uDensity*7.5);
+      if(uAppearance==0){
+        // Preserve the original appearance when no descriptor is supplied.
+        source*=0.97+0.03*sin(uTime*0.035+structure*6.0);
+      }else{
+        // Bounded display cues reuse density, rim and the existing structure sample.
+        // They suggest excitation and directional dust illumination, not transport.
+        float directional=0.3+0.7*pow(max(0.0,dot(-rd,uLightDirection)),2.0);
+        float excitation=0.65+uExcitation*smoothstep(0.32,0.76,structure);
+        float filament=uAppearance==5?0.5+0.5*smoothstep(0.38,0.7,structure+rim*0.16):1.0;
+        if(uAppearance==5){
+          float thermal=smoothstep(-0.2,0.35,sin(atan(p.z,p.x)*2.0+uPhase)+(structure-0.5));
+          tint=mix(uColorA,uColorB,thermal);
+        }
+        source=tint*(uEmission*excitation*filament+uScattering*illumination*directional);
+        source+=mix(uColorA,uColorB,0.75)*rim*uRimStrength*illumination;
+        // Thin shell fronts occupy few ray samples. A fixed bounded source gain
+        // reveals their muted colours without thickening or filling the cavity.
+        source*=uAppearance==5?3.0:uAppearance==4?2.0:1.0;
+        source*=0.99+0.01*sin(uTime*0.018+uPhase+structure*3.0);
+      }
+      float opacity=1.0-exp(-rho*stepSize*uDensity*7.5*uExtinction);
       color+=transmission*opacity*source;
       transmission*=1.0-opacity;
       if(transmission<0.025)break;
@@ -162,7 +210,20 @@ void main(){
 `;
 
 /** Bounded artistic dust/emission volume, fixed in the caller's floating origin. */
-export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1, seed = 1, morphology = 'columns' } = {}) {
+export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1, seed = 1, morphology = 'columns', appearance = null } = {}) {
+  const profile = appearance && Object.hasOwn(NEBULA_APPEARANCE_FAMILIES, appearance.family)
+    ? NEBULA_APPEARANCE_FAMILIES[appearance.family] : null;
+  const bounded = (key, fallback, min, max) => Number.isFinite(appearance?.[key])
+    ? Math.max(min, Math.min(max, appearance[key])) : fallback;
+  const lightDirection = new THREE.Vector3(-0.650945, 0.650945, 0.390567);
+  if (profile && Array.isArray(appearance.lightDirection) && appearance.lightDirection.length === 3
+    && appearance.lightDirection.every(Number.isFinite) && appearance.lightDirection.some(value => value !== 0)) {
+    // Scaling before normalization also keeps very large finite caller input finite.
+    const scale = Math.max(...appearance.lightDirection.map(Math.abs));
+    lightDirection.fromArray(appearance.lightDirection.map(value => value / scale)).normalize();
+  }
+  const palette = key => profile && Number.isInteger(appearance[key]) && appearance[key] >= 0 && appearance[key] <= 0xffffff
+    ? appearance[key] : profile?.[key] ?? (key === 'colorA' ? colorA : colorB);
   const group = new THREE.Group();
   group.name = 'Structured interstellar dust columns';
   const numericSeed = typeof seed === 'number' ? seed >>> 0 : [...String(seed)]
@@ -174,8 +235,8 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
   const uniforms = {
     uNoise: { value: texture },
     uCamera: { value: new THREE.Vector3() },
-    uColorA: { value: new THREE.Color(colorA) },
-    uColorB: { value: new THREE.Color(colorB) },
+    uColorA: { value: new THREE.Color(palette('colorA')) },
+    uColorB: { value: new THREE.Color(palette('colorB')) },
     uNoiseOffset: { value: new THREE.Vector3((numericSeed % 251) / 251, (numericSeed % 241) / 241, (numericSeed % 239) / 239) },
     uLocalToWorld: { value: new THREE.Matrix4() },
     uViewProjection: { value: new THREE.Matrix4() },
@@ -184,7 +245,20 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     uSteps: { value: 32 },
     uMorphology: { value: Math.max(0, ['columns', 'halo', 'knots', 'rift', 'shell', 'stream', 'wisps'].indexOf(morphology)) },
     uTime: { value: 0 },
+    uAppearance: { value: profile?.code ?? 0 },
+    uLightDirection: { value: lightDirection },
+    uEmission: { value: profile ? bounded('emission', profile.emission, 0, .6) : 0 },
+    uScattering: { value: profile ? bounded('scattering', profile.scattering, 0, 1) : 0 },
+    uExcitation: { value: profile ? bounded('excitation', profile.excitation, 0, .6) : 0 },
+    uRimStrength: { value: profile ? bounded('rimStrength', profile.rimStrength, 0, .5) : 0 },
+    uExtinction: { value: profile ? bounded('extinction', profile.extinction, .5, 2) : 1 },
+    uPhase: { value: profile ? bounded('phase', 0, 0, Math.PI * 2) : 0 },
   };
+  if (profile?.code === 3) {
+    uniforms.uEmission.value = 0; uniforms.uExcitation.value = 0;
+    uniforms.uScattering.value = Math.min(.035, uniforms.uScattering.value);
+    uniforms.uRimStrength.value = Math.min(.015, uniforms.uRimStrength.value);
+  }
   const geometry = new THREE.BoxGeometry(2, 2, 2);
   const material = new THREE.ShaderMaterial({
     glslVersion: THREE.GLSL3,

@@ -159,3 +159,21 @@ clusters. They share the existing volume and particle renderer. Appearance uses
 its own random stream, leaving galaxy addresses and particle prefixes unchanged.
 `describeGalaxyAppearance` exposes the structural controls and suggested local
 view offset/FOV; the application owns destinations, names and navigation.
+
+Version 0.5 adds optional astronomy-inspired appearance adapters. Natural planets
+with stable IDs can use ten seeded surface families through
+`describePlanetAppearance` / `PLANET_APPEARANCE_FAMILIES`; explicit texture maps,
+explicit procedural surfaces and home descriptors keep their existing behavior.
+`describeNebulaAppearance` selects emission, reflection, dark dust, planetary
+shell or supernova-remnant treatments. Pass its result as `appearance` to
+`createNebula`; omitting it retains the existing volume treatment.
+
+`createStellarRemnant(body)` renders a `stellarFamily` of `brown-dwarf`,
+`white-dwarf`, `neutron-star`, `pulsar` or `red-giant`. Supply a positive `radius`
+and optionally a `seed`, `color`, `phase`, `spinTilt` and `magneticTilt`. Place the
+returned group in your floating-origin scene, call
+`group.userData.update(celestialTime, camera, visibility, quality, reducedMotion)`
+each frame, and call `group.userData.dispose()` when removing it. The core uses
+the supplied body radius; coronae and beam illustrations are
+non-solid. The application owns world placement, encounters, catalogs and safety.
+These are bounded artistic shaders, not stellar evolution or radiation simulations.
