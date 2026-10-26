@@ -1,156 +1,136 @@
+<div align="center">
+
 # LonelySky Engine
 
-Version 0.1.0 is a small, dependency-free JavaScript core for a cell-based space
-simulation. It provides deterministic coordinates and random streams, a softened
-gravity field, and continuous point sweeps against sphere exclusion envelopes.
-The modules operate on plain data and run in Node.js or modern browsers.
+**A procedural universe, from a seed to a scene.**
 
-This release does not include a renderer, a complete procedural universe
-generator, game scenes, artwork, text, UI, networking, persistence, or a backend.
-Consumers own their content and supply the sphere descriptors used by physics.
+确定性宇宙生成 · 体积星云 · 行星与光环 · 黑洞 · 三维星系
 
-## Use
+[Play the full game / 在线体验](https://lonelysky.app/) · [Quick start](#quick-start) · [API](docs/api.md) · [中文说明](#中文说明)
 
-Clone this repository or include it as a Git submodule, then import its ESM entry
-point directly. No dependency installation or build is required. The package is
-marked `private` to prevent accidental npm publication; the source is public.
+[![Actual LonelySky gameplay](docs/assets/lonelysky-game.jpg)](https://lonelysky.app/)
 
-```js
-import {
-  CELL_SIZE, encodeCell, decodeCell, randomFromSeed,
-  createGravityField, createCollisionWorld,
-} from './engine/src/index.js';
+*Actual gameplay capture. The live showcase opens the normal LonelySky game.*
 
-const origin = encodeCell({ x: 0, y: 0, z: 0 });
-const random = randomFromSeed('example-world');
-console.log(decodeCell(origin), random(), CELL_SIZE);
+</div>
 
-// A provider returns only bodies in the requested cell, in that cell's axes.
-const spheres = [{
-  id: 'example-sphere', type: 'planet', radius: 100,
-  position: [0, 0, 0],
-}];
-const sector = index => index === origin ? spheres : [];
-const gravity = createGravityField({ sector });
-const collision = createCollisionWorld({ sector });
+LonelySky Engine creates reproducible space scenes from a seed and renders them
+with an optional Three.js adapter. Build an explorable universe, embed a space
+background, or use individual celestial materials in your own application.
 
-console.log(gravity.sample(origin, [-1000, 0, 0]));
-const motion = collision.move(
-  origin, [-300, 0, 0], [300, 0, 0], [600, 0, 0],
-);
-console.log(motion.position); // [-140, 0, 0]: stops at the default clearance
-```
+The pure JavaScript core runs without dependencies in Node.js and modern browsers.
+The optional renderer uses the application's existing Three.js installation or
+import map. There is no AI service, account requirement, or runtime backend.
 
-In a browser, use the same imports inside `<script type="module">` and serve the
-files over HTTP. The source does not access the DOM, WebGL, Node APIs or global
-random state. Modern JavaScript support, including `BigInt`, is required.
-
-## Data and coordinates
-
-`CELL_SIZE` is 20,000 caller-defined world units. Cell coordinates are integers
-from -16,384 through 16,383 on each axis. `encodeCell` zigzag-encodes those signed
-coordinates and interleaves 15 bits per axis into an exact JavaScript integer;
-`decodeCell` reverses it. Addresses range from zero through `MAX_SECTOR`
-(`2 ** 45 - 1`). `wrapCell` wraps an integer coordinate at the toroidal boundary.
-
-Local body positions use centered cell axes, normally within
-`[-CELL_SIZE / 2, CELL_SIZE / 2)`. Physics translates neighboring descriptors into
-the caller's coordinate frame. The caller handles its own floating-origin rebase
-by selecting a new cell address and translating its local pose.
-
-`hashSeed(string)` is a stable 32-bit FNV-1a hash over UTF-16 code units.
-`randomFromSeed(string | uint32)` returns an independent deterministic random
-function producing values in `[0, 1)`. It is for reproducible simulation and is
-not cryptographically secure. The engine has no built-in world seed or content.
-
-## Physics contract
-
-Both factories accept `{ sector }`, where `sector(index)` synchronously returns
-an array of spheres. A sphere has:
-
-| Field | Meaning |
+| Layer | Included |
 | --- | --- |
-| `position` | Three finite local coordinates, `[x, y, z]` |
-| `radius` | Positive finite body radius |
-| `type` | `planet`, `star`, or `black-hole`; other values use planet defaults |
-| `id`, `name` | Optional caller metadata, passed through in source/contact records |
-| `influence` | Optional positive gravity cutoff in world units |
-| `collisionClearance` | Optional finite envelope radius that can widen the default clearance |
+| Generation | Seeded sectors, five planet types, rings, stars, binaries, nebulae and black holes |
+| Rendering | Procedural planet surfaces, atmospheres, rings, volumetric nebulae and black holes, sparse 3D galaxies, bloom |
+| Streaming | 125 neighboring cells, continuous distance fading, floating-origin coordinates, quality levels |
+| Simulation | Deterministic addresses and random streams, softened gravity, continuous sphere collision and safe-pose recovery |
 
-The provider is a trusted simulation-data boundary: it must return valid,
-stable sphere data, including an empty array for empty cells. No identities or
-names are generated by the engine. Supply an explicit `type` for consistent
-metadata across gravity and collision results.
+## Live showcase
 
-`bodyGravity(body, position)` returns a softened inverse-square acceleration with
-a smooth finite cutoff. Defaults are tuned in world units, not SI units:
+**[Enter LonelySky →](https://lonelysky.app/)**
 
-| Type | Strength | Radius scale | Influence | Collision clearance |
-| --- | ---: | ---: | ---: | --- |
-| `planet` | 26 | 1 | 14,500 | `radius + max(40, radius * 0.025)` |
-| `star` | 75 | 2.5 | 16,000 | `radius * 1.6 + 80` |
-| `black-hole` | 180 | 3 | 18,000 | `radius * 3 + 100` |
+The showcase is the complete game, including its flight, cinematic cameras,
+home planets and social features. Those product features and the game's art
+direction are separate from this reusable engine. The SDK's default seed generates
+its own procedural world; it does not reproduce the game's authored opening,
+textures or private world configuration.
 
-`createGravityField().sample(index, position)` sums supplied sources, caps the
-total at `MAX_GRAVITY` (120), and returns `{ acceleration, magnitude, source }`.
-The strongest individual source is reported; an empty field has `source: null`.
+| Volumetric nebula | Black hole |
+| --- | --- |
+| [![Nebula in the full game](docs/assets/nebula-game.jpg)](https://lonelysky.app/) | [![Black hole in the full game](docs/assets/blackhole-game.jpg)](https://lonelysky.app/) |
 
-`createCollisionWorld().move(index, start, end, velocity)` sweeps continuously
-against sphere clearances. It stops inward motion while retaining available
-tangential motion. Exact tangency is traversable. It returns
-`{ position, velocity, contact, distance, corrected }`. `ensureSafe(index,
-position, velocity)` recovers a pose inside connected overlapping spheres without
-counting that correction as flown distance. Recovery retains its initial escape
-direction and queries newly reached cells along the connected overlap chain.
-`bodies(index)` returns copied
-neighborhood collision descriptors. `safeRadius` and `bodyCollisionRadius`
-expose the same clearance calculations used by collision.
+These are gameplay screenshots, not screenshots of the minimal integration
+example. [Showcase credits](docs/showcase-credits.md).
 
-Both systems cache up to 128 sector descriptors and query the surrounding 27
-cells. Collision splits long motion into segments of at most `CELL_SIZE / 4`.
-It processes at most 64 sweep events; remaining motion is discarded and marked
-`corrected` when that limit is reached. This bounds work and prevents teleporting
-past unchecked geometry, but very long requests may not reach their endpoint.
+## Quick start
 
-Recovery scans at most 64 steps of `CELL_SIZE / 4` and verifies the final pose.
-If an overlap chain cannot be exited within that bound, or the resulting pose
-remains inside a queried envelope, `ensureSafe` throws `RangeError`; `move`
-propagates that failure. Input vectors are unchanged and no recovered pose is
-returned as safe. Callers must handle this explicit failure and retain their last
-known safe pose or select a different valid spawn location.
+Clone the source or use it as a Git submodule. The package remains source-only
+and is not published to npm.
 
-Keep gravity influence at most `CELL_SIZE`, sphere centers within their centered
-cells, and collision envelopes below `CELL_SIZE / 2`. Larger ranges require a
-broader spatial query than this release provides. The engine models fixed sphere
-envelopes and a moving point; it has no mesh, moving-body or rigid-body solver,
-time integration, renderer, or astronomical accuracy claim.
-
-## Revising a world
-
-For mutable content, provide `{ world }` instead of `{ sector }`. The world must
-expose `sector(index)` with the same sphere-array contract and a `revision` value.
-Increment or replace that value after a successful content change; both systems
-clear their caches on the next query, even when the active cell is unchanged.
-Without a revision change, cached descriptors remain the current snapshot.
-
-```js
-const world = {
-  revision: 0,
-  sector: index => index === 0 ? spheres : [],
-};
-const field = createGravityField({ world });
-spheres.push({ id: 'second', type: 'planet', radius: 80, position: [500, 0, 0] });
-world.revision += 1;
-field.sample(0, [-1000, 0, 0]);
+```sh
+git clone https://github.com/Ares-X/LonelySky-Engine.git
+cd LonelySky-Engine
+npm test
+npm run dev
 ```
 
-## Tests and license
+Open `http://127.0.0.1:4180/` for the small **embedding example**. It loads pinned
+Three.js 0.186.1 from jsDelivr and therefore needs network access. It contains a
+scene, not the game's controls. Use `PORT=4190 npm run dev` to choose another port.
+The live game above remains the main visual demo.
 
-Run `npm test` in this repository with Node.js 22.13 or newer. Tests cover signed
-addresses and deterministic streams, injected gravity sources, cell and toroidal
-seams, high-speed sweeps, tangency, overlapping-sphere recovery, output isolation,
-cache bounds, and world revision invalidation.
+### Generate a universe
 
-Licensed under [Apache License 2.0](./LICENSE). See [NOTICE](./NOTICE) for
-attribution. The license covers the source published in this repository; it does
-not grant rights to a consuming application's separate content or source.
+```js
+import { createUniverse, encodeCell, createGravityField } from './src/index.js';
+
+const universe = createUniverse({ seed: 'first-light', density: 0.65 });
+const address = encodeCell({ x: 0, y: 0, z: 0 });
+const description = universe.getSector(address); // Plain, serializable scene data.
+const gravity = createGravityField({ world: universe });
+const acceleration = gravity.sample(address, [0, 0, 0]);
+```
+
+The same seed and options reproduce the same sectors, independent of visit order.
+`getSector()` returns scene data; `sector()` returns spheres for physics.
+`density` controls local content; distant star and galaxy backgrounds are separate.
+
+### Put it on screen
+
+Configure `three` and `three/addons/` in your application's import map, as shown in
+[examples/minimal.html](examples/minimal.html), or use your existing Three.js
+setup. Give the container a visible width and height.
+
+```js
+import { createUniverse } from './src/index.js';
+import { createUniverseView } from './src/three.js';
+
+const universe = createUniverse({ seed: 'first-light' });
+const view = createUniverseView(document.querySelector('#universe'), { universe });
+view.start();
+
+// Your application owns movement and input.
+view.setView({ sectorIndex: 0, position: [0, 0, 0], orientation: [0, 0, 0, 1] });
+// Call view.dispose() when removing the scene.
+```
+
+Use `setQuality('low' | 'auto' | 'high')`, position the camera yourself, or call
+`render(timeInSeconds)` from your own animation loop. Individual materials and
+volumes are also exported from `src/three.js`.
+
+## Documentation
+
+- [Generation, rendering and lifecycle API](docs/api.md)
+- [Coordinates, gravity and collision contracts](docs/physics.md)
+- [Game integration and source boundary](docs/integration.md)
+- [Showcase credits](docs/showcase-credits.md)
+
+Node.js 22.13+ runs the pure-core tests without installing packages. WebGL2 is
+required for rendering. `npm run test:render` additionally needs Three.js 0.186.1
+provided by the consuming project. The existing game supplies that installation;
+this source repository does not install or bundle it.
+
+The scene uses artistic scales and optical approximations. It is not an
+astronomical ephemeris or a rigid-body simulator. See the physics contract for
+spatial query and recovery bounds.
+
+## 中文说明
+
+这是可复用的宇宙生成引擎：传入种子得到确定性星区数据，再通过可选的
+Three.js 渲染层显示行星、光环、星云、黑洞和三维星系。也可以只使用纯数据、
+坐标、引力和碰撞模块。
+
+**效果演示直接使用[正常游戏](https://lonelysky.app/)**。仓库中的最小示例用于
+说明如何嵌入自己的网页；完整游戏的飞船操控、自动巡航、家园、联机、存档、
+后端、品牌和专属世界配置继续由游戏维护。
+
+## License
+
+Source code: [Apache-2.0](LICENSE), with attribution in [NOTICE](NOTICE).
+The gameplay screenshots depict separately credited artwork; see
+[showcase credits](docs/showcase-credits.md). Game textures are not distributed
+as engine runtime assets.
