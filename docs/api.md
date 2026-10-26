@@ -119,3 +119,48 @@ Subpixel detail may differ by quality; the spatial layout remains the same.
 Generation uses artistic placement. Volume and black-hole rendering uses optical
 approximations. Camera depth compression and local gravity do not form a
 physically consistent galaxy-to-planet simulation.
+
+## Elliptic orbital mechanics (0.3)
+
+`orbitalPeriod({semiMajorAxis, mu})` and `evaluateOrbit(elements, timeSeconds)`
+are stateless two-body calculations. Use one consistent length unit, seconds,
+and `mu = G(M + m)` in length³/second². Required elements are positive
+`semiMajorAxis` and `mu`, and `eccentricity` in `[0,1)`. Optional angles
+`inclination`, `ascendingNode`, `argumentOfPeriapsis`, and
+`meanAnomalyAtEpoch` are radians; they and `epochSeconds` default to zero.
+The reference plane is right-handed XY with +Z normal.
+
+The result contains focus-relative position, velocity, acceleration, radius,
+mean/eccentric/true anomaly, mean motion, period and `accelerationBound` (the
+periapsis maximum with outward numerical slack). Invalid/nonrepresentable input
+throws; there is no silently clamped orbit. Very large input times still have
+IEEE-754 precision limits; choose an epoch near the simulation time.
+
+`evaluateBodyState(body, timeSeconds)` adds the fixed `body.position` focus to
+an optional `body.orbit`. Static descriptors return detached positions and zero
+velocity/acceleration/bound. Orbital descriptors preserve the relative orbital
+fields. Applications must use this same sampled state for their moving visuals;
+the stock `createUniverseView` does not animate custom orbital providers.
+
+Gravity `sample(index, position, timeSeconds = 0)` samples current orbital poses.
+Positive finite `body.mu` selects inverse-square attraction outside the surface,
+bounded at the radius, with the existing finite-range taper and total cap. Bodies
+without `mu` retain legacy softening. This is a gameplay field; it does not
+integrate mutual perturbations between bodies.
+
+Collision APIs accept the same clock: `ensureSafe(index, position, velocity,
+timeSeconds = 0)`, `bodies(index, timeSeconds = 0)`, and
+`move(index, start, end, velocity, {timeSeconds = 0, deltaTime = 0})`.
+Here time is the start of the interval. Positive duration uses relative moving
+sphere sweeps, surface-relative response and simultaneous contact constraints.
+Orbit chords are no longer than 1/120 second and are conservatively inflated by
+`accelerationBound * dt² / 8`; extreme curvature can produce early contact.
+Durations over 64/120 second and exhausted contact/recovery bounds throw.
+Zero duration retains the static sweep behavior at the requested phase.
+
+Providers own spatial bounds: the existing 27 anchor-cell physics neighborhood
+is unchanged. Large orbits reaching from more distant owner cells require a
+different spatial provider. This module does not implement N-body interactions,
+parabolic/hyperbolic trajectories, relativistic or surface-terrain physics.
+Basis: [NASA Kepler's laws](https://science.nasa.gov/solar-system/orbits-and-keplers-laws/)
+and [NASA orbital mechanics](https://science.nasa.gov/learn/basics-of-space-flight/chapter3-3/).
