@@ -1,0 +1,21 @@
+{
+  "name": "lonelysky-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dependency-free deterministic cell coordinates, random streams, gravity and continuous sphere collision.",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/index.js",
+    "./coordinates": "./src/coordinates.js",
+    "./random": "./src/random.js",
+    "./gravity": "./src/gravity.js",
+    "./collision": "./src/collision.js"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
