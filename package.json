@@ -1,19 +1,27 @@
 {
   "name": "lonelysky-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Dependency-free deterministic cell coordinates, random streams, gravity and continuous sphere collision.",
+  "description": "A seeded procedural universe generator with an optional Three.js renderer, streaming, gravity and continuous collision.",
+  "homepage": "https://lonelysky.app/",
+  "repository": { "type": "git", "url": "https://github.com/Ares-X/LonelySky-Engine.git" },
+  "keywords": ["universe", "procedural-generation", "threejs", "space", "webgl"],
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/index.js",
     "./coordinates": "./src/coordinates.js",
     "./random": "./src/random.js",
     "./gravity": "./src/gravity.js",
-    "./collision": "./src/collision.js"
+    "./collision": "./src/collision.js",
+    "./generator": "./src/generator.js",
+    "./streaming": "./src/streaming.js",
+    "./three": "./src/three.js"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "test:render": "node --test tests/render/*.test.mjs",
+    "dev": "node examples/serve.mjs"
   },
   "engines": {
     "node": ">=22.13"
