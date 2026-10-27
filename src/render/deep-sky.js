@@ -69,6 +69,7 @@ float seaStellarPoints(vec3 position,float density) {
 // Four independent directional fields. Slots are ordered far to near by the
 // caller; continuous optical composition never sorts or reseeds their contents.
 vec4 seaComponent(vec3 direction,SeaComponent component,float grain) {
+  if(component.light.x<=0.&&component.material.w<=0.)return vec4(0.,0.,0.,1.);
   vec3 q=component.frame*direction;
   vec2 p=q.xy/max(.08,1.+q.z)/max(abs(component.shape.xy),vec2(.01));
   p=clamp(p,vec2(-64.),vec2(64.));
@@ -146,6 +147,11 @@ vec4 seaComponent(vec3 direction,SeaComponent component,float grain) {
   return vec4(emission,transmission);
 }
 vec3 stellarLandscape(vec3 direction,vec3 background) {
+  float energy=uSeaComponents[0].light.x+uSeaComponents[0].material.w
+    +uSeaComponents[1].light.x+uSeaComponents[1].material.w
+    +uSeaComponents[2].light.x+uSeaComponents[2].material.w
+    +uSeaComponents[3].light.x+uSeaComponents[3].material.w;
+  if(energy<=0.)return background;
   vec3 d=uSeaFrame*direction;
   vec3 grainPosition=d*331.;
   float grain=skyNoise(grainPosition);
