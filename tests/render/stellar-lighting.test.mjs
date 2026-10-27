@@ -174,3 +174,18 @@ test('shared ring density respects actual annulus, Cassini gap and texture alpha
   assert.equal(opacity(1.6, 0), 0, 'transparent texture bands cast no shadow');
   assert.ok(Math.abs(opacity(1.6, .4) - opacity(1.6) * .4) < 1e-12);
 });
+
+// Evaluate the scalar finite-disc horizon directly from its GLSL source. The
+// fully hidden disc alone permits skipping all reflected/specular/limb terms;
+// the geometric normal, rather than an artistically perturbed shading normal,
+// decides this boundary.
+const dayBody = stellarLightingGLSL.match(/float stellarDay\([^)]*\)\{([^}]+)\}/)[1].replace(/\bfloat\b/g, 'let');
+const finiteDiscDay = Function('cosine', 'angularRadius', 'max', 'smoothstep', dayBody);
+test('finite-disc dark-side boundary retains partial stellar discs independent of surface normal perturbation', () => {
+  for (const angularRadius of [0, .0001, .01, .12, 1]) {
+    const width = Math.max(angularRadius, .0001);
+    for (const cosine of [-1, -width, -width * 2]) assert.equal(finiteDiscDay(cosine, angularRadius, Math.max, smoothstep), 0);
+    for (const cosine of [-width * .999, 0, width * .999]) assert.ok(finiteDiscDay(cosine, angularRadius, Math.max, smoothstep) > 0);
+    assert.equal(finiteDiscDay(width, angularRadius, Math.max, smoothstep), 1);
+  }
+});
