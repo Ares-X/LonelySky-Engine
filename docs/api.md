@@ -22,6 +22,16 @@ The depth snapshot is separate from the active render target. With no visible
 in-view nebula the pass follows the ordinary single-render path. Dispose the
 pass before its composer; it owns only depth textures it attached itself.
 
+`new NebulaRenderPass(scene, camera, { reuseWorldMatrices: true })` can reuse the
+first draw's world matrices for the second draw. This defaults to `false` so
+render hooks can keep changing transforms between draws. Enable it only when
+scene, object, material and depth-binding hooks leave transforms and the scene
+hierarchy, including automatic matrix-update settings, unchanged throughout
+both draws. The pass restores the scene's
+`matrixWorldAutoUpdate` setting after the second draw, including on failure;
+the next frame's first draw still applies ordinary automatic matrix updates.
+The option does not change the single-render path without a visible nebula.
+
 `createUniverseView` uses this pass. Standalone `createNebula` remains compatible
 with ordinary rendering, which retains its first-cloud depth approximation.
 This correction does not implement order-independent transparency: overlapping

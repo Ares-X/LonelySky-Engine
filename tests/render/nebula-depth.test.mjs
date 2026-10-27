@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { createNebula } from '../../src/render/nebula.js';
 import { NebulaRenderPass } from '../../src/render/nebula-render-pass.js';
 
-function fixture() {
+function fixture(options) {
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(55, 1, .5, 220000);
   const nebula = createNebula();
   scene.add(nebula);
@@ -13,7 +13,7 @@ function fixture() {
   nebula.userData.update(camera, 0);
   const target = new THREE.WebGLRenderTarget(64, 32, { samples: 4 });
   target.resolveDepthBuffer = false;
-  const pass = new NebulaRenderPass(scene, camera);
+  const pass = new NebulaRenderPass(scene, camera, options);
   let currentTarget = null;
   const clearColor = new THREE.Color(0x123456);
   let clearAlpha = .75;
@@ -34,16 +34,29 @@ function fixture() {
       copies.push([source, destination]);
     },
     render(world, activeCamera) {
-      const visible = [];
+      // Mirror WebGLRenderer's matrix/hook ordering without simulating a GPU.
+      if (world.matrixWorldAutoUpdate === true) world.updateMatrixWorld();
+      if (activeCamera.parent === null && activeCamera.matrixWorldAutoUpdate === true) activeCamera.updateMatrixWorld();
+      world.onBeforeRender(this, world, activeCamera, currentTarget);
+      const visible = [], worldPositions = {};
       world.traverseVisible(object => {
         if (!object.layers.test(activeCamera.layers) || !object.material) return;
         const materials = Array.isArray(object.material) ? object.material : [object.material];
-        if (materials.some(material => material.visible)) visible.push(object.name);
+        if (!materials.some(material => material.visible)) return;
+        visible.push(object.name);
+        for (const material of materials) if (material.visible) {
+          object.onBeforeRender(this, world, activeCamera, object.geometry, material, null);
+          material.onBeforeRender(this, world, activeCamera, object.geometry, object, null);
+          worldPositions[object.name] = object.matrixWorld.elements.slice(12, 15);
+          object.onAfterRender(this, world, activeCamera, object.geometry, material, null);
+        }
       });
       const volumeMaterial = nebula.children[0].material;
-      draws.push({ visible, hasDepth: volumeMaterial.uniforms?.uHasSceneDepth.value,
+      draws.push({ visible, worldPositions, matrixWorldAutoUpdate: world.matrixWorldAutoUpdate,
+        hasDepth: volumeMaterial.uniforms?.uHasSceneDepth.value,
         depth: volumeMaterial.uniforms?.uSceneDepth.value, background: world.background,
         resolveDepth: currentTarget.resolveDepthBuffer });
+      world.onAfterRender(this, world, activeCamera);
     },
   };
   const add = (name, material, renderOrder = 0) => {
@@ -82,6 +95,124 @@ test('depth composition shades surfaces and sorted transparencies once and sampl
     assert.deepEqual([body.material, halo.material, background.material, mixed.material], materials);
     assert.equal(f.nebula.children[0].material.uniforms.uHasSceneDepth.value, false);
     assert.equal(f.renderer.autoClear, true);
+  } finally { f.dispose(); }
+});
+
+for (const hook of ['scene before', 'scene after', 'object before', 'object after', 'material before']) {
+  test(`default matrix updates preserve transform changes from ${hook} hooks`, () => {
+    const f = fixture();
+    const surface = f.add('surface', new THREE.MeshBasicMaterial());
+    const halo = f.add('halo', new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
+    let changed = false;
+    const moveHalo = () => {
+      if (changed) return;
+      changed = true;
+      halo.position.x = 7;
+    };
+    if (hook === 'scene before') f.scene.onBeforeRender = moveHalo;
+    if (hook === 'scene after') f.scene.onAfterRender = moveHalo;
+    if (hook === 'object before') surface.onBeforeRender = moveHalo;
+    if (hook === 'object after') surface.onAfterRender = moveHalo;
+    if (hook === 'material before') surface.material.onBeforeRender = moveHalo;
+    try {
+      f.pass.render(f.renderer, null, f.target);
+      assert.equal(f.pass.reuseWorldMatrices, false);
+      assert.equal(changed, true);
+      assert.deepEqual(f.draws[1].worldPositions.halo, [7, 0, 0]);
+      assert.deepEqual(f.draws.map(draw => draw.matrixWorldAutoUpdate), [true, true]);
+      assert.equal(f.scene.matrixWorldAutoUpdate, true);
+    } finally { f.dispose(); }
+  });
+}
+
+test('default mode retains a matrix-update setting changed by a render hook', () => {
+  const f = fixture();
+  let draws = 0;
+  f.scene.onAfterRender = () => { if (++draws === 2) f.scene.matrixWorldAutoUpdate = false; };
+  try {
+    f.pass.render(f.renderer, null, f.target);
+    assert.equal(draws, 2);
+    assert.equal(f.scene.matrixWorldAutoUpdate, false);
+  } finally { f.dispose(); }
+});
+
+test('matrix reuse skips only the second propagation and applies parent changes on the next frame', () => {
+  const f = fixture({ reuseWorldMatrices: true });
+  const parent = new THREE.Group();
+  const halo = f.add('halo', new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
+  parent.add(halo); f.scene.add(parent); halo.position.x = 3;
+  let updates = 0;
+  const updateMatrixWorld = f.scene.updateMatrixWorld;
+  f.scene.updateMatrixWorld = function (...args) { updates++; return updateMatrixWorld.apply(this, args); };
+  try {
+    parent.position.x = 6;
+    f.pass.render(f.renderer, null, f.target);
+    assert.equal(updates, 1);
+    assert.deepEqual(f.draws[1].worldPositions.halo, [9, 0, 0]);
+    assert.deepEqual(f.draws.map(draw => draw.matrixWorldAutoUpdate), [true, false]);
+    assert.equal(f.scene.matrixWorldAutoUpdate, true);
+
+    parent.position.x = 9;
+    f.pass.render(f.renderer, null, f.target);
+    assert.equal(updates, 2);
+    assert.deepEqual(f.draws[3].worldPositions.halo, [12, 0, 0]);
+    assert.equal(f.scene.matrixWorldAutoUpdate, true);
+  } finally { f.dispose(); }
+});
+
+test('matrix reuse preserves caller-managed world matrices and an originally false update flag', () => {
+  const f = fixture({ reuseWorldMatrices: true });
+  const halo = f.add('halo', new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
+  halo.position.x = 4;
+  f.scene.updateMatrixWorld(true);
+  f.scene.matrixWorldAutoUpdate = false;
+  halo.position.x = 8;
+  try {
+    f.pass.render(f.renderer, null, f.target);
+    assert.deepEqual(f.draws[1].worldPositions.halo, [4, 0, 0]);
+    assert.deepEqual(f.draws.map(draw => draw.matrixWorldAutoUpdate), [false, false]);
+    assert.equal(f.scene.matrixWorldAutoUpdate, false);
+  } finally { f.dispose(); }
+});
+
+for (const original of [true, false]) {
+  test(`second draw failure restores the original matrix update flag (${original})`, () => {
+    const f = fixture({ reuseWorldMatrices: true });
+    const halo = f.add('halo', new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
+    const material = halo.material;
+    f.scene.matrixWorldAutoUpdate = original;
+    const render = f.renderer.render;
+    let draws = 0;
+    f.renderer.render = function (...args) {
+      if (++draws === 2) {
+        assert.equal(f.scene.matrixWorldAutoUpdate, false);
+        throw new Error('second draw failed');
+      }
+      return render.apply(this, args);
+    };
+    try {
+      assert.throws(() => f.pass.render(f.renderer, null, f.target), /second draw failed/);
+      assert.equal(f.scene.matrixWorldAutoUpdate, original);
+      assert.equal(halo.material, material);
+      assert.equal(f.nebula.children[0].material.uniforms.uSceneDepth.value, null);
+      assert.equal(f.renderer.getRenderTarget(), null);
+    } finally { f.dispose(); }
+  });
+}
+
+test('matrix reuse leaves the ordinary single draw and its automatic transforms unchanged', () => {
+  const f = fixture({ reuseWorldMatrices: true });
+  const surface = f.add('surface', new THREE.MeshBasicMaterial());
+  f.nebula.visible = false;
+  surface.position.x = 6;
+  try {
+    f.pass.render(f.renderer, null, f.target);
+    assert.equal(f.draws.length, 1);
+    assert.deepEqual(f.draws[0].worldPositions.surface, [6, 0, 0]);
+    assert.equal(f.draws[0].matrixWorldAutoUpdate, true);
+    assert.equal(f.scene.matrixWorldAutoUpdate, true);
+    assert.equal(f.copies.length, 0);
+    assert.equal(f.pass._depthTarget, null);
   } finally { f.dispose(); }
 });
 
