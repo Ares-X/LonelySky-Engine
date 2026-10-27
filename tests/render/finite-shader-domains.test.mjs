@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {planetMaterial, atmosphereMaterial} from '../../src/render/materials.js';
 import {createGalaxyHaze} from '../../src/render/galaxy-haze.js';
+import {DEEP_SKY_GLSL} from '../../src/render/deep-sky.js';
 
 const f = Math.fround;
 const dot = (a,b) => f(f(f(a[0]*b[0])+f(a[1]*b[1]))+f(a[2]*b[2]));
@@ -94,5 +95,38 @@ test('galaxy arm axis returns finite light before the undefined atan phase', () 
     }
     const theta=run({x:0,y:1e-4},width,arms,v=>Math.hypot(v.x,v.y),atan,vec2);
     assert.equal(theta,Math.PI/2,'resolved off-axis rays retain their angular phase');
+  }
+});
+
+test('catalog filtering keeps the physical footprint across the longitude meridian', () => {
+  // Execute the material's real gradient correction. This protects the
+  // periodic sampling boundary without needing a caller's celestial image.
+  const correction=DEEP_SKY_GLSL.match(/uvDx\.x-=[^;]+;\s*uvDy\.x-=[^;]+;/)?.[0];
+  assert.ok(correction);
+  assert.match(DEEP_SKY_GLSL,/textureGrad\(uSeaDetail,uv,uvDx,uvDy\)/);
+  const correct=Function('uvDx','uvDy','floor',correction+';return [uvDx,uvDy];');
+  const uv=(longitude,latitude)=>({
+    x:.5-Math.atan2(Math.sin(longitude),Math.cos(longitude))/(2*Math.PI),
+    y:Math.asin(Math.sin(latitude))/Math.PI+.5,
+  });
+  const difference=(a,b)=>({x:b.x-a.x,y:b.y-a.y});
+  for(const pixels of [720,1080,1440]) for(const dpr of [.9,1.25,1.6]) {
+    const step=1/(pixels*dpr);
+    for(const longitude of [0,Math.PI-step*.25,-Math.PI+step*.25]) {
+      for(const latitude of [0,.7,Math.PI/2-1e-7,-Math.PI/2+1e-7]) {
+        const center=uv(longitude,latitude);
+        const dx=difference(center,uv(longitude+step,latitude));
+        const dy=difference(center,uv(longitude-step*.7,latitude*.999));
+        const [filteredX,filteredY]=correct({...dx},{...dy},Math.floor);
+        assert.ok(Math.abs(filteredX.x+step/(2*Math.PI))<1e-12);
+        assert.ok(Math.abs(filteredY.x-step*.7/(2*Math.PI))<1e-12);
+        assert.equal(filteredX.y,dx.y,'latitude minification is retained near poles');
+        assert.equal(filteredY.y,dy.y,'latitude minification is retained near poles');
+        if(Math.abs(dx.x)>.5) {
+          assert.ok(Math.abs(dx.x)*4096>4000,'fixture reaches the old whole-map footprint');
+          assert.ok(Math.abs(filteredX.x)*4096<2,'repaired footprint retains resolved detail');
+        }
+      }
+    }
   }
 });

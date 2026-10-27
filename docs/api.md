@@ -138,6 +138,13 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   celestial detail in both views. It is borrowed and never disposed by either
   group; without it, the layer uses procedural detail. Like the environment,
   the texture is supplied by the application, with no engine asset dependency.
+  Use an equirectangular celestial map with periodic longitude and set the
+  caller-owned texture's `wrapS = THREE.RepeatWrapping`; latitude uses the
+  texture's usual clamped wrapping. Version 0.6.1 supplies explicit texture
+  gradients with the shortest periodic U difference, preventing coarse-mip
+  dark seams at the longitude meridian in both the sky and lens. Latitude
+  filtering is preserved. This changes filtering only: it adds no image assets
+  and does not change UV coordinates, descriptors, seeds or body positions.
 - `createCosmos({seed})` creates sparse spiral, elliptical and irregular galaxies.
   Its update takes `{sectorIndex, cameraPosition, viewportHeight, pixelRatio,
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions
