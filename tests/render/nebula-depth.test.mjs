@@ -310,3 +310,22 @@ test('depth unprojection follows translated, rotated and rebased nebula transfor
     assert.equal(f.nebula.userData.isInView(f.camera), true);
   } finally { f.dispose(); }
 });
+
+test('pass scratch retains capacity while releasing scene and material references after each frame', () => {
+  const f = fixture(), opaque = new THREE.MeshBasicMaterial(), glow = new THREE.MeshBasicMaterial({depthWrite: false});
+  const mixed = f.add('mixed', [opaque, glow]);
+  try {
+    f.pass.render(f.renderer, null, f.target);
+    const records = f.pass._objects, first = records[0], filtered = records.find(record => record.filtered.length === 2).filtered;
+    assert.ok(records.every(record => record.object === null && record.original === null && record.filtered.every(value => value === null)));
+    assert.ok(f.pass._volumes.every(value => value === null));
+    f.pass.render(f.renderer, null, f.target);
+    assert.equal(f.pass._objects, records); assert.equal(records[0], first);
+    assert.equal(records.find(record => record.filtered.length === 2).filtered, filtered);
+    f.scene.remove(mixed); f.pass.render(f.renderer, null, f.target);
+    assert.ok(records.every(record => record.object === null && record.original === null));
+    mixed.geometry.dispose(); opaque.dispose(); glow.dispose();
+    f.nebula.visible = false; f.pass.render(f.renderer, null, f.target);
+    assert.equal(records.length, 0);
+  } finally {f.dispose();}
+});

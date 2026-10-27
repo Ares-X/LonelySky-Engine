@@ -1,5 +1,5 @@
 import { CELL_SIZE, decodeCell, encodeCell, wrapCell as wrap } from './coordinates.js';
-import { evaluateBodyState } from './orbits.js';
+import { createBodyStateSampler } from './orbits.js';
 
 export const COLLISION_CACHE_LIMIT = 128;
 const SKIN = 1e-5;
@@ -12,7 +12,12 @@ const MAX_TIME_STEPS = 64;
 const length = v => Math.hypot(...v);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const subtract = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const distanceTo = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 const vector = v => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+
+class RecoveryFailure extends RangeError {
+  constructor(message, code) { super(message); this.code = code; }
+}
 
 /** Default exclusion envelope around a sphere, in caller-defined world units. */
 export function safeRadius(type, radius) {
@@ -84,7 +89,6 @@ function constrainedSurfaces(motion, contacts, scale, surfaceFor) {
       }
     }
   }
-  if (!best) throw new RangeError('Moving collision contact constraints have no feasible motion');
   return best;
 }
 
@@ -93,17 +97,21 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   if (typeof sector !== 'function') throw new TypeError('A sector sphere provider is required');
   const cache = new Map(), sampledSources = new WeakMap();
   let neighborhoodIndex = null, sources = [], revision = world?.revision;
-  let sampledNeighborhood = null, sampledTime, sampledMargins = [];
+  let sampledNeighborhood = null, sampledMargins = [], neighborhoodMoving = false, centeredFrame;
+  const newState = () => ({ position: [0, 0, 0], velocity: [0, 0, 0], acceleration: [0, 0, 0] });
   function refresh() {
     if (revision === world?.revision) return;
     revision = world?.revision; cache.clear(); neighborhoodIndex = null; sources = [];
   }
   function descriptors(index) {
     if (cache.has(index)) return cache.get(index);
-    const bodies = sector(index).map(body => ({ id: body.id, name: body.name,
-      type: body.type ?? 'planet', sectorIndex: index, radius: body.radius,
-      clearance: bodyCollisionRadius(body, body.type), position: [...body.position],
-      ...(body.orbit == null ? {} : { orbit: { ...body.orbit } }) }));
+    const bodies = sector(index).map(body => {
+      const descriptor = { id: body.id, name: body.name,
+        type: body.type ?? 'planet', sectorIndex: index, radius: body.radius,
+        clearance: bodyCollisionRadius(body, body.type), position: [...body.position],
+        ...(body.orbit == null ? {} : { orbit: { ...body.orbit } }) };
+      return { body: descriptor, sample: createBodyStateSampler(descriptor) };
+    });
     cache.set(index, bodies);
     if (cache.size > COLLISION_CACHE_LIMIT) cache.delete(cache.keys().next().value);
     return bodies;
@@ -112,10 +120,15 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     refresh();
     if (neighborhoodIndex !== index) {
       const origin = decodeCell(index);
-      sources = [];
+      sources = []; neighborhoodMoving = false;
       for (let x = -1; x <= 1; x += 1) for (let y = -1; y <= 1; y += 1) for (let z = -1; z <= 1; z += 1) {
         const cellIndex = encodeCell({ x: wrap(origin.x + x), y: wrap(origin.y + y), z: wrap(origin.z + z) });
-        for (const body of descriptors(cellIndex)) sources.push({ body, offset: [x, y, z].map(n => n * CELL_SIZE) });
+        for (const entry of descriptors(cellIndex)) {
+          sources.push({ ...entry, offset: [x * CELL_SIZE, y * CELL_SIZE, z * CELL_SIZE],
+            begin: newState(), finish: newState(), actual: newState(), chordVelocity: [0, 0, 0],
+            chordTime: undefined, chordDuration: undefined });
+          if (entry.body.orbit) neighborhoodMoving = true;
+        }
       }
       neighborhoodIndex = index;
     }
@@ -123,34 +136,63 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   }
   function sampled(index, timeSeconds, marginSpan = 0) {
     const entries = neighborhood(index);
-    if (sampledNeighborhood !== entries || !Object.is(sampledTime, timeSeconds)) {
-      sampledNeighborhood = entries; sampledTime = timeSeconds; sampledMargins = [];
+    if (sampledNeighborhood !== entries) {
+      sampledNeighborhood = entries; sampledMargins = [];
     }
-    const cached = sampledMargins.find(sample => Object.is(sample.marginSpan, marginSpan));
-    if (cached) return cached.bodies;
-    const bodies = entries.map(source => {
-      const { body, offset } = source;
-      const state = evaluateBodyState(body, timeSeconds);
+    let slot;
+    for (let i = 0; i < sampledMargins.length; i++) {
+      const candidate = sampledMargins[i];
+      if (Object.is(candidate.marginSpan, marginSpan)) {
+        if (!neighborhoodMoving || Object.is(candidate.timeSeconds, timeSeconds)) return candidate.bodies;
+        slot = candidate; break;
+      }
+    }
+    if (!slot) {
+      if (sampledMargins.length === 2) slot = sampledMargins.shift();
+      else {
+        const bodies = [], states = [];
+        for (const source of entries) {
+          const sampledBody = { ...source.body, position: [0, 0, 0], velocity: [0, 0, 0], sweepMargin: 0 };
+          bodies.push(sampledBody);
+          states.push({ position: sampledBody.position, velocity: sampledBody.velocity, acceleration: [0, 0, 0] });
+          sampledSources.set(sampledBody, source);
+        }
+        slot = { bodies, states };
+      }
+      sampledMargins.push(slot);
+    }
+    for (let i = 0; i < entries.length; i++) {
+      const source = entries[i], state = source.sample(timeSeconds, slot.states[i]), body = slot.bodies[i];
       const sweepMargin = marginSpan ? state.accelerationBound * marginSpan ** 2 / 8 : 0;
       if (!Number.isFinite(sweepMargin)) throw new RangeError('Collision curvature margin is not representable');
-      const sampled = { ...body, position: state.position.map((n, i) => n + offset[i]),
-        ...(body.orbit ? { orbit: { ...body.orbit } } : {}),
-        velocity: state.velocity, clearance: body.clearance + sweepMargin, sweepMargin };
-      sampledSources.set(sampled, source);
-      return sampled;
-    });
-    // Recovery and sweeps revisit the same instant with and without curvature
-    // inflation. Keep both private snapshots, without retaining earlier times.
-    sampledMargins.push({ marginSpan, bodies });
-    if (sampledMargins.length > 2) sampledMargins.shift();
-    return bodies;
+      for (let axis = 0; axis < 3; axis++) body.position[axis] += source.offset[axis];
+      body.clearance = source.body.clearance + sweepMargin; body.sweepMargin = sweepMargin;
+    }
+    slot.timeSeconds = timeSeconds; slot.marginSpan = marginSpan;
+    return slot.bodies;
+  }
+  function chord(source, timeSeconds, duration) {
+    if (Object.is(source.chordTime, timeSeconds) && Object.is(source.chordDuration, duration)) return;
+    source.sample(timeSeconds, source.begin);
+    source.sample(timeSeconds + duration, source.finish);
+    for (let i = 0; i < 3; i++) source.chordVelocity[i] = (source.finish.position[i] - source.begin.position[i]) / duration;
+    source.chordTime = timeSeconds; source.chordDuration = duration;
   }
   // Work in the caller's coordinate frame even while a long sweep crosses cells.
   function frame(index, position) {
+    const x = Math.floor((position[0] + CELL_SIZE / 2) / CELL_SIZE);
+    const y = Math.floor((position[1] + CELL_SIZE / 2) / CELL_SIZE);
+    const z = Math.floor((position[2] + CELL_SIZE / 2) / CELL_SIZE);
+    if (x === 0 && y === 0 && z === 0) {
+      // The common same-cell path needs neither a Morton decode/encode nor a
+      // new offset. Replace the frame only at a caller rebase; never mutate an
+      // offset retained by recovery/contact calculations.
+      if (!centeredFrame || centeredFrame.index !== index) centeredFrame = { index, offset: [0, 0, 0] };
+      return centeredFrame;
+    }
     const origin = decodeCell(index);
-    const shift = position.map(n => Math.floor((n + CELL_SIZE / 2) / CELL_SIZE));
-    const centered = encodeCell({ x: wrap(origin.x + shift[0]), y: wrap(origin.y + shift[1]), z: wrap(origin.z + shift[2]) });
-    return { index: centered, offset: shift.map(n => n * CELL_SIZE) };
+    const centered = encodeCell({ x: wrap(origin.x + x), y: wrap(origin.y + y), z: wrap(origin.z + z) });
+    return { index: centered, offset: [x * CELL_SIZE, y * CELL_SIZE, z * CELL_SIZE] };
   }
   function nearby(index, position, timeSeconds = 0, marginSpan = 0) {
     const view = frame(index, position);
@@ -168,7 +210,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     const view = nearby(sectorIndex, position, timeSeconds, marginSpan), local = subtract(position, view.offset);
     let inside = null, deepest = 0;
     for (const body of view.bodies) {
-      const depth = body.clearance - length(subtract(local, body.position));
+      const depth = body.clearance - distanceTo(local, body.position);
       if (depth > Math.max(deepest, EPSILON)) { inside = body; deepest = depth; }
     }
     if (!inside) return { position, velocity, contact: null, corrected: false, distance: 0 };
@@ -207,11 +249,11 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       const probe = position.map((n, i) => n + direction[i] * scanned);
       extendExit(nearby(sectorIndex, probe, timeSeconds, marginSpan));
     }
-    if (scanned < exit) throw new RangeError('No clear collision recovery pose within the scan limit');
+    if (scanned < exit) throw new RecoveryFailure('No clear collision recovery pose within the scan limit', 'recovery-scan-limit');
     for (let i = 0; i < 3; i += 1) position[i] += direction[i] * (exit + SKIN);
     const finalView = nearby(sectorIndex, position, timeSeconds, marginSpan), finalLocal = subtract(position, finalView.offset);
-    if (finalView.bodies.some(body => body.clearance - length(subtract(finalLocal, body.position)) > EPSILON)) {
-      throw new RangeError('Collision recovery did not reach a clear pose');
+    if (finalView.bodies.some(body => body.clearance - distanceTo(finalLocal, body.position) > EPSILON)) {
+      throw new RecoveryFailure('Collision recovery did not reach a clear pose', 'recovery-overlap-unresolved');
     }
     const relative = subtract(subtract(position, finalOffset), finalBody.position);
     const distance = length(relative), normal = relative.map(n => n / distance);
@@ -237,10 +279,11 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       const view = nearby(sectorIndex, position, timeSeconds), local = subtract(position, view.offset);
       let hit = null, first = segmentLength + EPSILON;
       for (const body of view.bodies) {
-        const relative = subtract(local, body.position), along = dot(relative, direction);
+        const x = local[0] - body.position[0], y = local[1] - body.position[1], z = local[2] - body.position[2];
+        const along = x * direction[0] + y * direction[1] + z * direction[2];
         if (along >= -EPSILON) continue;
         const radius = body.clearance;
-        const discriminant = along * along - dot(relative, relative) + radius * radius;
+        const discriminant = along * along - (x * x + y * y + z * z) + radius * radius;
         // Exact tangency is traversable. Only an entering intersection blocks.
         if (discriminant <= EPSILON) continue;
         const entry = -along - Math.sqrt(discriminant);
@@ -266,6 +309,12 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     if (length(remaining) >= EPSILON) corrected = true;
     return { position, velocity, contact, distance, corrected };
   }
+  function blockedMotion(safe, timeSeconds, failedTimeSeconds, code, message, contacts, cause = new RangeError(message)) {
+    return { ...safe, corrected: true, distance: 0,
+      failure: { code, message, cause, timeSeconds, failedTimeSeconds, safeAtStart: true,
+        contacts: contacts.map(item => ({ id: item.source.body.id, sectorIndex: item.source.body.sectorIndex,
+          normal: [...item.normal], surface: [...item.surface] })) } };
+  }
   /**
    * Time is the interval's start. Curved paths use chords at <= 1/120 s;
    * a rigorous accelerationBound*h²/8 inflation contains the entire orbit arc.
@@ -280,15 +329,24 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     if (!Number.isFinite(timeSeconds) || !Number.isFinite(deltaTime)) throw new TypeError('Collision times must be finite');
     if (deltaTime < 0) throw new RangeError('deltaTime must be nonnegative');
     if (!Number.isFinite(timeSeconds + deltaTime)) throw new RangeError('Collision end time must be finite');
-    if (!deltaTime) return moveStatic(sectorIndex, start, end, initialVelocity, timeSeconds);
-    const safe = ensureSafe(sectorIndex, start, initialVelocity, timeSeconds);
+    let safe;
+    try { safe = ensureSafe(sectorIndex, start, initialVelocity, timeSeconds); }
+    catch (cause) {
+      if (!(cause instanceof RecoveryFailure)) throw cause;
+      // No safe initial pose was found. Preserve the input without calling it
+      // a recovered endpoint; the caller must stop time and choose a valid pose.
+      return { position: [...start], velocity: [...initialVelocity], contact: null, distance: 0, corrected: false,
+        failure: { code: cause.code, message: cause.message, cause, timeSeconds, failedTimeSeconds: timeSeconds,
+          safeAtStart: false, contacts: [] } };
+    }
+    if (!deltaTime) return moveStatic(sectorIndex, start, end, initialVelocity, timeSeconds, safe);
     const reach = length(subtract(end, start)), view = frame(sectorIndex, safe.position);
     // Static contact only shortens the remaining motion. If its entire possible
     // travel ball stays in this cell and all 27 anchor cells are static, reuse
     // the established static sweep. Longer/cell-crossing sweeps keep checking
     // moving sources as their neighborhoods change.
     if (safe.position.every((n, i) => Math.abs(n - view.offset[i]) + reach < CELL_SIZE / 2)
-      && !neighborhood(view.index).some(({ body }) => body.orbit)) {
+      && !neighborhoodMoving) {
       return moveStatic(sectorIndex, start, end, initialVelocity, timeSeconds, safe);
     }
     const steps = Math.ceil(deltaTime / MAX_TIME_STEP);
@@ -301,7 +359,12 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     let travelVelocity = subtract(end, start).map(n => n / deltaTime);
     for (let step = 0; step < steps; step++) {
       const intervalStart = timeSeconds + step * duration;
-      const recovered = recover(sectorIndex, position, velocity, intervalStart, duration);
+      let recovered;
+      try { recovered = recover(sectorIndex, position, velocity, intervalStart, duration); }
+      catch (cause) {
+        if (!(cause instanceof RecoveryFailure)) throw cause;
+        return blockedMotion(safe, timeSeconds, intervalStart, cause.code, cause.message, [], cause);
+      }
       position = recovered.position; velocity = recovered.velocity;
       if (recovered.corrected) {
         corrected = true; contact = recovered.contact;
@@ -320,22 +383,25 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         let hit = null, first = 1 + EPSILON;
         for (const body of view.bodies) {
           const source = sampledSources.get(body);
-          const begin = evaluateBodyState(source.body, intervalStart);
-          const finish = evaluateBodyState(source.body, intervalStart + duration);
-          const chordVelocity = subtract(finish.position, begin.position).map(n => n / duration);
-          const center = begin.position.map((n, i) => n + source.offset[i] + chordVelocity[i] * elapsed);
-          const bodyMotion = chordVelocity.map(n => n * h);
-          const relative = subtract(local, center), sweep = subtract(motion, bodyMotion);
-          const squared = dot(sweep, sweep), along = dot(relative, sweep);
+          chord(source, intervalStart, duration);
+          const begin = source.begin, chordVelocity = source.chordVelocity;
+          const cx = begin.position[0] + source.offset[0] + chordVelocity[0] * elapsed;
+          const cy = begin.position[1] + source.offset[1] + chordVelocity[1] * elapsed;
+          const cz = begin.position[2] + source.offset[2] + chordVelocity[2] * elapsed;
+          const mx = chordVelocity[0] * h, my = chordVelocity[1] * h, mz = chordVelocity[2] * h;
+          const rx = local[0] - cx, ry = local[1] - cy, rz = local[2] - cz;
+          const sx = motion[0] - mx, sy = motion[1] - my, sz = motion[2] - mz;
+          const squared = sx * sx + sy * sy + sz * sz, along = rx * sx + ry * sy + rz * sz;
           if (squared < EPSILON ** 2 || along >= -EPSILON) continue;
           const margin = begin.accelerationBound * duration ** 2 / 8;
-          const radius = body.clearance + margin;
-          const discriminant = along * along - squared * (dot(relative, relative) - radius * radius);
+          const radius = body.clearance + margin, relativeSquared = rx * rx + ry * ry + rz * rz;
+          const discriminant = along * along - squared * (relativeSquared - radius * radius);
           if (discriminant <= EPSILON * squared) continue;
           const root = (-along - Math.sqrt(discriminant)) / squared;
-          const entryFraction = dot(relative, relative) <= radius * radius ? 0 : root;
+          const entryFraction = relativeSquared <= radius * radius ? 0 : root;
           if (entryFraction >= -EPSILON && entryFraction < first) {
-            first = Math.min(1, Math.max(0, entryFraction)); hit = { body: { ...body, position: center }, bodyMotion, source };
+            first = Math.min(1, Math.max(0, entryFraction));
+            hit = { body: { ...body, position: [cx, cy, cz] }, bodyMotion: [mx, my, mz], source };
           }
         }
         const used = hit ? first : 1;
@@ -356,14 +422,19 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         if (prior < 0) contacts.push(constraint);
         else contacts[prior] = constraint;
         remaining = constrainedSurfaces(remaining, contacts, timeLeft, item => item.surface);
-        const actualState = evaluateBodyState(hit.source.body, intervalStart + elapsed);
+        if (!remaining) return blockedMotion(safe, timeSeconds, intervalStart + elapsed, 'infeasible-moving-contact',
+          'Moving collision contact constraints have no feasible motion', contacts);
+        const actualState = hit.source.sample(intervalStart + elapsed, hit.source.actual);
         velocity = constrainedSurfaces(velocity, contacts, 1,
-          item => evaluateBodyState(item.source.body, intervalStart + elapsed).velocity);
+          item => item.source.sample(intervalStart + elapsed, item.source.actual).velocity);
+        if (!velocity) return blockedMotion(safe, timeSeconds, intervalStart + elapsed, 'infeasible-moving-contact',
+          'Moving collision contact constraints have no feasible velocity', contacts);
         contact = contactFor({ ...hit.body, position: center, velocity: actualState.velocity }, normal, view.offset);
         corrected = true;
         if (timeLeft > 0) travelVelocity = remaining.map(n => n / timeLeft);
       }
-      if (elapsed < duration - EPSILON) throw new RangeError('Moving collision sweep exceeded its event limit');
+      if (elapsed < duration - EPSILON) return blockedMotion(safe, timeSeconds, intervalStart + elapsed, 'moving-sweep-event-limit',
+        'Moving collision sweep exceeded its event limit', contacts);
     }
     return { position, velocity, contact, distance, corrected };
   }

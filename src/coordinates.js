@@ -7,25 +7,37 @@ export const MAX_SECTOR = 2 ** 45 - 1;
 export const wrapCell = n => ((n + 16384) % 32768 + 32768) % 32768 - 16384;
 
 export function encodeCell({ x, y, z }) {
-  const coordinates = [x, y, z];
-  if (!coordinates.every((n) => Number.isInteger(n) && n >= -16384 && n <= 16383)) {
+  if (!Number.isInteger(x) || x < -16384 || x > 16383
+    || !Number.isInteger(y) || y < -16384 || y > 16383
+    || !Number.isInteger(z) || z < -16384 || z > 16383) {
     throw new RangeError('Cell coordinates must be integers from -16384 to 16383');
   }
-  const zigzag = coordinates.map((n) => BigInt(n < 0 ? -n * 2 - 1 : n * 2));
-  let value = 0n;
-  for (let bit = 0n; bit < 15n; bit += 1n) {
-    for (let axis = 0n; axis < 3n; axis += 1n) value |= ((zigzag[Number(axis)] >> bit) & 1n) << (bit * 3n + axis);
+  let ix = x < 0 ? -x * 2 - 1 : x * 2;
+  let iy = y < 0 ? -y * 2 - 1 : y * 2;
+  let iz = z < 0 ? -z * 2 - 1 : z * 2;
+  let value = 0, place = 1;
+  // Each Morton digit contains one bit from each 15-bit coordinate. Summing
+  // base-eight digits stays below 2^45, exactly inside Number's integer range;
+  // bitwise operations only touch the individual 15-bit coordinates.
+  for (let bit = 0; bit < 15; bit += 1) {
+    value += ((ix & 1) | ((iy & 1) << 1) | ((iz & 1) << 2)) * place;
+    ix >>>= 1; iy >>>= 1; iz >>>= 1;
+    place *= 8;
   }
-  return Number(value);
+  return value;
 }
 
 export function decodeCell(index) {
   if (!Number.isSafeInteger(index) || index < 0 || index > MAX_SECTOR) throw new RangeError('Cell index is outside the address space');
-  const value = BigInt(index);
-  const coordinates = [0n, 0n, 0n];
-  for (let bit = 0n; bit < 15n; bit += 1n) {
-    for (let axis = 0n; axis < 3n; axis += 1n) coordinates[Number(axis)] |= ((value >> (bit * 3n + axis)) & 1n) << bit;
+  let value = index, x = 0, y = 0, z = 0;
+  for (let bit = 0; bit < 15; bit += 1) {
+    const digit = value % 8;
+    x |= (digit & 1) << bit;
+    y |= ((digit >> 1) & 1) << bit;
+    z |= ((digit >> 2) & 1) << bit;
+    value = Math.floor(value / 8);
   }
-  const [x, y, z] = coordinates.map((n) => Number(n & 1n ? -(n + 1n) / 2n : n / 2n));
-  return { x, y, z };
+  return { x: x & 1 ? -(x + 1) / 2 : x / 2,
+    y: y & 1 ? -(y + 1) / 2 : y / 2,
+    z: z & 1 ? -(z + 1) / 2 : z / 2 };
 }

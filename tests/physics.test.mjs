@@ -133,7 +133,12 @@ test('unbounded overlap recovery fails explicitly without changing the caller po
   assert.throws(() => collision.ensureSafe(0, start, velocity), {
     name: 'RangeError', message: 'No clear collision recovery pose within the scan limit',
   });
-  assert.throws(() => collision.move(0, start, [100, 0, 0], velocity), RangeError);
+  const motion = collision.move(0, start, [100, 0, 0], velocity);
+  assert.equal(motion.failure.code, 'recovery-scan-limit');
+  assert.equal(motion.failure.safeAtStart, false);
+  assert.equal(motion.distance, 0); assert.equal(motion.corrected, false);
+  assert.deepEqual(motion.position, start); assert.deepEqual(motion.velocity, velocity);
+  assert.ok(motion.failure.cause instanceof RangeError);
   assert.deepEqual(start, [0, 0, 0]); assert.deepEqual(velocity, [0, 0, 0]);
   assert.ok(collision.cacheSize <= COLLISION_CACHE_LIMIT);
 });
