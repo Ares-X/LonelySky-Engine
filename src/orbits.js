@@ -18,7 +18,8 @@ function rates({ semiMajorAxis, mu }) {
   const speed = Math.sqrt(mu) / Math.sqrt(semiMajorAxis);
   const meanMotion = speed / semiMajorAxis;
   const periodSeconds = TAU / meanMotion;
-  if (![speed, meanMotion, periodSeconds].every(n => Number.isFinite(n) && n > 0)) {
+  if (!(speed > 0) || !Number.isFinite(speed) || !(meanMotion > 0) || !Number.isFinite(meanMotion)
+    || !(periodSeconds > 0) || !Number.isFinite(periodSeconds)) {
     throw new RangeError('orbital scale is outside the representable numeric range');
   }
   return { speed, meanMotion, periodSeconds };
@@ -65,6 +66,69 @@ function solveEccentricAnomaly(meanAnomaly, eccentricity) {
   throw new RangeError('Kepler solver did not converge within its iteration limit');
 }
 
+function prepareOrbit(elements) {
+  const { semiMajorAxis: a, mu, eccentricity: e, inclination = 0, ascendingNode = 0,
+    argumentOfPeriapsis = 0, meanAnomalyAtEpoch = 0, epochSeconds = 0 } = elements;
+  const { speed, meanMotion, periodSeconds } = rates(elements);
+  finite(e, 'eccentricity');
+  if (e < 0 || e >= 1) throw new RangeError('eccentricity must be in [0, 1)');
+  const periapsisRadius = a * (1 - e);
+  // The two-body maximum is mu/r_peri². Small outward slack covers arithmetic
+  // and frame-rotation rounding when consumers use it as a conservative bound.
+  const accelerationBound = ((mu / periapsisRadius) / periapsisRadius) * (1 + 8 * Number.EPSILON);
+  if (!(periapsisRadius > 0) || !(accelerationBound > 0) || !Number.isFinite(accelerationBound)) {
+    throw new RangeError('orbital acceleration bound is outside the representable numeric range');
+  }
+  finite(inclination, 'inclination'); finite(ascendingNode, 'ascendingNode');
+  finite(argumentOfPeriapsis, 'argumentOfPeriapsis');
+  finite(meanAnomalyAtEpoch, 'meanAnomalyAtEpoch'); finite(epochSeconds, 'epochSeconds');
+
+  const node = signedAngle(ascendingNode), tilt = signedAngle(inclination);
+  const periapsis = signedAngle(argumentOfPeriapsis);
+  const cn = Math.cos(node), sn = Math.sin(node), ci = Math.cos(tilt), si = Math.sin(tilt);
+  const cp = Math.cos(periapsis), sp = Math.sin(periapsis);
+  const p = [cn * cp - sn * sp * ci, sn * cp + cn * sp * ci, sp * si];
+  const q = [-cn * sp - sn * cp * ci, -sn * sp + cn * cp * ci, cp * si];
+  return { a, mu, e, speed, meanMotion, periodSeconds, accelerationBound, meanAnomalyAtEpoch, epochSeconds, p, q,
+    beta: Math.sqrt((1 - e) * (1 + e)) };
+}
+
+function newState() {
+  return { position: [0, 0, 0], velocity: [0, 0, 0], acceleration: [0, 0, 0], accelerationBound: 0 };
+}
+
+function sampleOrbit(orbit, timeSeconds, out) {
+  const { a, mu, e, speed, meanMotion, periodSeconds, accelerationBound, meanAnomalyAtEpoch, epochSeconds, p, q, beta } = orbit;
+  const phase = TAU * ((timeSeconds % periodSeconds) / periodSeconds
+    - (epochSeconds % periodSeconds) / periodSeconds);
+  const meanAnomaly = signedAngle(signedAngle(meanAnomalyAtEpoch) + signedAngle(phase));
+  const eccentricAnomaly = solveEccentricAnomaly(meanAnomaly, e);
+  const sinE = Math.sin(eccentricAnomaly), cosE = Math.cos(eccentricAnomaly);
+  const halfSinSquared = Math.sin(eccentricAnomaly / 2) ** 2;
+  const radiusFactor = (1 - e) + 2 * e * halfSinSquared;
+  const radius = a * radiusFactor;
+  const x = a * ((1 - e) - 2 * halfSinSquared), y = a * beta * sinE;
+  const vx = -speed * sinE / radiusFactor, vy = speed * beta * cosE / radiusFactor;
+
+  const position = out.position, velocity = out.velocity, acceleration = out.acceleration;
+  const accelerationMagnitude = (mu / radius) / radius;
+  for (let i = 0; i < 3; i++) {
+    position[i] = p[i] * x + q[i] * y;
+    velocity[i] = p[i] * vx + q[i] * vy;
+    acceleration[i] = -accelerationMagnitude * (position[i] / radius);
+    if (!Number.isFinite(position[i]) || !Number.isFinite(velocity[i]) || !Number.isFinite(acceleration[i])) {
+      throw new RangeError('orbital state is outside the representable numeric range');
+    }
+  }
+  if (!(radius > 0) || !Number.isFinite(radius) || !(accelerationMagnitude > 0) || !Number.isFinite(accelerationMagnitude)) {
+    throw new RangeError('orbital state is outside the representable numeric range');
+  }
+  out.radius = radius; out.meanAnomaly = meanAnomaly; out.eccentricAnomaly = eccentricAnomaly;
+  out.trueAnomaly = Math.atan2(beta * sinE, (1 - e) - 2 * halfSinSquared);
+  out.meanMotion = meanMotion; out.periodSeconds = periodSeconds; out.accelerationBound = accelerationBound;
+  return out;
+}
+
 /**
  * Evaluate an unperturbed elliptic two-body relative orbit at an absolute time.
  *
@@ -88,50 +152,9 @@ function solveEccentricAnomaly(meanAnomaly, eccentricity) {
  * https://science.nasa.gov/learn/basics-of-space-flight/chapter3-3/
  */
 export function evaluateOrbit(elements, timeSeconds) {
-  const { semiMajorAxis: a, mu, eccentricity: e, inclination = 0, ascendingNode = 0,
-    argumentOfPeriapsis = 0, meanAnomalyAtEpoch = 0, epochSeconds = 0 } = elements;
-  const { speed, meanMotion, periodSeconds } = rates(elements);
-  finite(e, 'eccentricity');
-  if (e < 0 || e >= 1) throw new RangeError('eccentricity must be in [0, 1)');
-  const periapsisRadius = a * (1 - e);
-  // The two-body maximum is mu/r_peri². Small outward slack covers arithmetic
-  // and frame-rotation rounding when consumers use it as a conservative bound.
-  const accelerationBound = ((mu / periapsisRadius) / periapsisRadius) * (1 + 8 * Number.EPSILON);
-  if (!(periapsisRadius > 0) || !(accelerationBound > 0) || !Number.isFinite(accelerationBound)) {
-    throw new RangeError('orbital acceleration bound is outside the representable numeric range');
-  }
-  for (const [name, value] of Object.entries({ inclination, ascendingNode, argumentOfPeriapsis,
-    meanAnomalyAtEpoch, epochSeconds, timeSeconds })) finite(value, name);
-
-  const phase = TAU * ((timeSeconds % periodSeconds) / periodSeconds
-    - (epochSeconds % periodSeconds) / periodSeconds);
-  const meanAnomaly = signedAngle(signedAngle(meanAnomalyAtEpoch) + signedAngle(phase));
-  const eccentricAnomaly = solveEccentricAnomaly(meanAnomaly, e);
-  const sinE = Math.sin(eccentricAnomaly), cosE = Math.cos(eccentricAnomaly);
-  const halfSinSquared = Math.sin(eccentricAnomaly / 2) ** 2;
-  const beta = Math.sqrt((1 - e) * (1 + e));
-  const radiusFactor = (1 - e) + 2 * e * halfSinSquared;
-  const radius = a * radiusFactor;
-  const x = a * ((1 - e) - 2 * halfSinSquared), y = a * beta * sinE;
-  const vx = -speed * sinE / radiusFactor, vy = speed * beta * cosE / radiusFactor;
-
-  const node = signedAngle(ascendingNode), tilt = signedAngle(inclination);
-  const periapsis = signedAngle(argumentOfPeriapsis);
-  const cn = Math.cos(node), sn = Math.sin(node), ci = Math.cos(tilt), si = Math.sin(tilt);
-  const cp = Math.cos(periapsis), sp = Math.sin(periapsis);
-  const p = [cn * cp - sn * sp * ci, sn * cp + cn * sp * ci, sp * si];
-  const q = [-cn * sp - sn * cp * ci, -sn * sp + cn * cp * ci, cp * si];
-  const position = p.map((value, i) => value * x + q[i] * y);
-  const velocity = p.map((value, i) => value * vx + q[i] * vy);
-  const accelerationMagnitude = (mu / radius) / radius;
-  const acceleration = position.map(value => -accelerationMagnitude * (value / radius));
-  if (!(radius > 0) || !(accelerationMagnitude > 0)
-    || ![radius, accelerationMagnitude, ...position, ...velocity, ...acceleration].every(Number.isFinite)) {
-    throw new RangeError('orbital state is outside the representable numeric range');
-  }
-  const trueAnomaly = Math.atan2(beta * sinE, (1 - e) - 2 * halfSinSquared);
-  return { position, velocity, acceleration, radius, meanAnomaly, eccentricAnomaly,
-    trueAnomaly, meanMotion, periodSeconds, accelerationBound };
+  const orbit = prepareOrbit(elements);
+  finite(timeSeconds, 'timeSeconds');
+  return sampleOrbit(orbit, timeSeconds, newState());
 }
 
 /**
@@ -145,17 +168,38 @@ export function evaluateOrbit(elements, timeSeconds) {
  */
 export function evaluateBodyState(body, timeSeconds) {
   finite(timeSeconds, 'timeSeconds');
+  return createBodyStateSampler(body)(timeSeconds);
+}
+
+/** Snapshot a validated descriptor and prepare its invariant orbital coefficients.
+ * The returned sampler accepts (timeSeconds, out?). Omit out for a detached
+ * snapshot; provide dedicated position/velocity/acceleration arrays to reuse a
+ * caller-owned state. Recreate the sampler when its descriptor/revision changes.
+ * Supplied outputs are caller-owned workspaces; do not overwrite one while a
+ * consumer still needs its contents. Time and numeric range remain checked per call.
+ */
+export function createBodyStateSampler(body) {
   if (!Array.isArray(body?.position) || body.position.length !== 3
-    || ![0, 1, 2].every(index => Number.isFinite(body.position[index]))) {
+    || !Number.isFinite(body.position[0]) || !Number.isFinite(body.position[1]) || !Number.isFinite(body.position[2])) {
     throw new TypeError('body.position must be a finite three-number array');
   }
-  if (body.orbit == null) {
-    return { position: [...body.position], velocity: [0, 0, 0], acceleration: [0, 0, 0], accelerationBound: 0 };
-  }
-  const state = evaluateOrbit(body.orbit, timeSeconds);
-  const position = state.position.map((value, i) => value + body.position[i]);
-  if (!position.every(Number.isFinite)) {
-    throw new RangeError('translated orbital position is outside the representable numeric range');
-  }
-  return { ...state, position };
+  const anchor = [...body.position], orbit = body.orbit == null ? null : prepareOrbit(body.orbit);
+  return function sample(timeSeconds, out = newState()) {
+    finite(timeSeconds, 'timeSeconds');
+    if (orbit) {
+      sampleOrbit(orbit, timeSeconds, out);
+      for (let i = 0; i < 3; i++) {
+        out.position[i] += anchor[i];
+        if (!Number.isFinite(out.position[i])) {
+          throw new RangeError('translated orbital position is outside the representable numeric range');
+        }
+      }
+    } else {
+      for (let i = 0; i < 3; i++) {
+        out.position[i] = anchor[i]; out.velocity[i] = 0; out.acceleration[i] = 0;
+      }
+      out.accelerationBound = 0;
+    }
+    return out;
+  };
 }
