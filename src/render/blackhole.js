@@ -160,7 +160,7 @@ void main() {
 `;
 
 /** A view-dependent, bounded black-hole optical effect. radius is horizon scale. */
-export function createBlackHole({ radius = 600, seed = 0, skyTexture = null } = {}) {
+export function createBlackHole({ radius = 600, seed = 0, skyTexture = null, detailTexture = null } = {}) {
   const group = new THREE.Group();
   group.name = 'Black hole — curved light and accretion disk';
   const safeRadius = Number.isFinite(radius) && radius > 0 ? radius : 600;
@@ -170,7 +170,7 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null } = 
   const numericSeed = typeof seed === 'number' ? seed : [...String(seed)]
     .reduce((value, character) => (value * 31 + character.charCodeAt(0)) | 0, 0);
   const uniforms = {
-    ...deepSkyUniforms(),
+    ...deepSkyUniforms({detailTexture}),
     visibility: { value: 1 },
     uCamera: { value: new THREE.Vector3(0, 0, 20) },
     uLocalToWorld: { value: new THREE.Matrix4() },

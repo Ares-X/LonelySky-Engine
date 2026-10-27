@@ -5,6 +5,7 @@ import { encodeCell } from '../../src/coordinates.js';
 import { createUniverse } from '../../src/generator.js';
 import { createNebula } from '../../src/render/nebula.js';
 import { createBlackHole } from '../../src/render/blackhole.js';
+import { createDeepSky, deepSkyUniforms, setDeepSkyEnvironment } from '../../src/three.js';
 import { planetMaterial, atmosphereMaterial, ringMaterial, starMaterial } from '../../src/render/materials.js';
 import { createGalaxyHaze } from '../../src/render/galaxy-haze.js';
 import { createCosmos, loadedMacros, sampleGalaxy, MAX_COSMOS_PARTICLES, COSMOS_QUALITY_COUNTS } from '../../src/render/cosmos.js';
@@ -177,4 +178,81 @@ test('directional sky releases resources once and ignores updates after disposal
   sky.userData.update({ ambientTint: [1, 1, 1], bandNormal: [1, 0, 0], skyBrightness: 8, bandStrength: 1, starDensity: 1 });
   assert.equal(geometryReleased(), 1); assert.equal(materialReleased(), 1);
   assert.equal(mesh.material.uniforms.uSkyBrightness.value, before);
+});
+
+test('six sea blends reach both views, copy descriptors and clear on an ordinary environment update', () => {
+  const sky = createDeepSky(), hole = createBlackHole();
+  const background = sky.children[0].material.uniforms, lens = hole.children[0].material.uniforms;
+  const environment = { ambientTint: [.6, .7, .8], bandNormal: [0, 1, 0], skyBrightness: .02, bandStrength: .4, starDensity: .5 };
+  const frame = new THREE.Matrix3().set(0, -1, 0, 1, 0, 0, 0, 0, 1).toArray();
+  const weights = uniforms => [...uniforms.uSeaWeightsA.value.toArray(), ...uniforms.uSeaWeightsB.value.toArray()];
+  try {
+    assert.deepEqual(weights(background), [0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(weights(lens), [0, 0, 0, 0, 0, 0]);
+    for (let family = 0; family < 6; family++) {
+      const sea = { weights: Array.from({ length: 6 }, (_, i) => i === family ? 1 : 0), frame: [...frame], phase: family * .3, width: .7 };
+      sky.userData.update({ ...environment, starSea: sea }, .5);
+      hole.userData.setEnvironment({ ...environment, starSea: sea }, .5);
+      for (const uniforms of [background, lens]) {
+        assert.deepEqual(weights(uniforms), sea.weights);
+        assert.deepEqual(uniforms.uSeaFrame.value.toArray(), frame);
+        assert.equal(uniforms.uSeaPhase.value, sea.phase);
+        assert.equal(uniforms.uSeaWidth.value, sea.width);
+        assert.equal(uniforms.uSeaQuiet.value, .925);
+      }
+      sea.weights.fill(0); sea.frame.fill(0);
+      assert.equal(weights(background)[family], 1);
+      assert.equal(weights(lens)[family], 1);
+      assert.deepEqual(background.uSeaFrame.value.toArray(), frame);
+      assert.deepEqual(lens.uSeaFrame.value.toArray(), frame);
+    }
+    assert.notEqual(background.uSeaFrame.value, lens.uSeaFrame.value);
+    sky.userData.update(environment); hole.userData.setEnvironment(environment);
+    assert.deepEqual(weights(background), [0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(weights(lens), [0, 0, 0, 0, 0, 0]);
+  } finally { sky.userData.dispose(); hole.userData.dispose(); }
+});
+
+test('custom sky uniforms and both views borrow the same optional detail texture', () => {
+  const texture = new THREE.Texture(), released = disposalCount(texture);
+  const sky = createDeepSky({ detailTexture: texture }), hole = createBlackHole({ detailTexture: texture });
+  const custom = deepSkyUniforms({ detailTexture: texture });
+  const environment = { ambientTint: [1, 1, 1], bandNormal: [0, 1, 0], skyBrightness: .01, bandStrength: 0, starDensity: .5,
+    starSea: { weights: [.1, .2, .3, .1, .2, .1], frame: new THREE.Matrix3().toArray(), phase: .4, width: 1.2 } };
+  try {
+    setDeepSkyEnvironment(custom, environment);
+    sky.userData.update(environment); hole.userData.setEnvironment(environment);
+    for (const uniforms of [custom, sky.children[0].material.uniforms, hole.children[0].material.uniforms]) {
+      assert.equal(uniforms.uSeaDetail.value, texture);
+      assert.equal(uniforms.uSeaHasDetail.value, true);
+      assert.deepEqual([...uniforms.uSeaWeightsA.value.toArray(), ...uniforms.uSeaWeightsB.value.toArray()], environment.starSea.weights);
+    }
+    assert.equal(deepSkyUniforms().uSeaDetail.value, null);
+    assert.equal(deepSkyUniforms().uSeaHasDetail.value, false);
+    sky.userData.dispose(); sky.userData.dispose(); hole.userData.dispose(); hole.userData.dispose();
+    assert.equal(released(), 0);
+  } finally { sky.userData.dispose(); hole.userData.dispose(); texture.dispose(); }
+});
+
+test('nebula distance follows transformed volume bounds and remains stable after rebasing', () => {
+  const parent = new THREE.Group(), nebula = createNebula(), volume = nebula.children[0];
+  parent.position.set(20000, -40000, 60000);
+  parent.rotation.set(.2, .5, -.7);
+  parent.scale.set(1.5, 2, .5);
+  parent.add(nebula);
+  parent.updateMatrixWorld(true);
+  try {
+    for (const local of [[0, 0, 0], [.9, -.9, .9], [-1, 1, -1]]) {
+      const point = volume.localToWorld(new THREE.Vector3(...local)), before = point.clone();
+      assert.ok(nebula.userData.distanceToVolume(point) < 1e-8);
+      assert.deepEqual(point, before, 'distance queries must not mutate the camera position');
+    }
+    const outside = volume.localToWorld(new THREE.Vector3(1.3, -1.4, 1.2));
+    const nearest = volume.localToWorld(new THREE.Vector3(1, -1, 1));
+    const distance = nebula.userData.distanceToVolume(outside);
+    assert.ok(Math.abs(distance - outside.distanceTo(nearest)) < 1e-8);
+    const shift = new THREE.Vector3(40000, 20000, -20000);
+    parent.position.sub(shift); outside.sub(shift);
+    assert.ok(Math.abs(nebula.userData.distanceToVolume(outside) - distance) < 1e-8);
+  } finally { nebula.userData.dispose(); }
 });
