@@ -25,14 +25,6 @@ uniform bool uSeaHasDetail;
 uniform vec3 uSeaMorphA,uSeaMorphB,uSeaMorphC,uSeaMorphD,uSeaMorphE,uSeaMorphF;
 uniform vec3 uSeaCool,uSeaWarm,uSeaAccent,uSeaOffset;
 uniform vec4 uSeaShape,uSeaStructure,uSeaDust,uSeaState;
-struct SeaComponent {
-  mat3 frame;
-  vec3 offset;
-  vec4 shape,topology,contour,material,light,spectrum,population;
-  vec3 cool,warm;
-};
-uniform bool uSeaHasLandscape;
-uniform SeaComponent uSeaComponents[4];
 float skyHash(vec3 p) { p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z); }
 float skyNoise(vec3 p) {
   vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
@@ -41,164 +33,6 @@ float skyNoise(vec3 p) {
 }
 // GLSL pow has no defined negative-base domain, including exponent 2.0.
 float seaSquare(float value) { return value*value; }
-
-// Noise and sparse stars belong to the component's local sky coordinates.
-// Their high frequencies fade to their mean when the lens or pixel cannot resolve them.
-float seaFilteredNoise(vec3 position) {
-  return mix(skyNoise(position),.5,smoothstep(.5,1.4,length(fwidth(position))));
-}
-float seaStellarPoints(vec3 position,float density) {
-  float probability=clamp(density*.004,0.,.04);
-  float pointFootprint=length(fwidth(position));
-  float resolved=1.-smoothstep(.25,.95,pointFootprint);
-  // Integral of exp(-r*r/.065^2) over a unit 2-D stellar cell. Broadening
-  // conserves that integral before the unresolved kernel becomes its mean.
-  float filtered=${Math.PI * .065 ** 2}*probability;
-  if(resolved>0.){
-    float value=skyHash(vec3(floor(position.xy),floor(position.z)));
-    float densityWidth=min(.0002,probability);
-    float population=probability>0.?smoothstep(1.-probability-densityWidth,1.-probability+densityWidth,value):0.;
-    vec2 point=fract(position.xy)-.5;
-    float variance=.004225+pointFootprint*pointFootprint*.12;
-    float spark=exp(-dot(point,point)/variance)*(.004225/variance);
-    filtered=mix(filtered,spark*population,resolved);
-  }
-  return filtered;
-}
-
-// The same three sampled fields support different density populations. Their
-// mixture is local to a subject, independent of its broad geometric topology.
-vec4 seaPopulations(float broad,float middle,float fine,float clump) {
-  float mist=.72+broad*.56;
-  float cloudBase=max(0.,broad*.58+middle*.42-.22);
-  float cloud=.10+cloudBase*cloudBase*8.;
-  float strand=max(0.,broad*.35+middle*.6+fine*.05-.4);
-  float filaments=.04+strand*strand*12.*(.5+broad);
-  float clusterEnvelope=smoothstep(.48,.83,broad*.6+middle*.4);
-  float clusters=.025+clusterEnvelope*clusterEnvelope*2.8;
-  return vec4(mist,cloud,filaments,clusters);
-}
-
-// A uniform emitting/absorbing slab of unit depth. This optical approximation
-// integrates distributed cloud light; embedded points retain a depth estimate.
-float seaSlabIntegral(float opticalDepth,float transmission) {
-  if(opticalDepth<.001)return 1.-opticalDepth*.5+opticalDepth*opticalDepth/6.;
-  return (1.-transmission)/opticalDepth;
-}
-
-// Four independent directional fields. Slots are ordered far to near by the
-// caller; continuous optical composition never sorts or reseeds their contents.
-vec4 seaComponent(vec3 direction,SeaComponent component) {
-  if(component.light.x<=0.&&component.material.w<=0.)return vec4(0.,0.,0.,1.);
-  vec3 q=component.frame*direction;
-  vec2 p=q.xy/max(.08,1.+q.z)/max(abs(component.shape.xy),vec2(.01));
-  p=clamp(p,vec2(-64.),vec2(64.));
-  float front=smoothstep(-.9,-.6,q.z);
-  float clump=clamp(component.material.z,0.,1.);
-  vec4 populations=max(component.population,vec4(0.));
-  populations/=max(.0001,dot(populations,vec4(1.)));
-  float anisotropy=max(.1,component.spectrum.w)*(1.+populations.z*.6);
-  vec3 textureDirection=vec3(q.x*anisotropy,q.y/anisotropy,q.z);
-  vec3 noisePosition=textureDirection*max(.1,component.spectrum.x)+component.offset;
-  float broad=seaFilteredNoise(noisePosition);
-  // Different octave axes and low-frequency displacement break the visible
-  // value-noise lattice without adding a fourth sample or moving the geometry.
-  vec3 middleDirection=mat3(.8,.6,0.,-.36,.48,.8,.48,-.64,.6)*textureDirection;
-  float middle=seaFilteredNoise(middleDirection*max(.1,component.spectrum.y)+component.offset.yzx
-    +vec3(broad,-broad,broad)*3.);
-  float fine=seaFilteredNoise(textureDirection.zxy*max(.1,component.spectrum.z)+component.offset.zxy
-    +vec3(middle,broad,-middle)*2.);
-  // Clumping changes the distribution of light as well as its frequency.
-  // Diffuse fields keep broad structure; dense populations expose fine knots.
-  float granularity=smoothstep(.12,.92,clump);
-  float middleWeight=.30+granularity*.05;
-  float fineWeight=.025+granularity*.225;
-  float noiseValue=broad*(1.-middleWeight-fineWeight)+middle*middleWeight+fine*fineWeight;
-  // Density may have a fine spectrum without folding the whole ellipse into
-  // repeated bright ridges. Geometric displacement shrinks with its frequency.
-  float contourResolution=min(1.,6./max(1.,component.spectrum.x));
-  float middleResolution=min(1.,12./max(1.,component.spectrum.y));
-  float warp=(broad-.5)*component.material.x*contourResolution;
-  p+=vec2(warp*.35+(middle-.5)*component.material.x*.12*middleResolution,warp);
-  // A bounded, nonperiodic bend avoids repeating sinusoidal ribbons.
-  float bend=p.x*p.x/(1.+abs(p.x))*(.6+abs(component.contour.y)*.07);
-  p.y-=component.contour.x*bend+component.contour.z*p.x;
-  float footprint=max(.0001,length(fwidth(p)));
-  float radius=length(p),radius2=dot(p,p);
-  float hollow=clamp(component.shape.z,0.,1.);
-  float rimWidth=max(.01,abs(component.shape.w));
-  // Irregular cloud boundaries replace the smooth black circles and razor rims.
-  float boundaryDetail=populations.y*.4+populations.z+populations.w*.65;
-  float boundaryRadius=radius+(broad-.5)*(.08+boundaryDetail*.22)*contourResolution
-    +(middle-.5)*.08*boundaryDetail*middleResolution;
-  float boundaryWidth=rimWidth+.045+(middle*.045);
-  float filteredWidth=sqrt(boundaryWidth*boundaryWidth+footprint*footprint);
-  float opening=mix(1.,smoothstep(hollow-filteredWidth,hollow+filteredWidth,boundaryRadius),smoothstep(0.,.15,hollow));
-  float body=exp(-radius2*2.)*opening;
-  float ring=exp(-seaSquare((boundaryRadius-(.45+hollow*.65))/filteredWidth))*boundaryWidth/filteredWidth;
-  float ridge=clamp(component.contour.w,0.,1.);
-  // Width has a world-angular floor, then a pixel footprint. Narrowing a
-  // descriptor therefore broadens its field instead of painting a bright needle.
-  float minimumStreamWidth=.006/max(.01,abs(component.shape.y));
-  float streamWidth=max(minimumStreamWidth,max(.04,rimWidth*(1.-ridge*.5))*(.65+middle*.75));
-  float crossFootprint=max(.0001,fwidth(p.y));
-  float filteredStream=sqrt(streamWidth*streamWidth+crossFootprint*crossFootprint);
-  float streamCoordinate=p.y+(middle-.5)*(.035+granularity*.085)*middleResolution;
-  float stream=exp(-seaSquare(streamCoordinate/filteredStream)-p.x*p.x*.7)*streamWidth/filteredStream*opening;
-  float theta=radius2>.0000001?atan(p.y,p.x):0.;
-  // Mix adjacent INTEGER angular frequencies. Each endpoint is periodic at
-  // atan's branch cut, including when the continuous descriptor crosses an integer.
-  float armNumber=2.+(.5+.5*sin(component.offset.z*.173))*4.;
-  float arms=floor(armNumber);
-  float nextArms=min(6.,arms+1.);
-  float winding=log(max(radius,.025))*component.contour.y+component.offset.z+(middle-.5)*(1.+abs(component.material.x))*middleResolution;
-  float phase=theta*arms+winding;
-  float crest=pow(max(0.,.5+.5*cos(phase)),2.+ridge*3.);
-  float nextCrest=pow(max(0.,.5+.5*cos(theta*nextArms+winding)),2.+ridge*3.);
-  crest=mix(crest,nextCrest,fract(armNumber));
-  float phaseFootprint=(nextArms+abs(component.contour.y))*footprint/max(radius,.025);
-  crest=mix(.3,crest,1.-smoothstep(.45,1.2,phaseFootprint));
-  float spiral=exp(-radius2*.9)*(.5+.5*mix(.3,crest,smoothstep(.025,.12,radius)))*opening;
-  float breakup=clamp(component.material.y,0.,1.);
-  float erosion=exp(-breakup*seaSquare(1.-noiseValue)*(1.+populations.y*4.+populations.z*2.));
-  float population=dot(seaPopulations(broad,middle,fine,clump),populations);
-  float density=max(0.,dot(vec4(body,ring,stream,spiral),max(component.topology,vec4(0.))))*front*erosion*population;
-  float dustStructure=mix(.55+(1.-broad)*1.1,.15+4.8*seaSquare(1.-middle)*(.3+fine),
-    clamp(populations.y+populations.z*.65,0.,1.));
-  float opticalDepth=density*max(0.,component.material.w)*dustStructure;
-  float transmission=exp(-min(40.,opticalDepth));
-  vec2 source=p-component.light.zw;
-  float coreWidth=.025+.055*(1.-ridge),coreWidth2=coreWidth*coreWidth;
-  float filteredCore=coreWidth2+footprint*footprint;
-  float core=exp(-dot(source,source)/filteredCore)*coreWidth2/filteredCore*front*opening;
-  vec3 color=mix(component.cool,component.warm,clamp(noiseValue*.7+fine*.3,0.,1.));
-  float clusterEnvelope=smoothstep(.48,.83,broad*.6+middle*.4);
-  float stellarDensity=density*(.12+populations.w*9.)*mix(.18,3.,clusterEnvelope);
-  vec2 stellarPlane=q.xy/max(.08,1.+q.z);
-  float stars=seaStellarPoints(vec3(stellarPlane*mix(420.,180.,populations.w),component.offset.z*31.)
-    +component.offset*7.1,stellarDensity);
-  vec3 starColor=mix(component.cool,component.warm,.65);
-  float componentGrain=1.+(fine-.5)*(.08*populations.y+.24*populations.z);
-  vec3 cloudLight=color*density*componentGrain*seaSlabIntegral(opticalDepth,transmission);
-  vec3 embeddedLight=(component.warm*core*max(0.,component.light.y)+starColor*stars*(6.+populations.w*20.))
-    *exp(-min(40.,opticalDepth)*.5);
-  vec3 emission=(cloudLight+embeddedLight)*max(0.,component.light.x)*uSeaQuiet;
-  return vec4(emission,transmission);
-}
-vec3 stellarLandscape(vec3 direction,vec3 background) {
-  float energy=uSeaComponents[0].light.x+uSeaComponents[0].material.w
-    +uSeaComponents[1].light.x+uSeaComponents[1].material.w
-    +uSeaComponents[2].light.x+uSeaComponents[2].material.w
-    +uSeaComponents[3].light.x+uSeaComponents[3].material.w;
-  if(energy<=0.)return background;
-  vec3 d=uSeaFrame*direction;
-  vec3 radiance=background;
-  for(int i=0;i<4;i++){
-    vec4 layer=seaComponent(d,uSeaComponents[i]);
-    radiance=radiance*layer.a+layer.rgb;
-  }
-  return radiance;
-}
 
 // Eighteen spatial building blocks share seeded population, erosion and light.
 // Their controls are interpolated in world space, never chosen by a screen or clock.
@@ -405,7 +239,6 @@ vec3 deepSky(vec3 direction) {
     filteredSpark=mix(${DEEP_SKY_SPARK_FILTER.mean}*probability,spark*population,resolved);
   }
   sky+=vec3(.55,.63,.7)*filteredSpark*.22;
-  if(uSeaHasLandscape)return stellarLandscape(d,sky);
   return sky+stellarSea(d);
 }`;
 
@@ -419,23 +252,13 @@ const MORPH_GROUPS = ['A','B','C','D','E','F'];
 const MORPH_UNIFORMS = MORPH_GROUPS.map(suffix => `uSeaMorph${suffix}`);
 const PROFILE_UNIFORMS = Object.entries(SEA_PROFILE).map(([key, defaults]) => ({key, defaults, uniform: `uSea${key[0].toUpperCase()+key.slice(1)}`}));
 const morphWeight = (profile, sea, index) => profile?.[index] ?? (index < 6 ? sea?.[index] ?? 0 : 0);
-const LANDSCAPE_DEFAULTS = {
-  offset:[0,0,0],shape:[1,1,0,.1],topology:[0,0,0,0],contour:[0,2,0,0],
-  material:[0,0,0,0],light:[0,0,0,0],cool:[0,0,0],warm:[0,0,0],spectrum:[4,27,160,1],population:[0,1,0,0],
-};
-const LANDSCAPE_FIELDS = Object.entries(LANDSCAPE_DEFAULTS);
-function landscapeComponent() {
-  return {frame:new THREE.Matrix3(),...Object.fromEntries(Object.entries(LANDSCAPE_DEFAULTS).map(([key,values])=>
-    [key,values.length===4?new THREE.Vector4(...values):new THREE.Vector3(...values)]))};
-}
 
 export function deepSkyUniforms({detailTexture = null} = {}) {
   const uniforms = {uSkyTint:{value:new THREE.Color(.55,.6,.66)},uSkyBandNormal:{value:new THREE.Vector3(0,1,0)},
     uSkyBrightness:{value:.012},uSkyBandStrength:{value:0},uSkyStarDensity:{value:.12},
     uSeaWeightsA:{value:new THREE.Vector3()},uSeaWeightsB:{value:new THREE.Vector3()},
     uSeaFrame:{value:new THREE.Matrix3()},uSeaPhase:{value:0},uSeaWidth:{value:1},uSeaQuiet:{value:1},
-    uSeaDetail:{value:detailTexture},uSeaHasDetail:{value:Boolean(detailTexture)},
-    uSeaHasLandscape:{value:false},uSeaComponents:{value:Array.from({length:4},landscapeComponent)}};
+    uSeaDetail:{value:detailTexture},uSeaHasDetail:{value:Boolean(detailTexture)}};
   for (const suffix of MORPH_GROUPS) uniforms[`uSeaMorph${suffix}`] = {value:new THREE.Vector3()};
   for (const [name,values] of Object.entries(SEA_PROFILE)) {
     uniforms[`uSea${name[0].toUpperCase()+name.slice(1)}`] = {value:values.length===4?new THREE.Vector4(...values):new THREE.Vector3(...values)};
@@ -455,13 +278,6 @@ export function setDeepSkyEnvironment(uniforms, environment, quiet = 0) {
   if (sea) uniforms.uSeaWeightsB.value.fromArray(sea.weights,3);
   else uniforms.uSeaWeightsB.value.set(0,0,0);
   if (sea) {uniforms.uSeaFrame.value.fromArray(sea.frame);uniforms.uSeaPhase.value=sea.phase;uniforms.uSeaWidth.value=sea.width;}
-  const landscape=sea?.landscape;
-  uniforms.uSeaHasLandscape.value=landscape?.revision===1&&landscape.components?.length===4;
-  for(let i=0;i<4;i++) {
-    const target=uniforms.uSeaComponents.value[i],source=uniforms.uSeaHasLandscape.value?landscape.components[i]:null;
-    if(source?.frame)target.frame.fromArray(source.frame);else target.frame.identity();
-    for(const [key,defaults] of LANDSCAPE_FIELDS)target[key].fromArray(source?.[key]??defaults);
-  }
   const profile = sea?.appearance;
   for (let group=0;group<MORPH_GROUPS.length;group++) {
     const offset=group*3;

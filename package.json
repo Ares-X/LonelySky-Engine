@@ -25,6 +25,7 @@
     "./collision": "./src/collision.js",
     "./orbits": "./src/orbits.js",
     "./generator": "./src/generator.js",
+    "./cosmic-structures": "./src/cosmic-structures.js",
     "./streaming": "./src/streaming.js",
     "./three": "./src/three.js"
   },

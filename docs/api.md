@@ -210,46 +210,6 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   dark seams at the longitude meridian in both the sky and lens. Latitude
   filtering is preserved. This changes filtering only: it adds no image assets
   and does not change UV coordinates, descriptors, seeds or body positions.
-- A caller may instead provide `starSea.landscape = {revision: 1, components}`.
-  This replaces the profile's radiance for that environment; it does not reseed
-  or combine with the legacy eighteen-shape path. `components` has exactly four
-  fixed slots, ordered far to near. Each slot contains an orthonormal `frame`
-  (nine column-major numbers, applied after `starSea.frame`), `offset` (three),
-  `shape` (positive angular scales X/Y, hollow amount, positive rim width),
-  `topology` (nonnegative cloud/ring/stream/spiral weights), `contour` (bend,
-  winding, shear, ridge), `material` (warp, breakup, clump, optical depth),
-  `light` (nonnegative emission, core strength, source X/Y), and linear-light
-  RGB `cool`/`warm` arrays. Shape coordinates use stereographic direction units.
-  Clump controls detail amplitude, density concentration and dust structure.
-  Two optional four-number fields control local detail independently of the
-  broad topology: `spectrum` is coarse/middle/fine angular noise frequency and
-  positive local X/Y anisotropy; `population` is nonnegative relative weights
-  for diffuse light, cloud condensations, dust filaments and stellar associations.
-  Frequencies are applied to the component direction before noise offsets;
-  weights are normalized by the renderer and may be continuously mixed. Defaults
-  are `[4,27,160,1]` and `[0,1,0,0]`. The three existing noise samples are reused
-  for different density responses, silhouettes and stellar clustering, rather
-  than putting the same grain over every population. Stellar associations have
-  localized point populations; unresolved points retain filtered mean light.
-  Old landscape descriptors may omit both fields; appearance and six-weight
-  descriptors keep their existing rendering path.
-  Cloud emission is integrated through a uniform unit-depth slab as
-  `rho * (1 - transmission) / opticalDepth`, with the analytic zero-depth
-  limit. Increasing the emitting density therefore approaches saturation rather
-  than darkening the same cloud. Nuclei and point stars retain a midpoint-depth
-  attenuation approximation. This is an optical rendering approximation, not
-  a fluid simulation or a quantitative astronomical transfer model.
-  Pure absorption and pure emission are both supported. A caller must keep
-  slot roles stable across space, interpolate its fields, then reconstruct
-  orthonormal local frames; do not sort slots as brightness changes. Seeds,
-  placement rules, camera composition and naming belong to the caller.
-  The sky and black-hole lens copy the same descriptor into independent
-  uniforms. Removing the landscape clears all slots and restores the published
-  appearance/legacy path. No texture or drawing pass is added. The new path has
-  a fixed four-field cost (up to fifteen noise evaluations per fragment,
-  including the basic sky), plus optical and filtered stellar-detail math;
-  unchanged draw counts do not imply unchanged GPU time. Measure on the target
-  hardware and include mixed spatial samples, not only anchor points.
 - `createCosmos({seed})` creates sparse spiral, elliptical and irregular galaxies.
   Its update takes `{sectorIndex, cameraPosition, viewportHeight, pixelRatio,
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions
@@ -315,3 +275,24 @@ different spatial provider. This module does not implement N-body interactions,
 parabolic/hyperbolic trajectories, relativistic or surface-terrain physics.
 Basis: [NASA Kepler's laws](https://science.nasa.gov/solar-system/orbits-and-keplers-laws/)
 and [NASA orbital mechanics](https://science.nasa.gov/learn/basics-of-space-flight/chapter3-3/).
+
+## Hierarchical cosmic structure catalogue
+
+The pure data entry point also exports the `cosmic-structures` module. Its
+`describeCosmicStructures(coordinate, seed)` accepts a macro coordinate in a
+4096-cell grid and returns a frozen sparse parent galaxy and its existing child
+clusters and nebula, or an empty array. `loadedCosmicStructures(sectorIndex, seed)`
+returns the fixed 5³ neighborhood. It does not invent nearby objects or promise
+an infinite catalogue: the address torus contains only 8³ macro coordinates.
+Counts and layouts depend on the supplied seed.
+
+`cosmicStructureRelativeCenter(descriptor, decodedCell, output?)` returns the
+true, wrapped centre in the caller's sector frame. Omitting `output` creates an
+independent three-number snapshot; an explicit array or typed array is overwritten
+and returned by reference. Navigation uses these true coordinates and radii.
+`cosmicDrawDistance` and its inverse are drawing-depth maps only; applying them
+to physical positions changes navigation and collision semantics.
+
+The default public seed is `lonelysky`. Applications own their world seed,
+names, save provenance and generation-migration decisions. A generator revision
+is not an instruction to replace an application's universe identity.
