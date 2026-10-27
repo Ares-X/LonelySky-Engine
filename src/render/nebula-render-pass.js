@@ -7,8 +7,9 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
  * it is not order-independent transparency or volumetric light transport.
  */
 export class NebulaRenderPass extends RenderPass {
-  constructor(scene, camera) {
+  constructor(scene, camera, { reuseWorldMatrices = false } = {}) {
     super(scene, camera);
+    this.reuseWorldMatrices = reuseWorldMatrices;
     this._hiddenMaterial = new THREE.Material();
     this._hiddenMaterial.visible = false;
     this._attachedDepth = new Map();
@@ -86,7 +87,16 @@ export class NebulaRenderPass extends RenderPass {
       filter(false);
       renderer.autoClear = false;
       this.scene.background = null;
-      renderer.render(this.scene, this.camera);
+      const matrixWorldAutoUpdate = this.scene.matrixWorldAutoUpdate;
+      const reuseWorldMatrices = this.reuseWorldMatrices;
+      try {
+        // Opt-in callers keep transforms unchanged throughout both draws. The
+        // next frame still propagates its scene changes in the first draw.
+        if (reuseWorldMatrices) this.scene.matrixWorldAutoUpdate = false;
+        renderer.render(this.scene, this.camera);
+      } finally {
+        if (reuseWorldMatrices) this.scene.matrixWorldAutoUpdate = matrixWorldAutoUpdate;
+      }
       completed = true;
     } finally {
       for (const [object, material] of objects) object.material = material;
