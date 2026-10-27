@@ -210,6 +210,28 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   dark seams at the longitude meridian in both the sky and lens. Latitude
   filtering is preserved. This changes filtering only: it adds no image assets
   and does not change UV coordinates, descriptors, seeds or body positions.
+- A caller may instead provide `starSea.landscape = {revision: 1, components}`.
+  This replaces the profile's radiance for that environment; it does not reseed
+  or combine with the legacy eighteen-shape path. `components` has exactly four
+  fixed slots, ordered far to near. Each slot contains an orthonormal `frame`
+  (nine column-major numbers, applied after `starSea.frame`), `offset` (three),
+  `shape` (positive angular scales X/Y, hollow amount, positive rim width),
+  `topology` (nonnegative cloud/ring/stream/spiral weights), `contour` (bend,
+  winding, shear, ridge), `material` (warp, breakup, clump, optical depth),
+  `light` (nonnegative emission, core strength, source X/Y), and linear-light
+  RGB `cool`/`warm` arrays. Shape coordinates use stereographic direction units.
+  Clump controls detail amplitude, density concentration and dust structure.
+  Pure absorption and pure emission are both supported. A caller must keep
+  slot roles stable across space, interpolate its fields, then reconstruct
+  orthonormal local frames; do not sort slots as brightness changes. Seeds,
+  placement rules, camera composition and naming belong to the caller.
+  The sky and black-hole lens copy the same descriptor into independent
+  uniforms. Removing the landscape clears all slots and restores the published
+  appearance/legacy path. No texture or drawing pass is added. The new path has
+  a fixed four-field cost (up to sixteen noise evaluations per fragment,
+  including the basic sky), plus optical and filtered stellar-detail math;
+  unchanged draw counts do not imply unchanged GPU time. Measure on the target
+  hardware and include mixed spatial samples, not only anchor points.
 - `createCosmos({seed})` creates sparse spiral, elliptical and irregular galaxies.
   Its update takes `{sectorIndex, cameraPosition, viewportHeight, pixelRatio,
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions
