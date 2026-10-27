@@ -5,3 +5,4 @@ export * from './collision.js';
 export * from './generator.js';
 export * from './streaming.js';
 export * from './orbits.js';
+export * from './nebula-volume.js';

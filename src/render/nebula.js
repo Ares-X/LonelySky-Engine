@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { NEBULA_APPEARANCE_FAMILIES } from './nebula-appearance.js';
+import { NEBULA_VOLUME } from '../nebula-volume.js';
 
 let sharedNoise = null, noiseUsers = 0;
 
@@ -57,6 +58,10 @@ out vec4 nebulaColor;
 uniform sampler3D uNoise;
 uniform vec3 uCamera,uColorA,uColorB,uNoiseOffset;
 uniform mat4 uLocalToWorld,uViewProjection;
+uniform sampler2D uSceneDepth;
+uniform vec2 uSceneDepthSize;
+uniform mat4 uClipToLocal;
+uniform bool uHasSceneDepth;
 uniform float uVisibility,uDensity,uTime;
 uniform int uSteps,uMorphology,uAppearance;
 uniform vec3 uLightDirection;
@@ -145,6 +150,16 @@ void main(){
   vec3 lo=min(t0,t1),hi=max(t0,t1);
   float entry=max(0.0,max(max(lo.x,lo.y),lo.z));
   float exit=min(min(hi.x,hi.y),hi.z);
+  if(uHasSceneDepth){
+    vec2 uv=gl_FragCoord.xy/uSceneDepthSize;
+    float surfaceDepth=texture(uSceneDepth,uv).r;
+    if(surfaceDepth<1.0){
+      vec4 surface=uClipToLocal*vec4(uv*2.0-1.0,surfaceDepth*2.0-1.0,1.0);
+      // Integrate only the dust between the camera and the actual opaque
+      // surface. A first-cloud depth alone also blends dust behind that surface.
+      exit=min(exit,dot(surface.xyz/surface.w-uCamera,rd));
+    }
+  }
   if(exit<=entry)discard;
   float stepSize=(exit-entry)/float(uSteps);
   vec3 color=vec3(0.0);
@@ -240,6 +255,10 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     uNoiseOffset: { value: new THREE.Vector3((numericSeed % 251) / 251, (numericSeed % 241) / 241, (numericSeed % 239) / 239) },
     uLocalToWorld: { value: new THREE.Matrix4() },
     uViewProjection: { value: new THREE.Matrix4() },
+    uSceneDepth: { value: null },
+    uSceneDepthSize: { value: new THREE.Vector2(1, 1) },
+    uClipToLocal: { value: new THREE.Matrix4() },
+    uHasSceneDepth: { value: false },
     uDensity: { value: Number.isFinite(density) ? Math.max(0, Math.min(2, density)) : 1 },
     uVisibility: { value: 1 },
     uSteps: { value: 32 },
@@ -266,12 +285,34 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: true,
   });
   const volume = new THREE.Mesh(geometry, material);
-  volume.position.set(1500, -500, -12500);
-  volume.scale.set(7500, 6200, 3800);
+  volume.position.fromArray(NEBULA_VOLUME.center);
+  volume.scale.fromArray(NEBULA_VOLUME.halfExtents);
+  // The compositor binds a depth snapshot, never the attachment currently being
+  // rendered into. Keep direct createNebula/render callers backward compatible.
+  volume.userData.setSceneDepth = (depth, width, height, camera) => {
+    uniforms.uHasSceneDepth.value = depth !== null;
+    uniforms.uSceneDepth.value = depth;
+    if (depth === null) return;
+    uniforms.uSceneDepthSize.value.set(width, height);
+    volume.updateWorldMatrix(true, false);
+    camera.updateWorldMatrix(true, false);
+    uniforms.uClipToLocal.value.copy(volume.matrixWorld).invert()
+      .multiply(camera.matrixWorld).multiply(camera.projectionMatrixInverse);
+  };
   group.add(volume);
   let disposed = false;
   const cameraPosition = new THREE.Vector3();
   const boundsPoint = new THREE.Vector3();
+  const localBounds = new THREE.Box3(new THREE.Vector3(-1, -1, -1), new THREE.Vector3(1, 1, 1));
+  const worldBounds = new THREE.Box3(), frustum = new THREE.Frustum(), viewProjection = new THREE.Matrix4();
+  group.userData.isInView = camera => {
+    volume.updateWorldMatrix(true, false);
+    camera.updateWorldMatrix(true, false);
+    worldBounds.copy(localBounds).applyMatrix4(volume.matrixWorld);
+    viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    frustum.setFromProjectionMatrix(viewProjection);
+    return frustum.intersectsBox(worldBounds);
+  };
   // Fade from the transformed cloud volume, not its caller's chunk origin.
   // The nearest point on this oriented box remains zero everywhere inside it.
   group.userData.distanceToVolume = worldPosition => {

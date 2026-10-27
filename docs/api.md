@@ -1,5 +1,31 @@
 # Generation and rendering API
 
+## Nebula depth composition (0.7)
+
+`NebulaRenderPass(scene, camera)` from the optional `three` entry point replaces a
+Three.js `RenderPass` before bloom/output in an `EffectComposer`. It renders
+depth-writing surfaces once, snapshots their resolved depth, and draws the
+remaining translucent materials in Three's usual order. Nebula ray integration
+stops at the sampled surface instead of blending dust behind a solid over it.
+The depth snapshot is separate from the active render target. With no visible
+in-view nebula the pass follows the ordinary single-render path. Dispose the
+pass before its composer; it owns only depth textures it attached itself.
+
+`createUniverseView` uses this pass. Standalone `createNebula` remains compatible
+with ordinary rendering, which retains its first-cloud depth approximation.
+This correction does not implement order-independent transparency: overlapping
+volumes, rings and glows still use object sorting. Rendering into a screen
+framebuffer without a composer target also retains the ordinary path.
+
+The pure entry point exports `NEBULA_VOLUME`, `describeNebulaVolume({tilt})` and
+`nebulaVisibility(surfaceDistance)`. The descriptor returns the existing rotated
+centre, half extents, bounding radius and scenic focus radius; it changes no
+world-generation seed or address. Visibility stays full through 9,000 units from
+the actual box surface and fades smoothly to zero at 16,000. This preserves the
+authored entrance, 8,700 units from the front surface. The rendered group's
+`userData.isInView(camera)` provides conservative transformed-box/frustum overlap
+for consumers deciding whether the camera is looking into an empty view.
+
 ## Pure core
 
 Import `src/index.js` in Node.js or a browser. It never imports Three.js or uses
