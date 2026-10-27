@@ -10,7 +10,7 @@ function component(i) {
   return {frame:new THREE.Matrix3().set(Math.cos(i),0,Math.sin(i),0,1,0,-Math.sin(i),0,Math.cos(i)).toArray(),
     offset:[i,-i,3+i],shape:[.2+i*.3,.1+i*.15,i*.2,.08],topology:[i*.1,.4,i*.2,.1],
     contour:[i*.15,2+i,-i*.1,.5],material:[.3,.4,.5,i===0?0:1],
-    light:[i===3?0:.1+i*.05,i*.3,i*.2,-i*.1],cool:[.1+i*.1,.3,.5],warm:[.6,.4,.2+i*.1]};
+    light:[i===3?0:.1+i*.05,i*.3,i*.2,-i*.1],spectrum:[2+i,20+i,120+i,.7+i*.2],population:[.1,.2,.3,.4],cool:[.1+i*.1,.3,.5],warm:[.6,.4,.2+i*.1]};
 }
 const snapshot=value=>Object.fromEntries(Object.entries(value).map(([key,field])=>[key,field.toArray()]));
 
@@ -72,7 +72,7 @@ test('component axis, fractional crest and zero-width filtering remain in finite
   for(const coordinate of [0,1e-12,1e-6,.1]) {
     const theta=run('theta',{radius2:coordinate*coordinate,p:{x:0,y:coordinate},atan:safeAtan});
     assert.ok(Number.isFinite(theta));
-    const winding=run('winding',{radius:coordinate,middle:.5,log:Math.log,max:Math.max,abs:Math.abs,component:{contour:{y:8},material:{x:.7},offset:{z:-10}}});
+    const winding=run('winding',{radius:coordinate,middle:.5,middleResolution:1,log:Math.log,max:Math.max,abs:Math.abs,component:{contour:{y:8},material:{x:.7},offset:{z:-10}}});
     const phase=run('phase',{theta,arms:6,winding});
     assert.ok(Number.isFinite(phase));
   }
@@ -130,46 +130,34 @@ test('unresolved density-coupled stellar points retain finite mean light and van
 });
 
 
-test('stellar point footprints broaden finite kernels while conserving their three-dimensional integral',()=>{
+test('stellar point footprints broaden finite kernels while conserving their two-dimensional integral',()=>{
   const source=DEEP_SKY_GLSL.slice(DEEP_SKY_GLSL.indexOf('float seaStellarPoints('),DEEP_SKY_GLSL.indexOf('// Four independent directional fields.'));
   const expression=name=>source.match(new RegExp(`float ${name}=([^;]+);`))[1];
   const run=(name,values)=>Function(...Object.keys(values),`return (${expression(name)});`)(...Object.values(values));
-  const integral=Math.PI**1.5*.065**3;
+  const integral=Math.PI*.065**2;
   let previous=Infinity;
   for(const pointFootprint of [0,.01,.1,.3,.6,1,10]) {
     const variance=run('variance',{pointFootprint});
     const peak=run('spark',{variance,point:0,dot:()=>0,exp:Math.exp,pow:Math.pow});
     assert.ok(Number.isFinite(peak)&&peak>=0&&peak<=previous);
-    assert.ok(Math.abs(peak*Math.PI**1.5*variance**1.5-integral)<1e-12);
+    assert.ok(Math.abs(peak*Math.PI*variance-integral)<1e-12);
     previous=peak;
   }
 });
 
 
-test('clumping controls fine-scale light contrast while diffuse fields retain broad light',()=>{
-  const source=DEEP_SKY_GLSL.slice(DEEP_SKY_GLSL.indexOf('vec4 seaComponent('),DEEP_SKY_GLSL.indexOf('vec3 stellarLandscape('));
-  const expression=name=>source.match(new RegExp(`float ${name}=([^;]+);`))[1];
-  const run=(name,values)=>Function(...Object.keys(values),`return (${expression(name)});`)(...Object.values(values));
-  const mix=(a,b,t)=>a*(1-t)+b*t;
+test('continuous density populations have different frequency responses and finite positive light',()=>{
+  const body=DEEP_SKY_GLSL.match(/vec4 seaPopulations\([^)]*\)\s*\{([\s\S]*?)\n\}/)[1];
+  const evaluate=Function('broad','middle','fine','clump','exp','max','seaSquare','smoothstep','vec4',body.replace(/\bfloat\b/g,'let'));
   const smoothstep=(a,b,n)=>{const t=Math.max(0,Math.min(1,(n-a)/(b-a)));return t*t*(3-2*t);};
-  const ranges=[];
-  for(const clump of [0,.5,1]) {
-    const granularity=run('granularity',{clump,smoothstep});
-    const middleWeight=run('middleWeight',{granularity}),fineWeight=run('fineWeight',{granularity});
-    const populations=[];
-    for(const fine of [.1,.3,.5,.7,.9]) {
-      const noiseValue=run('noiseValue',{broad:.5,middle:.5,fine,middleWeight,fineWeight});
-      const concentrated=run('concentrated',{noiseValue,pow:Math.pow,max:Math.max});
-      const population=run('population',{noiseValue,concentrated,granularity,fine,mix});
-      const grain=run('componentGrain',{grain:fine,granularity,mix});
-      assert.ok(Number.isFinite(population)&&population>0);
-      if(clump===0)assert.equal(grain,1,'diffuse fields do not inherit the shared fine-grain overlay');
-      populations.push(population);
-    }
-    ranges.push(Math.max(...populations)-Math.min(...populations));
-  }
-  assert.ok(ranges[0]<.02,'fine detail barely modulates diffuse light');
-  assert.ok(ranges[2]>ranges[0]*10,'dense populations expose substantially stronger local knot contrast');
+  const run=(b,m,f)=>evaluate(b,m,f,.8,Math.exp,Math.max,x=>x*x,smoothstep,(...v)=>v);
+  const center=run(.6,.5,.5),gap=run(.6,.15,.5),peak=run(.9,.9,.5);
+  assert.equal(center[0],gap[0],'mist ignores middle-frequency fibers');
+  assert.ok(run(.6,.8,.5)[2]>gap[2]*3,'filaments emphasize anisotropic middle-scale condensations');
+  assert.ok(peak[3]>center[3]*5,'stellar associations concentrate into selected coarse/middle peaks');
+  assert.ok(peak[1]>gap[1],'clouds retain large-scale density variation');
+  for(const b of [0,.2,.5,.8,1])for(const m of [0,.2,.5,.8,1])for(const f of [0,.5,1])
+    assert.ok(run(b,m,f).every(n=>Number.isFinite(n)&&n>=0));
 });
 
 test('stream widths retain an angular floor and remain filtered across narrow descriptor scales',()=>{
@@ -185,4 +173,17 @@ test('stream widths retain an angular floor and remain filtered across narrow de
       assert.ok(Number.isFinite(filtered)&&filtered>=streamWidth&&filtered>=crossFootprint);
     }
   }
+});
+
+
+test('older landscape descriptors receive defined population defaults without aliasing them',()=>{
+  const uniforms=deepSkyUniforms(),components=Array.from({length:4},(_,i)=>component(i));
+  for(const value of components){delete value.spectrum;delete value.population;}
+  setDeepSkyEnvironment(uniforms,{...environment,starSea:{...sea(),landscape:{revision:1,components}}});
+  for(const value of uniforms.uSeaComponents.value){
+    assert.deepEqual(value.spectrum.toArray(),[4,27,160,1]);
+    assert.deepEqual(value.population.toArray(),[0,1,0,0]);
+  }
+  uniforms.uSeaComponents.value[0].population.set(1,0,0,0);
+  assert.deepEqual(uniforms.uSeaComponents.value[1].population.toArray(),[0,1,0,0]);
 });

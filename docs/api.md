@@ -221,6 +221,18 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   `light` (nonnegative emission, core strength, source X/Y), and linear-light
   RGB `cool`/`warm` arrays. Shape coordinates use stereographic direction units.
   Clump controls detail amplitude, density concentration and dust structure.
+  Two optional four-number fields control local detail independently of the
+  broad topology: `spectrum` is coarse/middle/fine angular noise frequency and
+  positive local X/Y anisotropy; `population` is nonnegative relative weights
+  for diffuse light, cloud condensations, dust filaments and stellar associations.
+  Frequencies are applied to the component direction before noise offsets;
+  weights are normalized by the renderer and may be continuously mixed. Defaults
+  are `[4,27,160,1]` and `[0,1,0,0]`. The three existing noise samples are reused
+  for different density responses, silhouettes and stellar clustering, rather
+  than putting the same grain over every population. Stellar associations have
+  localized point populations; unresolved points retain filtered mean light.
+  Old landscape descriptors may omit both fields; appearance and six-weight
+  descriptors keep their existing rendering path.
   Pure absorption and pure emission are both supported. A caller must keep
   slot roles stable across space, interpolate its fields, then reconstruct
   orthonormal local frames; do not sort slots as brightness changes. Seeds,
@@ -228,7 +240,7 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   The sky and black-hole lens copy the same descriptor into independent
   uniforms. Removing the landscape clears all slots and restores the published
   appearance/legacy path. No texture or drawing pass is added. The new path has
-  a fixed four-field cost (up to sixteen noise evaluations per fragment,
+  a fixed four-field cost (up to fifteen noise evaluations per fragment,
   including the basic sky), plus optical and filtered stellar-detail math;
   unchanged draw counts do not imply unchanged GPU time. Measure on the target
   hardware and include mixed spatial samples, not only anchor points.
