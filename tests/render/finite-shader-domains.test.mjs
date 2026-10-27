@@ -37,6 +37,33 @@ test('shared sky dust stays finite on both sides of the galactic plane', () => {
   assert.equal(evaluate(absorption,{dustLatitude:0}),1,'the dust lane has maximum optical depth at its centre');
 });
 
+test('stellar spiral emission stays finite at float cosine extrema', () => {
+  // A tiny cosine undershoot otherwise feeds a negative base into fractional
+  // powers; a few invalid HDR pixels can poison the full bloom pyramid.
+  for(const name of ['armA','armB']) for(const clump of [.2,.5,.85]) for(const value of [-1-2**-22,-1,-.5,0,.5,1,1+2**-22]) {
+    const amount=evaluate(expression(DEEP_SKY_GLSL,name),{theta:0,armCount:3,winding:0,clump,cos:()=>value,max:Math.max});
+    assert.ok(Number.isFinite(amount)&&amount>=0);
+    if(value<=-1) assert.equal(amount,0);
+  }
+});
+
+test('stellar Gaussian profiles stay finite on both sides of their signed centres', () => {
+  const squareBody=DEEP_SKY_GLSL.match(/float seaSquare\(float value\)\s*\{([^}]+)\}/)?.[1];
+  const seaSquare=squareBody?Function('value',squareBody):undefined;
+  const sources=['dustLane','bulge','braid'].map(name=>expression(DEEP_SKY_GLSL,name));
+  sources.push(...[...DEEP_SKY_GLSL.matchAll(/float (?:rim|bridge)=([^;]+);/g)].map(match=>match[1]));
+  const lens=DEEP_SKY_GLSL.match(/mass\+=uSeaMorphD\.y\*([^;]+);/)?.[1];
+  assert.ok(lens);sources.push(lens);
+  const smoothstep=(a,b,n)=>{const t=clamp((n-a)/(b-a),0,1);return t*t*(3-2*t);};
+  for(const value of [-2,-.9,-.3,0,.3,.9,2]) for(const source of sources) {
+    const amount=evaluate(source,{seaSquare,smoothstep,max:Math.max,cos:Math.cos,
+      warped:value,uSeaDust:{y:.04,x:1},d:{z:value},asymmetry:.2,core:.4,
+      latitude:value,sideFront:1,p:{x:.1,y:value},wave:.3,side:{x:value,y:value},
+      shell:value,stretch:1,middle:.5,eye:Math.abs(value),lens:Math.abs(value),front:1,cloud:.4});
+    assert.ok(Number.isFinite(amount)&&amount>=0,`${source} at ${value}`);
+  }
+});
+
 test('planet limb and atmosphere remain finite at float32 facing extrema', () => {
   const planet=planetMaterial({kind:'gas',seed:1,radius:100,colorA:0x668899,colorB:0xaabbcc});
   const atmosphere=atmosphereMaterial(0x72bded);
