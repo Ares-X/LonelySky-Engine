@@ -150,10 +150,18 @@ void main() {
 
   // The enclosing back face is only a rasterization proxy. Put the pixel at
   // the first disk encounter or centre plane, so foreground planets still win.
-  float depthDistance = firstDiskDistance > 0.0 ? firstDiskDistance : max(0.001, -b);
-  vec3 depthPoint = uCamera + originalDirection * depthDistance;
-  vec4 clip = uViewProjection * uLocalToWorld * vec4(depthPoint, 1.0);
-  gl_FragDepth = clamp(0.5 * clip.z / max(clip.w, 0.0001) + 0.5, 0.0, 1.0);
+  // An escaped outward ray inside the proxy has no forward centre plane.
+  // Its optical sky contribution belongs at far depth; using .001 would place
+  // the entire back face in front of every physical foreground surface. A
+  // forward disk encounter still owns its actual depth, even on outward rays.
+  if (firstDiskDistance <= 0.0 && b >= 0.0 && escaped && !captured) {
+    gl_FragDepth = 1.0;
+  } else {
+    float depthDistance = firstDiskDistance > 0.0 ? firstDiskDistance : max(0.001, -b);
+    vec3 depthPoint = uCamera + originalDirection * depthDistance;
+    vec4 clip = uViewProjection * uLocalToWorld * vec4(depthPoint, 1.0);
+    gl_FragDepth = clamp(0.5 * clip.z / max(clip.w, 0.0001) + 0.5, 0.0, 1.0);
+  }
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }
