@@ -175,6 +175,24 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   celestial detail in both views. It is borrowed and never disposed by either
   group; without it, the layer uses procedural detail. Like the environment,
   the texture is supplied by the application, with no engine asset dependency.
+  An optional `starSea.appearance` profile supplies `morphologyWeights` (18
+  nonnegative weights), linear RGB `cool`, `warm`, `accent` and a three-number
+  spatial noise `offset`. Four-number controls are `shape` (stretch, warp, core,
+  spread), `structure` (arm count, pitch, clumping, asymmetry), `dust` (opacity,
+  lane width, erosion, contrast) and `state` (young population, emission,
+  exposure, extinction). The first six weights address the legacy river,
+  curtain, halo, islands, rift and arc. Weights 6–17 add barred/fragmented
+  spirals, eroded emission shells, filaments, stellar lenses, diffuse
+  ellipsoids, starburst knots, tidal clusters, dust braids, hollow dust eyes,
+  tidal tails and broken annuli. The application owns correlated palettes,
+  seed streams and continuous spatial interpolation. The renderer copies
+  profiles to both sky and lens; it does not choose a profile from a dominant
+  family. Old descriptors without `appearance` retain the six-weight contract;
+  removing a sea clears all eighteen contributions. The catalogue texture
+  contributes filtered stellar grain only, so its panoramic silhouette does
+  not determine the profile's geometry or palette. This changes appearance,
+  not celestial addresses or particle generation. More primitives and per-pixel
+  math can increase frame cost; no cross-device performance guarantee is made.
   Use an equirectangular celestial map with periodic longitude and set the
   caller-owned texture's `wrapS = THREE.RepeatWrapping`; latitude uses the
   texture's usual clamped wrapping. Version 0.6.1 supplies explicit texture

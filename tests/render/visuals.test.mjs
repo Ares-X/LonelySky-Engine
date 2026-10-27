@@ -213,6 +213,40 @@ test('six sea blends reach both views, copy descriptors and clear on an ordinary
   } finally { sky.userData.dispose(); hole.userData.dispose(); }
 });
 
+test('seeded sea profiles reach the sky and lens without leaking into later legacy or empty environments', () => {
+  const sky=createDeepSky(),hole=createBlackHole(), defaults=deepSkyUniforms();
+  const environment={ambientTint:[.6,.7,.8],bandNormal:[0,1,0],skyBrightness:.02,bandStrength:0,starDensity:.2};
+  const appearance={revision:1,morphologyWeights:Array.from({length:18},(_,i)=>i===17?.8:i===6?.2:0),
+    cool:[.2,.3,.4],warm:[.7,.6,.5],accent:[.8,.2,.3],offset:[-3,4,5],
+    shape:[.8,.2,.4,.5],structure:[3.4,2.5,.6,-.3],dust:[1.8,.03,.4,.7],state:[.6,.15,.9,.5]};
+  const sea={weights:[0,0,0,0,0,1,0],frame:new THREE.Matrix3().toArray(),phase:1,width:1,appearance};
+  const groups=['A','B','C','D','E','F'];
+  const morphs=u=>groups.flatMap(group=>u[`uSeaMorph${group}`].value.toArray());
+  try {
+    sky.userData.update({...environment,starSea:sea});hole.userData.setEnvironment({...environment,starSea:sea});
+    for(const object of [sky,hole]) {
+      const uniforms=object.children[0].material.uniforms;
+      assert.deepEqual(morphs(uniforms),appearance.morphologyWeights);
+      for(const key of ['cool','warm','accent','offset','shape','structure','dust','state']) {
+        assert.deepEqual(uniforms[`uSea${key[0].toUpperCase()+key.slice(1)}`].value.toArray(),appearance[key]);
+      }
+    }
+    const before=morphs(sky.children[0].material.uniforms);appearance.morphologyWeights.fill(0);appearance.cool.fill(0);
+    assert.deepEqual(morphs(sky.children[0].material.uniforms),before);
+    assert.deepEqual(sky.children[0].material.uniforms.uSeaCool.value.toArray(),[.2,.3,.4]);
+    const legacy={...sea};delete legacy.appearance;
+    sky.userData.update({...environment,starSea:legacy});hole.userData.setEnvironment({...environment,starSea:legacy});
+    for(const object of [sky,hole]) {
+      const uniforms=object.children[0].material.uniforms;
+      assert.deepEqual(morphs(uniforms),[0,0,0,0,0,1,...Array(12).fill(0)]);
+      assert.deepEqual(uniforms.uSeaCool.value.toArray(),defaults.uSeaCool.value.toArray());
+    }
+    sky.userData.update(environment);hole.userData.setEnvironment(environment);
+    assert.deepEqual(morphs(sky.children[0].material.uniforms),Array(18).fill(0));
+    assert.deepEqual(morphs(hole.children[0].material.uniforms),Array(18).fill(0));
+  } finally {sky.userData.dispose();hole.userData.dispose();}
+});
+
 test('custom sky uniforms and both views borrow the same optional detail texture', () => {
   const texture = new THREE.Texture(), released = disposalCount(texture);
   const sky = createDeepSky({ detailTexture: texture }), hole = createBlackHole({ detailTexture: texture });
