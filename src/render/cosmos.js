@@ -119,6 +119,7 @@ export function createCosmos({ seed = 'lonelysky' } = {}) {
       void main(){
         vec3 relative=position-cameraLocal;float distanceToCamera=length(relative);
         alpha=1.-smoothstep(420000.,520000.,distanceToCamera);tint=color;
+        if(alpha==0.){gl_Position=vec4(0.,0.,2.,1.);gl_PointSize=1.;return;}
         // Keep all nearby depth relationships. Only distant drawing depth is
         // compressed to fit the existing 220k clip plane; angles stay exact.
         float drawDistance=distanceToCamera<=160000.?distanceToCamera:160000.+40000.*(1.-exp(-(distanceToCamera-160000.)/180000.));

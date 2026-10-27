@@ -224,6 +224,7 @@ const fragmentShader = /* glsl */`
         vec3 q=localCamera+direction*distanceAlongRay;
         float trueDistance=distanceAlongRay*physicalSpeed*radius;
         float visibility=1.-smoothstep(420000.,520000.,trueDistance);
+        if(visibility==0.) continue;
         float sampleFootprint=max(binFootprint,angularFootprint*distanceAlongRay);
         if(morphology>=1.5) sampleFootprint=max(sampleFootprint,physicalSpeed*rayRange*2./float(steps));
         // A dust-plane crossing is localized; ray-bin width only filters
@@ -247,8 +248,9 @@ const fragmentShader = /* glsl */`
         vec2 node=coreQuadrature[i];float u=node.x;
         vec2 distanceAlongRay=vec2(center)-vec2(reach.x,-reach.y)*u*u;
         vec2 visibility=1.-smoothstep(vec2(420000.),vec2(520000.),distanceAlongRay*physicalSpeed*radius);
-        vec3 nearCore=coreEmission(localCamera+direction*distanceAlongRay.x,max(binFootprint,angularFootprint*distanceAlongRay.x),angularFootprint*distanceAlongRay.x);
-        vec3 farCore=coreEmission(localCamera+direction*distanceAlongRay.y,max(binFootprint,angularFootprint*distanceAlongRay.y),angularFootprint*distanceAlongRay.y);
+        vec3 nearCore=vec3(0.),farCore=vec3(0.);
+        if(reach.x!=0.&&visibility.x!=0.) nearCore=coreEmission(localCamera+direction*distanceAlongRay.x,max(binFootprint,angularFootprint*distanceAlongRay.x),angularFootprint*distanceAlongRay.x);
+        if(reach.y!=0.&&visibility.y!=0.) farCore=coreEmission(localCamera+direction*distanceAlongRay.y,max(binFootprint,angularFootprint*distanceAlongRay.y),angularFootprint*distanceAlongRay.y);
         emission+=(nearCore*reach.x*visibility.x+farCore*reach.y*visibility.y)*2.*u*node.y*physicalSpeed;
       }
     }

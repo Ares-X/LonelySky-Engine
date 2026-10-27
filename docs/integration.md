@@ -36,6 +36,14 @@ colors and radii keep their existing storage. Population or quality changes
 replace the buffers. Particle coordinates, counts, distance fades and volume
 sampling budgets are unchanged.
 
+Shaders skip work only when an existing contribution is exactly zero: fully
+transparent points are clipped before rasterization, galaxy samples beyond the
+existing visibility fade avoid density evaluation, and the two optional shell
+families avoid microstructure queries outside their existing fronts. Deep-sky
+band noise and resolved spark detail are also skipped when their weights are
+zero. The geometry, integration nodes, sample counts and fade distances remain
+unchanged; no additional density or opacity cutoff is introduced.
+
 ## Procedural scenery appearance
 
 The directional sky shares absorbing dust lanes with the black-hole lens. Galaxy
