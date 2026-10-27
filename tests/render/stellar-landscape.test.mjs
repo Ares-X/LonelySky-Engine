@@ -86,7 +86,7 @@ test('component axis, fractional crest and zero-width filtering remain in finite
   }
   for(const density of [0,1,10000]) for(const opacity of [-1,0,1,10000]) {
     const depth=run('opticalDepth',{density,dustStructure:3,component:{material:{w:opacity}},min:Math.min,max:Math.max});
-    assert.ok(Number.isFinite(depth)&&depth>=0&&depth<=40);
+    assert.ok(Number.isFinite(depth)&&depth>=0);
   }
 });
 
@@ -186,4 +186,24 @@ test('older landscape descriptors receive defined population defaults without al
   }
   uniforms.uSeaComponents.value[0].population.set(1,0,0,0);
   assert.deepEqual(uniforms.uSeaComponents.value[1].population.toArray(),[0,1,0,0]);
+});
+
+
+test('uniform cloud slabs agree with independent depth quadrature and stay monotonic as density rises',()=>{
+ const body=DEEP_SKY_GLSL.match(/float seaSlabIntegral\([^)]*\)\s*\{([\s\S]*?)\n\}/)[1];
+ const integral=Function('opticalDepth','transmission',body);
+ const quadrature=tau=>{const n=10000,h=1/n;let sum=0;for(let i=0;i<n;i++)sum+=Math.exp(-tau*(i+.5)*h);return sum*h;};
+ for(const tau of [0,1e-8,1e-5,.0005,.001,.01,.1,1,2,5,10,40,80]){
+  const actual=integral(tau,Math.exp(-Math.min(40,tau))),expected=quadrature(tau);
+  assert.ok(Number.isFinite(actual)&&actual>=0);
+  assert.ok(Math.abs(actual-expected)<4e-8,`${tau}: analytic slab agrees with depth samples`);
+ }
+ for(const extinction of [0,.1,1,5]){
+  let previous=-1;
+  for(const rho of [0,1e-8,.0001,.01,.1,.5,1,2,4,8,16,40,80,256]){
+   const tau=rho*extinction,value=rho*integral(tau,Math.exp(-Math.min(40,tau)));
+   assert.ok(value>=previous-1e-12,'distributed emission saturates rather than darkening at high density');previous=value;
+  }
+ }
+ assert.ok(16*Math.exp(-16*.5)<2*Math.exp(-2*.5),'the old midpoint source falsely darkened above its maximum');
 });

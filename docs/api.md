@@ -233,6 +233,12 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   localized point populations; unresolved points retain filtered mean light.
   Old landscape descriptors may omit both fields; appearance and six-weight
   descriptors keep their existing rendering path.
+  Cloud emission is integrated through a uniform unit-depth slab as
+  `rho * (1 - transmission) / opticalDepth`, with the analytic zero-depth
+  limit. Increasing the emitting density therefore approaches saturation rather
+  than darkening the same cloud. Nuclei and point stars retain a midpoint-depth
+  attenuation approximation. This is an optical rendering approximation, not
+  a fluid simulation or a quantitative astronomical transfer model.
   Pure absorption and pure emission are both supported. A caller must keep
   slot roles stable across space, interpolate its fields, then reconstruct
   orthonormal local frames; do not sort slots as brightness changes. Seeds,

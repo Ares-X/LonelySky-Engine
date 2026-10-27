@@ -79,6 +79,13 @@ vec4 seaPopulations(float broad,float middle,float fine,float clump) {
   return vec4(mist,cloud,filaments,clusters);
 }
 
+// A uniform emitting/absorbing slab of unit depth. This optical approximation
+// integrates distributed cloud light; embedded points retain a depth estimate.
+float seaSlabIntegral(float opticalDepth,float transmission) {
+  if(opticalDepth<.001)return 1.-opticalDepth*.5+opticalDepth*opticalDepth/6.;
+  return (1.-transmission)/opticalDepth;
+}
+
 // Four independent directional fields. Slots are ordered far to near by the
 // caller; continuous optical composition never sorts or reseeds their contents.
 vec4 seaComponent(vec3 direction,SeaComponent component) {
@@ -158,8 +165,8 @@ vec4 seaComponent(vec3 direction,SeaComponent component) {
   float density=max(0.,dot(vec4(body,ring,stream,spiral),max(component.topology,vec4(0.))))*front*erosion*population;
   float dustStructure=mix(.55+(1.-broad)*1.1,.15+4.8*seaSquare(1.-middle)*(.3+fine),
     clamp(populations.y+populations.z*.65,0.,1.));
-  float opticalDepth=min(40.,density*max(0.,component.material.w)*dustStructure);
-  float transmission=exp(-opticalDepth);
+  float opticalDepth=density*max(0.,component.material.w)*dustStructure;
+  float transmission=exp(-min(40.,opticalDepth));
   vec2 source=p-component.light.zw;
   float coreWidth=.025+.055*(1.-ridge),coreWidth2=coreWidth*coreWidth;
   float filteredCore=coreWidth2+footprint*footprint;
@@ -172,9 +179,10 @@ vec4 seaComponent(vec3 direction,SeaComponent component) {
     +component.offset*7.1,stellarDensity);
   vec3 starColor=mix(component.cool,component.warm,.65);
   float componentGrain=1.+(fine-.5)*(.08*populations.y+.24*populations.z);
-  vec3 emission=(color*density*componentGrain+component.warm*core*max(0.,component.light.y)
-    +starColor*stars*(6.+populations.w*20.))
-    *max(0.,component.light.x)*exp(-opticalDepth*.5)*uSeaQuiet;
+  vec3 cloudLight=color*density*componentGrain*seaSlabIntegral(opticalDepth,transmission);
+  vec3 embeddedLight=(component.warm*core*max(0.,component.light.y)+starColor*stars*(6.+populations.w*20.))
+    *exp(-min(40.,opticalDepth)*.5);
+  vec3 emission=(cloudLight+embeddedLight)*max(0.,component.light.x)*uSeaQuiet;
   return vec4(emission,transmission);
 }
 vec3 stellarLandscape(vec3 direction,vec3 background) {
