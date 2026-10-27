@@ -55,6 +55,7 @@ export function describeMacro(coordinate, seed = 'lonelysky') {
 /** Local 3D positions; every quality level is an exact prefix of the same stream. */
 export function sampleGalaxy(descriptor, count = PARTICLES_PER_GALAXY) {
   if (!Number.isInteger(count) || count < 0 || count > PARTICLES_PER_GALAXY) throw new RangeError('Invalid galaxy sample count');
+  const openClusterV3 = descriptor.revision === 3 && descriptor.kind === 'cluster' && descriptor.family === 'open' && descriptor.morphology === 'irregular';
   const random = randomFromSeed(`${descriptor.seed}:particles-v1`);
   const positions = new Float32Array(count * 3), colors = new Float32Array(count * 3), sizes = new Float32Array(count);
   const rotation = new THREE.Euler(...descriptor.orientation), point = new THREE.Vector3(), color = new THREE.Color();
@@ -73,7 +74,7 @@ export function sampleGalaxy(descriptor, count = PARTICLES_PER_GALAXY) {
       const knot = Math.floor(random() * 3), theta = knot * 2.1 + descriptor.asymmetry;
       x = Math.cos(theta) * (.2 + knot * .17) + gaussian() * .17;
       z = Math.sin(theta) * (.2 + knot * .17) + gaussian() * .19;
-      y = (knot - 1) * .12 + gaussian() * descriptor.thickness;
+      y = (knot - 1) * .12 + gaussian() * descriptor.thickness * (openClusterV3 ? 1 / 3 : 1);
       young = random() < .1;
     } else {
       const radius = Math.pow(random(), 1.7) * .95, vertical = random() * 2 - 1;
@@ -82,7 +83,12 @@ export function sampleGalaxy(descriptor, count = PARTICLES_PER_GALAXY) {
       y = vertical * radius * (descriptor.morphology === 'spiral' ? .52 : descriptor.thickness);
     }
     // Hard support is required by the stream-coverage proof, including Gaussian tails.
-    point.set(x, y, z); if (point.length() > .98) point.setLength(.98);
+    point.set(x, y, z);
+    if (openClusterV3) {
+      const r = point.length();
+      // Only the outer tail bends; value and first derivative join at .8.
+      if (r > .8) { const t = r - .8; point.multiplyScalar((.8 + .18 * t / (.18 + t)) / r); }
+    } else if (point.length() > .98) point.setLength(.98);
     point.multiplyScalar(descriptor.radius).applyEuler(rotation);
     positions.set(point.toArray(), i * 3);
     color.set(young ? 0xa2b4ca : descriptor.morphology === 'elliptical' ? 0xc8b99d : 0xc5c2b8);
