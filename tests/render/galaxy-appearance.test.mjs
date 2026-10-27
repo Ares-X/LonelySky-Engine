@@ -133,7 +133,7 @@ test('spiral stellar envelope remains connected, tapered and finite through dust
       const height=scalar('height',{p:{y},thickness});
       const taper=scalar('taper',{r,height}),interarm=scalar('interarm',{coarse});
       assert.ok(Number.isFinite(taper)&&taper>=0&&taper<=1);
-      const amount=scalar('amount',{edge:r===1?0:1,disk:.5,taper,interarm,armStrength:3.6,armLight,r,q:0,dustTransmission:()=>.5});
+      const amount=scalar('amount',{edge:r===1?0:1,disk:.5,taper,interarm,armStrength:3.6,armLight,r,q:0,dustFootprint:.01,cloudTransmission:.5,dustTransmission:()=>.5});
       assert.ok(Number.isFinite(amount)&&amount>=0);
       if(r===1)assert.equal(amount,0,'existing support edge still ends all added emission');
     }
@@ -142,6 +142,11 @@ test('spiral stellar envelope remains connected, tapered and finite through dust
   const center=scalar('taper',{r:0,height:0}),outer=scalar('taper',{r:.9,height:0});
   assert.ok(outer<center*.4,'edge-on stellar disk narrows and fades toward its ends');
   assert.ok(scalar('interarm',{coarse:0})>0,'a continuous faint population joins otherwise separated arms');
+  for(const dustStrength of [0,.28,1.4]) for(const lane of [0,.5,1]) for(const coarse of [0,.5,1]) for(const grain of [0,.5,1]) {
+    const transmission=scalar('cloudTransmission',{dustStrength,lane,coarse,grain});
+    assert.ok(Number.isFinite(transmission)&&transmission>0&&transmission<=1,'dust absorbs without negative light or disconnected zero-density cuts');
+    if(dustStrength===0)assert.equal(transmission,1,'dust-free populations retain their light');
+  }
   haze.userData.dispose();
 });
 
