@@ -228,6 +228,10 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
             vec3 direction=safeDirection(stellarOffsets[i]-point);
             float angularRadius=stellarAngularRadius(point,i);
             float horizon=stellarDay(dot(geometricNormal,direction),angularRadius);
+            // Every reflected, specular and atmospheric-limb term below is
+            // multiplied by horizon. Retain the partial finite disc at h>0;
+            // the fully dark hemisphere needs no eclipse/ring ray queries.
+            if(horizon<=0.)continue;
             float diffuse=stellarDiffuse(dot(n,direction),angularRadius);
             float transmission=stellarTransmission(point,i)*planetRingTransmission(point,i,bodyRadius);
             vec3 radiance=stellarColors[i]*stellarIntensities[i]*transmission;

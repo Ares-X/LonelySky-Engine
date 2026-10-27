@@ -181,8 +181,8 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     width = Math.max(1, container.clientWidth || 1); height = Math.max(1, container.clientHeight || 1);
     const deviceRatio = host.devicePixelRatio || 1;
     const ratio = Math.min(deviceRatio, quality === 'low' ? .9 : quality === 'high' ? 1.6 : width < 700 ? 1 : 1.25);
-    renderer.setPixelRatio(ratio); renderer.setSize(width, height, false);
-    composer.setPixelRatio(ratio); composer.setSize(width, height);
+    renderer.setDrawingBufferSize(width, height, ratio);
+    composer.setSize(width * ratio, height * ratio);
     camera.aspect = width / height; camera.updateProjectionMatrix();
     bloom.enabled = quality !== 'low'; bloom.strength = quality === 'high' ? .42 : .32;
     stars.material.uniforms.ratio.value = ratio;
@@ -287,6 +287,8 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     sky = createDeepSky(); resources.push(() => sky.userData.dispose()); scene.add(sky);
     cosmos = createCosmos({ seed: universe.seed }); resources.push(() => cosmos.userData.dispose()); scene.add(cosmos);
     composer = own(new EffectComposer(renderer));
+    // Keep DPR at the renderer boundary and resize postprocessing only once.
+    composer.setPixelRatio(1);
     const renderPass = own(new NebulaRenderPass(scene, camera)); bloom = own(new UnrealBloomPass(new THREE.Vector2(1, 1), .32, .65, 1));
     const output = own(new OutputPass()); composer.addPass(renderPass); composer.addPass(bloom); composer.addPass(output);
     renderer.domElement.addEventListener('webglcontextlost', handleLost);

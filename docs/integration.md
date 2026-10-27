@@ -42,7 +42,19 @@ existing visibility fade avoid density evaluation, and the two optional shell
 families avoid microstructure queries outside their existing fronts. Deep-sky
 band noise and resolved spark detail are also skipped when their weights are
 zero. The geometry, integration nodes, sample counts and fade distances remain
-unchanged; no additional density or opacity cutoff is introduced.
+unchanged; no additional density or opacity cutoff is introduced. Planet surfaces
+also skip sphere/ring transmission queries when their geometric-normal finite-disc
+horizon is exactly zero. The partial stellar disc, ocean specular term and lit
+limb remain evaluated whenever that horizon is positive; intrinsic lava emission
+is applied independently after the light loop.
+
+The standalone view keeps device pixel ratio at the renderer boundary. Its
+composer retains pixel ratio one and receives `CSS width * ratio` and
+`CSS height * ratio` in one `setSize` call, preserving the previous fractional
+target/pass dimensions and renderer canvas floor/viewport rounding. This avoids
+`setPixelRatio` first resizing all targets and bloom mips at the old dimensions.
+The renderer uses the public `setDrawingBufferSize` API; canvas CSS remains owned
+by the container. No composer private field is modified.
 
 ## Procedural scenery appearance
 
