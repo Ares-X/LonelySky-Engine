@@ -54,7 +54,13 @@ vec3 stellarSea(vec3 direction) {
       .49410943,-.44482963,.74698224,-.86766615,-.19807637,.45598378)*galactic;
     float longitude=dot(equatorial.xy,equatorial.xy)>.0000001?atan(equatorial.y,equatorial.x):0.;
     vec2 uv=vec2(.5-longitude/6.28318530718,asin(clamp(equatorial.z,-1.,1.))/3.14159265359+.5);
-    vec3 catalog=texture2D(uSeaDetail,uv).rgb;
+    // Longitude wraps at the meridian. Its implicit derivative spans almost
+    // the whole map there, selecting a dark coarse mip in 2x2 fragment quads.
+    // Keep the short, periodic footprint while retaining latitude filtering.
+    vec2 uvDx=dFdx(uv),uvDy=dFdy(uv);
+    uvDx.x-=floor(uvDx.x+.5);
+    uvDy.x-=floor(uvDy.x+.5);
+    vec3 catalog=textureGrad(uSeaDetail,uv,uvDx,uvDy).rgb;
     observed=catalog;
     float lowFrequency=dot(textureLod(uSeaDetail,uv,6.).rgb,vec3(.2126,.7152,.0722));
     stellarGrain=clamp(dot(catalog,vec3(.2126,.7152,.0722))/max(lowFrequency,.002),.12,3.);
