@@ -275,3 +275,24 @@ different spatial provider. This module does not implement N-body interactions,
 parabolic/hyperbolic trajectories, relativistic or surface-terrain physics.
 Basis: [NASA Kepler's laws](https://science.nasa.gov/solar-system/orbits-and-keplers-laws/)
 and [NASA orbital mechanics](https://science.nasa.gov/learn/basics-of-space-flight/chapter3-3/).
+
+## Hierarchical cosmic structure catalogue
+
+The pure data entry point also exports the `cosmic-structures` module. Its
+`describeCosmicStructures(coordinate, seed)` accepts a macro coordinate in a
+4096-cell grid and returns a frozen sparse parent galaxy and its existing child
+clusters and nebula, or an empty array. `loadedCosmicStructures(sectorIndex, seed)`
+returns the fixed 5³ neighborhood. It does not invent nearby objects or promise
+an infinite catalogue: the address torus contains only 8³ macro coordinates.
+Counts and layouts depend on the supplied seed.
+
+`cosmicStructureRelativeCenter(descriptor, decodedCell, output?)` returns the
+true, wrapped centre in the caller's sector frame. Omitting `output` creates an
+independent three-number snapshot; an explicit array or typed array is overwritten
+and returned by reference. Navigation uses these true coordinates and radii.
+`cosmicDrawDistance` and its inverse are drawing-depth maps only; applying them
+to physical positions changes navigation and collision semantics.
+
+The default public seed is `lonelysky`. Applications own their world seed,
+names, save provenance and generation-migration decisions. A generator revision
+is not an instruction to replace an application's universe identity.
