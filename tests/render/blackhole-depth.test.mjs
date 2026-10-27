@@ -7,7 +7,7 @@ import {createBlackHole} from '../../src/render/blackhole.js';
 // to optical sky without a forward disk/captured shadow, not to all outward rays.
 const hole = createBlackHole({radius: 1});
 const source = hole.children[0].material.fragmentShader;
-const condition = source.match(/if\s*\(([^)]+)\)\s*\{\s*gl_FragDepth\s*=\s*1\.0\s*;/)[1];
+const condition = source.match(/if\s*\((firstDiskDistance[^)]+)\)\s*\{/)[1];
 hole.userData.dispose();
 const skyDepth = Function('firstDiskDistance', 'b', 'escaped', 'captured', `return ${condition}`);
 

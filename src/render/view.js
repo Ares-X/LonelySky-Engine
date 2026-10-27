@@ -13,6 +13,7 @@ import { createBlackHole } from './blackhole.js';
 import { createCosmos } from './cosmos.js';
 import { createDeepSky } from './deep-sky.js';
 import { nebulaVisibility } from '../nebula-volume.js';
+import { createPlanetLod } from './planet-lod.js';
 
 const QUALITIES = new Set(['auto', 'low', 'high']);
 function checkQuality(value) {
@@ -88,7 +89,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(55, 1, .5, 220000);
   scene.add(camera);
   const resources = [], chunks = new Map();
-  let renderer, composer, bloom, stars, sky, cosmos, sphere, distantSphere, ringGeometry, glow, fallbackTexture;
+  let renderer, composer, bloom, stars, sky, cosmos, sphere, distantSphere, planetLod, ringGeometry, glow, fallbackTexture;
   let disposed = false, running = false, lost = false, resumeAfterRestore = false, raf = null;
   let width = 1, height = 1, sectorIndex = 0, loadedIndex = -1, loadedRevision, time = 0, epoch = null;
   const cameraPosition = new THREE.Vector3(), bodyPosition = new THREE.Vector3();
@@ -101,12 +102,15 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     const track = material => { materials.add(material); return material; };
     const surface = track(isStar ? starMaterial(data.color) : planetMaterial(data, { lightDirection: illumination }));
     if (!isStar && !surface.uniforms.surface.value) surface.uniforms.surface.value = fallbackTexture;
-    const body = new THREE.Mesh(sphere, surface); body.scale.setScalar(data.radius); group.add(body);
+    const geometry = isStar ? sphere : planetLod.geometry();
+    const body = new THREE.Mesh(geometry, surface); body.scale.setScalar(data.radius); group.add(body);
+    const lodMeshes = isStar ? [] : [body];
     const visibleMaterials = [surface];
     if (isStar || ['gas', 'ocean', 'ice'].includes(data.kind)) {
       const air = track(atmosphereMaterial(isStar ? data.color : data.colorA, illumination));
-      const atmosphere = new THREE.Mesh(sphere, air); atmosphere.scale.setScalar(data.radius * (isStar ? 1.06 : 1.015));
+      const atmosphere = new THREE.Mesh(geometry, air); atmosphere.scale.setScalar(data.radius * (isStar ? 1.06 : 1.015));
       group.add(atmosphere); visibleMaterials.push(air);
+      if (!isStar) lodMeshes.push(atmosphere);
     }
     if (data.rings && !isStar) {
       const material = track(ringMaterial(data.ringColor, data.seed, { planetRadius: data.radius, lightDirection: illumination }));
@@ -123,7 +127,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
         const halo = new THREE.Sprite(material); halo.scale.setScalar(data.radius * scale); halo.userData.baseOpacity = opacity; group.add(halo);
       }
     }
-    group.userData = { ...group.userData, surface, body, isStar, materials: visibleMaterials };
+    group.userData = { ...group.userData, surface, body, isStar, lodMeshes, radius: data.radius, materials: visibleMaterials };
     return group;
   }
 
@@ -214,11 +218,15 @@ export function createUniverseView(container, { universe = createUniverse(), qua
         if (!group.visible) continue;
         for (const material of group.userData.materials) material.uniforms.visibility.value = visibility;
         group.userData.surface.depthWrite = visibility === 1;
-        group.traverse(object => { if (object.geometry === sphere || object.geometry === distantSphere) object.geometry = distance > 15000 ? distantSphere : sphere; });
         if (group.userData.isStar) {
+          group.traverse(object => { if (object.geometry === sphere || object.geometry === distantSphere) object.geometry = distance > 15000 ? distantSphere : sphere; });
           group.userData.surface.uniforms.time.value = time;
           for (const object of group.children) if (object.isSprite) object.material.opacity = object.userData.baseOpacity * visibility;
-        } else group.userData.body.rotation.y = time * .003;
+        } else {
+          planetLod.update(group.userData.lodMeshes, { radius: group.userData.radius, distance,
+            fov: camera.fov, viewportHeight: height, pixelRatio: renderer.getPixelRatio(), quality });
+          group.userData.body.rotation.y = time * .003;
+        }
         if (group.userData.ring) group.getWorldPosition(group.userData.ring.material.uniforms.planetCenter.value);
       }
       for (const hole of chunk.userData.holes) {
@@ -281,6 +289,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     renderer.domElement.style.display = 'block'; renderer.domElement.style.width = '100%'; renderer.domElement.style.height = '100%';
     container.append(renderer.domElement); resources.push(() => renderer.domElement.remove());
     sphere = own(new THREE.SphereGeometry(1, 96, 64)); distantSphere = own(new THREE.SphereGeometry(1, 48, 32));
+    planetLod = createPlanetLod(); resources.push(() => planetLod.dispose());
     ringGeometry = own(new THREE.RingGeometry(1.18, 2.26, 256, 1)); glow = own(createGlow());
     fallbackTexture = own(new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1)); fallbackTexture.needsUpdate = true;
     stars = createStarfield(universe.seed); own(stars.geometry); own(stars.material); scene.add(stars);

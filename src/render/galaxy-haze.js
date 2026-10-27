@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { randomFromSeed } from '../random.js';
 import { describeGalaxyAppearance } from './galaxy-appearance.js';
+import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_DEPTH_GLSL } from '../cosmic-structures.js';
 
 // A bounded emission integral through a real ellipsoid, not a camera-facing
 // painted galaxy. All materials share the same shader program and geometry.
@@ -15,6 +16,7 @@ const integrationRules = Object.fromEntries([4, 8, 12, 16, 24].map(cells => {
 }));
 
 const vertexShader = /* glsl */`
+  ${COSMIC_DEPTH_GLSL}
   varying vec3 localExit;
   void main(){
     localExit=position;
@@ -22,10 +24,21 @@ const vertexShader = /* glsl */`
     vec3 relative=world-cameraPosition;float distanceToCamera=length(relative);
     float drawDistance=distanceToCamera<=160000.?distanceToCamera:160000.+40000.*(1.-exp(-(distanceToCamera-160000.)/180000.));
     vec3 proxy=cameraPosition+relative*(drawDistance/max(distanceToCamera,.001));
-    gl_Position=projectionMatrix*viewMatrix*vec4(proxy,1.);
+    #ifdef COSMIC_STRUCTURES
+      // This back face only supplies ray coverage. Preserve physical x/y/w
+      // for interpolation, but keep its unused raster depth away from clip
+      // planes: ordinary float32 z≈w loses the far-plane gap at 100M scales.
+      // Actual opaque occlusion is applied to the physical integral below.
+      vec4 physicalClip=projectionMatrix*viewMatrix*vec4(world,1.);
+      physicalClip.z=physicalClip.w*.5;
+      gl_Position=physicalClip;
+    #else
+      gl_Position=projectionMatrix*viewMatrix*vec4(proxy,1.);
+    #endif
   }
 `;
 const fragmentShader = /* glsl */`
+  ${COSMIC_DEPTH_GLSL}
   varying vec3 localExit;
   uniform vec3 localCamera;uniform vec3 shapeScale;uniform vec3 tint;
   uniform float radius;uniform float thickness;uniform float arms;uniform float pitch;
@@ -33,6 +46,27 @@ const fragmentShader = /* glsl */`
   uniform float armStrength;uniform float coreStrength;uniform float dustStrength;uniform float haloStrength;
   uniform float bridgeStrength;uniform float knotScale;uniform float youngStrength;uniform float emissionStrength;
   uniform sampler2D structureNoise;uniform vec2 noiseOffset;
+  #ifdef COSMIC_STRUCTURES
+    uniform sampler2D uSceneDepth;uniform vec2 uDepthResolution;uniform vec2 uCameraNearFar;
+    uniform float uHasSceneDepth;uniform float continuumWeight;uniform float structureKind;uniform mat3 worldOrientation;
+    float scenePhysicalLimit(vec3 direction){
+      if(uHasSceneDepth<.5) return 1.e15;
+      float depth=texture2D(uSceneDepth,gl_FragCoord.xy/uDepthResolution).r;
+      float near=uCameraNearFar.x,far=uCameraNearFar.y;
+      #ifdef USE_REVERSED_DEPTH_BUFFER
+        if(depth<=0.) return 1.e15;
+        float forward=near*far/(near+depth*(far-near));
+      #else
+        if(depth>=1.) return 1.e15;
+        float forward=near*far/(far-depth*(far-near));
+      #endif
+      vec3 worldDirection=normalize(worldOrientation*(direction*shapeScale));
+      float cosine=-(viewMatrix*vec4(worldDirection,0.)).z;
+      float drawDistance=forward/max(cosine,.000001);
+      if(drawDistance>=200000.) return 1.e15;
+      return cosmicTrueDistance(drawDistance);
+    }
+  #endif
   uniform int steps;uniform vec2 quadrature[48];uniform vec2 coreQuadrature[48];
   float armLobe(float angularOffset,float width,float angularVariance,float period){
     float sigma=sqrt(width*width+angularVariance);
@@ -69,6 +103,20 @@ const fragmentShader = /* glsl */`
   // Only this volume's emission is absorbed; empty sky remains untouched.
   float dustTransmission(vec3 q,float footprint){
     if(dustStrength<=0.) return 1.;
+    #ifdef COSMIC_STRUCTURES
+      // Attenuate this emitter's world-fixed dusty pocket. A full flat sheet
+      // column created an opaque ruler across every V3 edge-on stellar disc.
+      vec3 p=q*shapeScale;
+      vec2 dustPlane=p.xz+p.y*vec2(.37,.71);
+      float dustLod=max(0.,log2(max(1.,footprint*64.*1.43)));
+      float cloud=textureLod(structureNoise,dustPlane*1.43+noiseOffset,dustLod).r;
+      float warpedHeight=p.y/thickness+(cloud-.5)*1.7;
+      float pocketVertical=exp(-.5*warpedHeight*warpedHeight);
+      float r=length(p.xz);
+      float radial=smoothstep(.025,.13,r)*(1.-smoothstep(.72,1.,r));
+      float pocket=smoothstep(.38,.68,cloud);
+      return exp(-dustStrength*2.4*pocketVertical*radial*pocket);
+    #else
     vec3 p=q*shapeScale,camera=localCamera*shapeScale;
     vec3 delta=camera-p;float reach=length(delta);
     vec3 direction=delta/max(reach,.000001);
@@ -88,6 +136,7 @@ const fragmentShader = /* glsl */`
     float dustCloud=textureLod(structureNoise,sheetPoint.xz*.73+noiseOffset,dustLod).r;
     radial*=.22+2.8*smoothstep(.32,.69,dustCloud);
     return exp(-clamp(max(0.,column)*radial*dustStrength*6.,0.,12.));
+    #endif
   }
   vec3 islandCenter(float k){
     float theta=k*2.1+asymmetry;
@@ -97,6 +146,32 @@ const fragmentShader = /* glsl */`
     float edge=1.-smoothstep(.8,1.,length(q));
     if(edge<=0.) return vec4(0.);
     vec3 p=q*shapeScale;
+    #ifdef COSMIC_STRUCTURES
+      if(structureKind>1.5){
+        // Three world-fixed noise planes give depth to the cloud; this field
+        // stays the same while crossing it from either side.
+        float lod=max(0.,log2(max(1.,footprint*64.*1.8)));
+        float a=textureLod(structureNoise,p.xz*.83+noiseOffset,lod).r;
+        float b=textureLod(structureNoise,p.xy*1.37+noiseOffset.yx,lod).r;
+        float c=textureLod(structureNoise,p.yz*2.13+noiseOffset+vec2(.31,.67),lod).r;
+        float cloud=smoothstep(.47,.64,a*.5+b*.3+c*.2);
+        // A real local 3D void, deformed by the same stationary cloud field.
+        // Its empty interior is not a screen mask or a luminous solid shell.
+        vec3 voidCenter=vec3((noiseOffset.x-.5)*.45,.025,(noiseOffset.y-.5)*.45);
+        vec3 voidMetric=(p-voidCenter)/vec3(.34,.26,.44)+vec3(a-.5,b-.5,c-.5)*.6;
+        float voidRadius=length(voidMetric);
+        float cavity=smoothstep(.72,1.12,voidRadius);
+        float wall=1.-smoothstep(1.12,1.6,voidRadius);
+        float ridgeHeight=(p.y+(a-.5)*.85)/.17;
+        float ridge=exp(-ridgeHeight*ridgeHeight);
+        // Concentrate the light in the irregular cavity walls and embedded
+        // knots; low-density outskirts connect them without filling the void.
+        float knots=smoothstep(.45,.62,b)*smoothstep(.43,.61,c);
+        float gas=edge*exp(-dot(p,p)*1.8)*cloud*cavity*ridge*(.25+1.3*wall+.75*knots);
+        vec3 palette=mix(vec3(.32,.40,.49),vec3(.65,.37,.32),smoothstep(.43,.66,c)*wall);
+        return vec4(palette,gas*.38);
+      }
+    #endif
     if(morphology<.5){
       float r=length(p.xz);
       // Resolved stellar mottling lies inside a continuous arm envelope. The
@@ -114,6 +189,9 @@ const fragmentShader = /* glsl */`
       mat2 warp=mat2(cos(angleWarp),-sin(angleWarp),sin(angleWarp),cos(angleWarp));
       vec2 armPoint=warp*p.xz*radialWarp;
       float width=.20+.14*clamp((coarse-.25)*2.,0.,1.);
+      #ifdef COSMIC_STRUCTURES
+        width=.075+.07*clamp((coarse-.25)*2.,0.,1.);
+      #endif
       float vertical=p.y/(thickness*(.4+r));
       float disk=exp(-r*2.8)*exp(-.5*vertical*vertical);
       vec2 armPair=armDensities(armPoint,width,footprint*radialWarp);
@@ -131,10 +209,20 @@ const fragmentShader = /* glsl */`
       float height=p.y/(thickness*.65);
       float taper=exp(-r*r*1.5)*exp(-.5*height*height);
       float interarm=.38*(.85+.15*coarse);
+      #ifdef COSMIC_STRUCTURES
+        // Sparse arms and real black inter-arm gaps; no uniform glowing disk.
+        interarm*=.035;
+        armLight*=smoothstep(.28,.61,coarse*.65+fine*.35);
+      #endif
       // Dust complexes absorb starlight within the arms at several scales.
       // Keep a positive transmission floor through optical depth rather than
       // cutting disconnected holes into the stellar population.
-      float cloudTransmission=exp(-dustStrength*(.4+lane*2.)*smoothstep(.35,.68,coarse)*smoothstep(.4,.65,grain)*2.8);
+      #ifndef COSMIC_STRUCTURES
+        float cloudTransmission=exp(-dustStrength*(.4+lane*2.)*smoothstep(.35,.68,coarse)*smoothstep(.4,.65,grain)*2.8);
+      #else
+        // V3 disc and core share the same local dusty-pocket owner above.
+        float cloudTransmission=1.;
+      #endif
       float amount=edge*disk*taper*(interarm+armStrength*armLight)*smoothstep(.025,.08,r)*cloudTransmission*dustTransmission(q,dustFootprint);
       float core=exp(-r*9.);
       float cool=smoothstep(.42,.64,fine)*smoothstep(.16,.5,r)*youngStrength;
@@ -181,6 +269,9 @@ const fragmentShader = /* glsl */`
     }
     result+=haloStrength*exp(-dot(p,p)*5.)*.035;
     vec3 population=mix(vec3(1.08,.96,.84),vec3(.64,.85,1.32),clamp(knots*youngStrength,0.,1.));
+    #ifdef COSMIC_STRUCTURES
+      if(structureKind>.5&&structureKind<1.5) result*=.06;
+    #endif
     return vec4(tint*population,edge*result);
   }
   vec3 coreEmission(vec3 q,float footprint,float dustFootprint){
@@ -190,6 +281,14 @@ const fragmentShader = /* glsl */`
       vec2 stellarPlane=q.xz+q.y*vec2(.41,.63);
       float stellarLod=max(0.,log2(max(1.,footprint*64.*1.1)));
       float stellarGrain=textureLod(structureNoise,stellarPlane*1.1+noiseOffset,stellarLod).r;
+      #ifdef COSMIC_STRUCTURES
+        if(structureKind>.5&&structureKind<1.5){
+          // Resolved cluster stars own the halo. Retain only the compact,
+          // unresolved central population instead of an elliptical-galaxy lamp.
+          float clusterCore=exp(-stellarRadius*18.)*coreStrength*.05;
+          return tint*edge*clusterCore*(.7+.6*stellarGrain);
+        }
+      #endif
       float compactCore=exp(-stellarRadius*8.5)*coreStrength;
       float envelope=exp(-stellarRadius*3.5)*haloStrength*.03;
       return tint*edge*(compactCore+envelope)*(.7+.6*stellarGrain);
@@ -201,6 +300,11 @@ const fragmentShader = /* glsl */`
     // already used by the unchanged particle generator's central bar.
     vec3 barMetric=p/vec3(.36,.055,.07);
     float stellarBar=bar*exp(-.5*dot(barMetric,barMetric))*1.6;
+    #ifdef COSMIC_STRUCTURES
+      bulge=exp(-length(p*vec3(1.,1./.52,1.))*14.)*.55;
+      halo*=.2;
+      stellarBar*=.14;
+    #endif
     return tint*mix(vec3(1.),vec3(1.12,.94,.74),exp(-length(p.xz)*9.))*edge*(bulge*coreStrength+halo+stellarBar)*dustTransmission(q,dustFootprint);
   }
   void main(){
@@ -211,9 +315,12 @@ const fragmentShader = /* glsl */`
     float b=dot(localCamera,direction),c=dot(localCamera,localCamera)-1.;
     float discriminant=b*b-c;if(discriminant<=0.) discard;
     float root=sqrt(discriminant),entry=max(0.,-b-root),exitDistance=-b+root;
+    float physicalSpeed=length(direction*shapeScale);
+    #ifdef COSMIC_STRUCTURES
+      exitDistance=min(exitDistance,scenePhysicalLimit(direction)/(physicalSpeed*radius));
+    #endif
     if(exitDistance<=entry) discard;
     float rayRange=exitDistance-entry;
-    float physicalSpeed=length(direction*shapeScale);
     float binFootprint=length(direction.xz*shapeScale.xz)*rayRange*2./float(steps);
     vec3 emission=vec3(0.);
     if(morphology<.5||morphology>=1.5){
@@ -223,7 +330,7 @@ const fragmentShader = /* glsl */`
         float distanceAlongRay=entry+node.x*rayRange;
         vec3 q=localCamera+direction*distanceAlongRay;
         float trueDistance=distanceAlongRay*physicalSpeed*radius;
-        float visibility=1.-smoothstep(420000.,520000.,trueDistance);
+        float visibility=1.-smoothstep(FADE_START,FADE_FAR,trueDistance);
         if(visibility==0.) continue;
         float sampleFootprint=max(binFootprint,angularFootprint*distanceAlongRay);
         if(morphology>=1.5) sampleFootprint=max(sampleFootprint,physicalSpeed*rayRange*2./float(steps));
@@ -247,7 +354,7 @@ const fragmentShader = /* glsl */`
         if(i>=steps/2) break;
         vec2 node=coreQuadrature[i];float u=node.x;
         vec2 distanceAlongRay=vec2(center)-vec2(reach.x,-reach.y)*u*u;
-        vec2 visibility=1.-smoothstep(vec2(420000.),vec2(520000.),distanceAlongRay*physicalSpeed*radius);
+        vec2 visibility=1.-smoothstep(vec2(FADE_START),vec2(FADE_FAR),distanceAlongRay*physicalSpeed*radius);
         vec3 nearCore=vec3(0.),farCore=vec3(0.);
         if(reach.x!=0.&&visibility.x!=0.) nearCore=coreEmission(localCamera+direction*distanceAlongRay.x,max(binFootprint,angularFootprint*distanceAlongRay.x),angularFootprint*distanceAlongRay.x);
         if(reach.y!=0.&&visibility.y!=0.) farCore=coreEmission(localCamera+direction*distanceAlongRay.y,max(binFootprint,angularFootprint*distanceAlongRay.y),angularFootprint*distanceAlongRay.y);
@@ -255,7 +362,13 @@ const fragmentShader = /* glsl */`
       }
     }
     // Restrained warm-white emission; no chromatic fog or time-dependent noise.
-    gl_FragColor=vec4(emission*2.4*brightness*emissionStrength,1.);
+    #ifdef COSMIC_STRUCTURES
+      // The same density is integrated from outside and inside the structure;
+      // close-up travel resolves stars and dust instead of a complete postcard.
+      gl_FragColor=vec4(emission*1.35*brightness*emissionStrength*continuumWeight,1.);
+    #else
+      gl_FragColor=vec4(emission*2.4*brightness*emissionStrength,1.);
+    #endif
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
@@ -268,7 +381,7 @@ export function galaxyHazeScale(descriptor) {
   return [1, 1, 1];
 }
 
-export function createGalaxyHaze({ seed = 'lonelysky' } = {}) {
+export function createGalaxyHaze({ seed = 'lonelysky', structures = false } = {}) {
   const group = new THREE.Group(); group.name = 'galaxy-emission-volumes';
   const geometry = new THREE.SphereGeometry(1, 40, 24);
   const noiseRandom = randomFromSeed(`${seed}:galaxy-dust-texture-v1`);
@@ -312,12 +425,34 @@ export function createGalaxyHaze({ seed = 'lonelysky' } = {}) {
           arms: { value: descriptor.arms }, pitch: { value: descriptor.pitch },
           morphology: { value: descriptor.morphology === 'spiral' ? 0 : descriptor.morphology === 'elliptical' ? 1 : 2 },
           asymmetry: { value: descriptor.asymmetry }, bar: { value: Number(descriptor.bar) }, brightness: { value: 1 }, steps: { value: 32 }, quadrature: { value: integrationRules[32] }, coreQuadrature: { value: integrationRules[16] } },
+        defines: { FADE_START: structures ? `${COSMIC_VIEW_FADE_START}.` : '420000.', FADE_FAR: structures ? `${COSMIC_VIEW_FAR}.` : '520000.', ...(structures ? { COSMIC_STRUCTURES: 1 } : {}) },
         vertexShader, fragmentShader, side: THREE.BackSide, transparent: true,
-        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true,
+        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: !structures,
       });
+      if (structures) {
+        material.uniforms.continuumWeight = { value: 1 };
+        material.uniforms.structureKind = { value: descriptor.kind === 'nebula' ? 2 : descriptor.kind === 'cluster' ? 1 : 0 };
+        material.uniforms.uVisibility = { value: 1 }; material.uniforms.uDensity = { value: 1 };
+        material.uniforms.uSceneDepth = { value: null }; material.uniforms.uHasSceneDepth = { value: 0 };
+        material.uniforms.uDepthResolution = { value: new THREE.Vector2(1, 1) };
+        material.uniforms.uCameraNearFar = { value: new THREE.Vector2(1, 220000) };
+        material.uniforms.worldOrientation = { value: new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...descriptor.orientation))) };
+      }
       for (const name of ['armStrength', 'coreStrength', 'dustStrength', 'haloStrength', 'bridgeStrength', 'knotScale', 'youngStrength', 'emissionStrength']) material.uniforms[name] = { value: appearance[name] };
       const mesh = new THREE.Mesh(geometry, material); mesh.name = descriptor.id;
+      if (structures && descriptor.theme === 'old-gold') material.uniforms.tint.value.setHex(0xc0ac8e);
+      if (structures && descriptor.theme === 'blue-nursery') material.uniforms.tint.value.setHex(0x9aaeba);
       mesh.userData.appearance = appearance;
+      if (structures) {
+        mesh.userData.setSceneDepth = (texture, width, height, viewCamera) => {
+          material.uniforms.uSceneDepth.value = texture;
+          material.uniforms.uHasSceneDepth.value = texture ? 1 : 0;
+          if (texture) {
+            material.uniforms.uDepthResolution.value.set(width, height);
+            material.uniforms.uCameraNearFar.value.set(viewCamera.near, viewCamera.far);
+          }
+        };
+      }
       mesh.rotation.fromArray(descriptor.orientation);
       mesh.scale.fromArray(shape).multiplyScalar(descriptor.radius);
       mesh.frustumCulled = false; group.add(mesh);
@@ -326,10 +461,19 @@ export function createGalaxyHaze({ seed = 'lonelysky' } = {}) {
   group.userData.update = ({ centers, cameraPosition, quality, brightness, home }) => {
     if (disposed) return 0;
     camera.fromArray(cameraPosition); let visible = 0;
-    group.children.forEach((mesh, i) => {
+    for (let i = 0; i < group.children.length; i++) {
+      const mesh = group.children[i];
       mesh.position.fromArray(centers[i]);
-      mesh.visible = !home && mesh.position.distanceTo(camera) - descriptors[i].radius < 520000;
-      if (!mesh.visible) return;
+      const distance = mesh.position.distanceTo(camera);
+      mesh.visible = !home && distance - descriptors[i].radius < (structures ? COSMIC_VIEW_FAR : 520000);
+      if (structures) {
+        mesh.material.uniforms.uVisibility.value = Number(mesh.visible);
+        // A statistical stellar continuum is appropriate at exterior scales.
+        // Resolve it into the unchanged 3D tracers on entry, retaining only
+        // low-density nearby dust instead of a screen-filling luminous fog.
+        mesh.material.uniforms.continuumWeight.value = .004 + .996 * THREE.MathUtils.smoothstep(distance / descriptors[i].radius, .6, 1.8);
+      }
+      if (!mesh.visible) continue;
       inverse.copy(mesh.quaternion).invert();
       mesh.material.uniforms.localCamera.value.copy(camera).sub(mesh.position).applyQuaternion(inverse).divide(mesh.scale);
       const steps = quality === 'low' ? 16 : quality === 'high' ? 48 : 32;
@@ -338,7 +482,7 @@ export function createGalaxyHaze({ seed = 'lonelysky' } = {}) {
       mesh.material.uniforms.coreQuadrature.value = integrationRules[steps / 2];
       mesh.material.uniforms.brightness.value = brightness;
       visible++;
-    });
+    }
     return visible;
   };
   group.userData.dispose = () => {

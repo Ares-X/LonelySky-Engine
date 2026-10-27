@@ -74,7 +74,7 @@ out vec4 nebulaColor;
 #define gl_FragColor nebulaColor
 uniform sampler3D uNoise;
 uniform vec3 uCamera,uColorA,uColorB,uRimColor,uNoiseOffset;
-uniform mat4 uLocalToWorld,uViewProjection;
+uniform mat4 uLocalToWorld,projectionMatrix;
 uniform sampler2D uSceneDepth;
 uniform vec2 uSceneDepthSize;
 uniform mat4 uClipToLocal;
@@ -203,8 +203,15 @@ void main(){
   if(uHasSceneDepth){
     vec2 uv=gl_FragCoord.xy/uSceneDepthSize;
     float surfaceDepth=texture(uSceneDepth,uv).r;
-    if(surfaceDepth<1.0){
-      vec4 surface=uClipToLocal*vec4(uv*2.0-1.0,surfaceDepth*2.0-1.0,1.0);
+    #ifdef USE_REVERSED_DEPTH_BUFFER
+      bool hasSurface=surfaceDepth>0.0;
+      float surfaceClipDepth=surfaceDepth;
+    #else
+      bool hasSurface=surfaceDepth<1.0;
+      float surfaceClipDepth=surfaceDepth*2.0-1.0;
+    #endif
+    if(hasSurface){
+      vec4 surface=uClipToLocal*vec4(uv*2.0-1.0,surfaceClipDepth,1.0);
       // Integrate only the dust between the camera and the actual opaque
       // surface. A first-cloud depth alone also blends dust behind that surface.
       exit=min(exit,dot(surface.xyz/surface.w-uCamera,rd));
@@ -286,8 +293,14 @@ void main(){
   // Return straight alpha because Three's normal blending premultiplies RGB.
   gl_FragColor=vec4(color/max(1.0-transmission,0.0001),alpha);
   vec3 depthPoint=uCamera+rd*max(entry,firstCloud);
-  vec4 clip=uViewProjection*uLocalToWorld*vec4(depthPoint,1.0);
-  gl_FragDepth=clamp(0.5*clip.z/max(clip.w,0.0001)+0.5,0.0,1.0);
+  // Consume the renderer's active projection, including its first reversed
+  // draw, rather than an application update from before camera initialization.
+  vec4 clip=projectionMatrix*(viewMatrix*(uLocalToWorld*vec4(depthPoint,1.0)));
+  #ifdef USE_REVERSED_DEPTH_BUFFER
+    gl_FragDepth=clamp(clip.z/max(clip.w,0.0001),0.0,1.0);
+  #else
+    gl_FragDepth=clamp(0.5*clip.z/max(clip.w,0.0001)+0.5,0.0,1.0);
+  #endif
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }
@@ -324,7 +337,6 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     uRimColor: { value: new THREE.Color(palette('rimColor')) },
     uNoiseOffset: { value: new THREE.Vector3((numericSeed % 251) / 251, (numericSeed % 241) / 241, (numericSeed % 239) / 239) },
     uLocalToWorld: { value: new THREE.Matrix4() },
-    uViewProjection: { value: new THREE.Matrix4() },
     uSceneDepth: { value: null },
     uSceneDepthSize: { value: new THREE.Vector2(1, 1) },
     uClipToLocal: { value: new THREE.Matrix4() },
@@ -380,7 +392,7 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     camera.updateWorldMatrix(true, false);
     worldBounds.copy(localBounds).applyMatrix4(volume.matrixWorld);
     viewProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    frustum.setFromProjectionMatrix(viewProjection);
+    frustum.setFromProjectionMatrix(viewProjection, camera.coordinateSystem, camera.reversedDepth);
     return frustum.intersectsBox(worldBounds);
   };
   // Fade from the transformed cloud volume, not its caller's chunk origin.
@@ -400,7 +412,6 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     uniforms.uCamera.value.copy(cameraPosition);
     volume.worldToLocal(uniforms.uCamera.value);
     uniforms.uLocalToWorld.value.copy(volume.matrixWorld);
-    uniforms.uViewProjection.value.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     uniforms.uTime.value = Number.isFinite(time) ? time : 0;
     uniforms.uVisibility.value = Number.isFinite(visibility) ? Math.max(0, Math.min(1, visibility)) : 0;
     uniforms.uSteps.value = quality === 'low' ? 16 : quality === 'high' ? 48 : 32;

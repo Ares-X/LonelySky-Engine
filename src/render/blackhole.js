@@ -11,7 +11,7 @@ void main() {
 
 const fragmentShader = /* glsl */`
 uniform vec3 uCamera;
-uniform mat4 uLocalToWorld, uViewProjection;
+uniform mat4 uLocalToWorld, projectionMatrix;
 uniform mat3 uSkyRotation;
 uniform sampler2D uSky;
 uniform bool uHasSky;
@@ -155,12 +155,20 @@ void main() {
   // the entire back face in front of every physical foreground surface. A
   // forward disk encounter still owns its actual depth, even on outward rays.
   if (firstDiskDistance <= 0.0 && b >= 0.0 && escaped && !captured) {
-    gl_FragDepth = 1.0;
+    #ifdef USE_REVERSED_DEPTH_BUFFER
+      gl_FragDepth = 0.0;
+    #else
+      gl_FragDepth = 1.0;
+    #endif
   } else {
     float depthDistance = firstDiskDistance > 0.0 ? firstDiskDistance : max(0.001, -b);
     vec3 depthPoint = uCamera + originalDirection * depthDistance;
-    vec4 clip = uViewProjection * uLocalToWorld * vec4(depthPoint, 1.0);
-    gl_FragDepth = clamp(0.5 * clip.z / max(clip.w, 0.0001) + 0.5, 0.0, 1.0);
+    vec4 clip = projectionMatrix * (viewMatrix * (uLocalToWorld * vec4(depthPoint, 1.0)));
+    #ifdef USE_REVERSED_DEPTH_BUFFER
+      gl_FragDepth = clamp(clip.z / max(clip.w, 0.0001), 0.0, 1.0);
+    #else
+      gl_FragDepth = clamp(0.5 * clip.z / max(clip.w, 0.0001) + 0.5, 0.0, 1.0);
+    #endif
   }
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
@@ -182,7 +190,6 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null, det
     visibility: { value: 1 },
     uCamera: { value: new THREE.Vector3(0, 0, 20) },
     uLocalToWorld: { value: new THREE.Matrix4() },
-    uViewProjection: { value: new THREE.Matrix4() },
     uSkyRotation: { value: new THREE.Matrix3() },
     uSkyIntensity: { value: 1 },
     uSky: { value: skyTexture || fallbackTexture },
@@ -233,7 +240,6 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null, det
     uniforms.uCamera.value.copy(cameraPosition);
     volume.worldToLocal(uniforms.uCamera.value);
     uniforms.uLocalToWorld.value.copy(volume.matrixWorld);
-    uniforms.uViewProjection.value.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     uniforms.uTime.value = Number.isFinite(time) ? time : 0;
     uniforms.uSteps.value = quality === 'low' ? 72 : quality === 'high' ? 144 : 120;
     uniforms.uStepScale.value = quality === 'low' ? 0.12 : quality === 'high' ? 0.06 : 0.075;

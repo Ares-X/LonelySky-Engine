@@ -60,6 +60,8 @@ test('first-owner noise optimization preserves every approved candidate tile byt
 // the evaluated result and lets the quadrature reach behind the surface.
 function intervalRule(shader) {
   const source=shader.slice(shader.indexOf('  float exit='),shader.indexOf('  vec3 color='))
+    .replace(/#ifdef USE_REVERSED_DEPTH_BUFFER[\s\S]*?#else([\s\S]*?)#endif/g,'$1')
+    .replace(/(?:bool|float) (hasSurface|surfaceClipDepth)=/g,'let $1=')
     .replace(/float exit=[^;]+;/,'let exit=boxExit;')
     .replace(/vec2 uv=[^;]+;/,'')
     .replace(/float surfaceDepth=[^;]+;/,'')

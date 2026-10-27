@@ -87,10 +87,27 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
               vec3 mountain=mix(vec3(.21,.22,.205),vec3(.35,.34,.30),fine);
               vec3 ground=mix(lowland,mountain,mountainMask);
               ground*=.82+fine*.24;
+              // Resolved rock strata stay fixed to the world. Filter each scale
+              // before adding relief so orbital pixels do not shimmer.
+              float strata=0.,grit=0.,strataWeight=0.,gritWeight=0.;
+              // Camera altitude is constant for this body's draw. Keep screen
+              // derivatives in this uniform branch, never a per-pixel land branch.
+              if(closeDetail>0.){
+                vec3 strataPoint=p*64.+seedOffset,gritPoint=p*256.+seedOffset;
+                float strataFootprint=max(length(dFdx(strataPoint)),length(dFdy(strataPoint)));
+                float gritFootprint=max(length(dFdx(gritPoint)),length(dFdy(gritPoint)));
+                strataWeight=(1.-smoothstep(.25,.8,strataFootprint))*closeDetail;
+                gritWeight=(1.-smoothstep(.25,.8,gritFootprint))*closeDetail;
+                strata=1.-abs(noise3(strataPoint)*2.-1.);
+                grit=noise3(gritPoint)-.5;
+                ground*=1.+(strata-.5)*.3*strataWeight+grit*.12*gritWeight;
+              }
               float snow=smoothstep(.89,.97,abs(p.y));
               ground=mix(ground,vec3(.78,.82,.81),snow);
               base=mix(sea,ground,land)+vec3(.035,.09,.065)*shelf;
-              n=geologicalNormal(land*(upland*ridges*ridges*.00007+geology*.000018),n);
+              float height=land*(upland*ridges*ridges*.00007+geology*.000018);
+              if(closeDetail>0.)height+=land*(strata*.0005*strataWeight+grit*.00008*gritWeight);
+              n=geologicalNormal(height,n);
             }
             float clouds=smoothstep(.62,.77,fbm(terrain*2.6+vec3(14.)));
             base=mix(base,vec3(.82,.87,.88),clouds*(surfaceStyle==5?.48:.19));
