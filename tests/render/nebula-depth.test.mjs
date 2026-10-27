@@ -12,6 +12,7 @@ function fixture() {
   camera.updateMatrixWorld();
   nebula.userData.update(camera, 0);
   const target = new THREE.WebGLRenderTarget(64, 32, { samples: 4 });
+  target.resolveDepthBuffer = false;
   const pass = new NebulaRenderPass(scene, camera);
   let currentTarget = null;
   const clearColor = new THREE.Color(0x123456);
@@ -41,7 +42,8 @@ function fixture() {
       });
       const volumeMaterial = nebula.children[0].material;
       draws.push({ visible, hasDepth: volumeMaterial.uniforms?.uHasSceneDepth.value,
-        depth: volumeMaterial.uniforms?.uSceneDepth.value, background: world.background });
+        depth: volumeMaterial.uniforms?.uSceneDepth.value, background: world.background,
+        resolveDepth: currentTarget.resolveDepthBuffer });
     },
   };
   const add = (name, material, renderOrder = 0) => {
@@ -72,6 +74,8 @@ test('depth composition shades surfaces and sorted transparencies once and sampl
     assert.deepEqual(f.draws[0].visible.sort(), ['body', 'mixed', 'sky']);
     assert.deepEqual(f.draws[1].visible.sort(), ['', 'glow', 'mixed']);
     assert.equal(f.draws[1].hasDepth, true);
+    assert.ok(f.draws.every(draw => draw.resolveDepth), 'surface depth resolves while a volume consumes its snapshot');
+    assert.equal(f.target.resolveDepthBuffer, false, 'postprocessing returns to colour-only resolves');
     assert.equal(f.draws[1].depth, f.copies[0][1]);
     assert.equal(f.draws[1].background, null);
     assert.equal(f.scene.background, originalBackground);
@@ -111,6 +115,7 @@ test('failed rendering restores original material arrays, masks, background, tar
     assert.equal(material.visible, true);
     assert.equal(f.renderer.autoClear, true);
     assert.equal(f.renderer.getRenderTarget(), prior);
+    assert.equal(f.target.resolveDepthBuffer, false);
     assert.equal(f.nebula.children[0].material.uniforms.uSceneDepth.value, null);
   } finally { f.dispose(); prior.dispose(); }
 });
