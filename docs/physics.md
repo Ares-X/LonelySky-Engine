@@ -107,6 +107,10 @@ argument when calling `bodyCollisionRadius` directly; its default is `planet`.
 
 Both systems cache up to 128 sector descriptors and query the surrounding 27
 cells. Collision splits long motion into segments of at most `CELL_SIZE / 4`.
+Collision recovery and sweeps reuse at most two private sampling snapshots for
+the same neighborhood and exact time, distinguished by curvature margin. A time,
+cell or world revision change invalidates that reuse. Returned bodies and contact
+vectors remain detached; callers can modify them without changing later queries.
 It processes at most 64 sweep events; remaining motion is discarded and marked
 `corrected` when that limit is reached. This bounds work and prevents teleporting
 past unchecked geometry, but very long requests may not reach their endpoint.

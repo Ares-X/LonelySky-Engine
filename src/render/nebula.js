@@ -97,10 +97,27 @@ float field(vec3 p,vec3 rayStep,float pixelFootprint){
   float envelope=support*(1.0-smoothstep(0.68,1.0,length(p*vec3(0.83,0.84,0.92))));
   if(envelope<=0.001)return 0.0;
   float broad=cloudNoise(p*0.48+uNoiseOffset,max(pixelFootprint*0.48,length(rayStep)*0.24));
-  float shear=cloudNoise(p*0.57+uNoiseOffset+vec3(0.31,0.73,0.19),max(pixelFootprint*0.57,length(rayStep)*0.285));
-  // Medium folds turn the fine dust locally. Four noise queries are retained;
+  // Medium folds turn the fine dust locally. Nonempty samples keep all four queries;
   // no single strong warp stretches every trunk into the same brushed pattern.
   float fine=cloudNoise(p*vec3(3.7,3.1,2.4)+uNoiseOffset+vec3(0.17,0.37,0.63),max(pixelFootprint*3.7,length(rayStep*vec3(3.7,3.1,2.4))*0.5));
+  // These existing shell factors do not depend on shear or microstructure.
+  // An exact zero cannot contribute density, including along the light rays.
+  float shellGate=1.0;
+  if(uMorphology==1&&uAppearance==4){
+    float shellRadius=length(p*vec3(1.0,1.6,1.25));
+    float shellOffset=(broad-0.5)*0.045+(fine-0.5)*0.012;
+    shellGate=1.0-smoothstep(0.015,0.065,abs(shellRadius-0.62+shellOffset));
+  }else if(uMorphology==4&&uAppearance==5){
+    vec3 shock=p*vec3(1.0,1.15,1.0);
+    float radius=length(shock);
+    float sectors=smoothstep(0.46,0.64,broad);
+    float ridge=smoothstep(0.49,0.63,fine);
+    float shockOffset=(broad-0.5)*0.032+(fine-0.5)*0.01;
+    float front=1.0-smoothstep(0.012,0.06,abs(radius-0.65+shockOffset));
+    shellGate=front*sectors*ridge;
+  }
+  if(shellGate==0.0)return 0.0;
+  float shear=cloudNoise(p*0.57+uNoiseOffset+vec3(0.31,0.73,0.19),max(pixelFootprint*0.57,length(rayStep)*0.285));
   vec3 flowPoint=p+vec3(broad-0.5,shear-0.5,fine-0.5)*0.32;
   mat3 dustFrame=mat3(0.8,0.0,-0.6,0.36,0.8,0.48,0.48,-0.6,0.64);
   float micro=cloudNoise(dustFrame*(flowPoint*vec3(10.5,8.3,3.3))+uNoiseOffset+vec3(0.63,0.11,0.29),max(pixelFootprint*10.5,length(rayStep*vec3(10.5,8.3,3.3))*0.5));
@@ -121,10 +138,7 @@ float field(vec3 p,vec3 rayStep,float pixelFootprint){
       if(uAppearance==4){
         // The optional shell has a genuinely empty cavity and a smooth outer rim;
         // high-frequency displacement would turn this into disconnected blobs.
-        float shellRadius=length(p*vec3(1.0,1.6,1.25));
-        float shellOffset=(broad-0.5)*0.045+(fine-0.5)*0.012;
-        shape=(1.0-smoothstep(0.015,0.065,abs(shellRadius-0.62+shellOffset)))
-          *(0.52+eroded*0.3);
+        shape=shellGate*(0.52+eroded*0.3);
       }
     }else if(uMorphology==2){
       // Three separated knots connected only by thin turbulent material.
@@ -145,13 +159,7 @@ float field(vec3 p,vec3 rayStep,float pixelFootprint){
       if(uAppearance==5){
         // Thin shock fronts on a mostly open shell. Patchy gaps and ridges reuse
         // the filtered broad and fine noise; the shell remains spatially fixed.
-        vec3 shock=p*vec3(1.0,1.15,1.0);
-        float radius=length(shock);
-        float sectors=smoothstep(0.46,0.64,broad);
-        float ridge=smoothstep(0.49,0.63,fine);
-        float shockOffset=(broad-0.5)*0.032+(fine-0.5)*0.01;
-        float front=1.0-smoothstep(0.012,0.06,abs(radius-0.65+shockOffset));
-        shape=front*sectors*ridge*(0.58+micro*0.5);
+        shape=shellGate*(0.58+micro*0.5);
       }
     }else if(uMorphology==5){
       float stream=length(vec2(q.y-0.23*sin(q.x*3.4),q.z+0.14*cos(q.x*2.5)));

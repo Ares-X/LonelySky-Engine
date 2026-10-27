@@ -119,6 +119,7 @@ export function createCosmos({ seed = 'lonelysky' } = {}) {
       void main(){
         vec3 relative=position-cameraLocal;float distanceToCamera=length(relative);
         alpha=1.-smoothstep(420000.,520000.,distanceToCamera);tint=color;
+        if(alpha==0.){gl_Position=vec4(0.,0.,2.,1.);gl_PointSize=1.;return;}
         // Keep all nearby depth relationships. Only distant drawing depth is
         // compressed to fit the existing 220k clip plane; angles stay exact.
         float drawDistance=distanceToCamera<=160000.?distanceToCamera:160000.+40000.*(1.-exp(-(distanceToCamera-160000.)/180000.));
@@ -147,42 +148,50 @@ export function createCosmos({ seed = 'lonelysky' } = {}) {
   });
   const points = new THREE.Points(geometry, material); points.frustumCulled = false; group.add(points);
   const haze = createGalaxyHaze({ seed }); group.add(haze);
-  let lastCell = '', lastMacro = '', lastCount = 0, descriptors = [], samples = [], disposed = false;
+  let lastCell = '', lastMacro = '', lastCount = 0, descriptors = [], samples = [], centers = [], disposed = false;
   const stats = { revision: COSMOS_VERSION, galaxies: 0, particles: 0, maxParticles: MAX_COSMOS_PARTICLES, batches: 0, visible: true, rebuilds: 0 };
   Object.defineProperty(group.userData, 'stats', { get: () => ({ ...stats }) });
   group.userData.update = ({ sectorIndex, cameraPosition, quality = 'auto', quiet = 0, home = false, viewportHeight = 1, pixelRatio = 1 }) => {
     if (disposed) return;
     const cell = decodeCell(sectorIndex), key = AXES.map(axis => cell[axis]).join(','), macroKey = AXES.map(axis => Math.floor(cell[axis] / MACRO_CELLS)).join(',');
     const count = COSMOS_QUALITY_COUNTS[quality] ?? COSMOS_QUALITY_COUNTS.auto;
-    if (macroKey !== lastMacro || count !== lastCount) {
+    const populationChanged = macroKey !== lastMacro || count !== lastCount;
+    if (populationChanged) {
       descriptors = loadedMacros(sectorIndex, seed); samples = descriptors.map(descriptor => sampleGalaxy(descriptor, count));
       if (macroKey !== lastMacro) haze.userData.setDescriptors(descriptors);
-      lastMacro = macroKey; lastCount = count; lastCell = '';
+      lastCell = '';
     }
     if (key !== lastCell) {
-      const positions = new Float32Array(descriptors.length * count * 3), colors = new Float32Array(positions.length), sizes = new Float32Array(descriptors.length * count);
+      // A floating-origin rebase translates the same population. Retain its
+      // GPU buffers and immutable color/radius attributes until it changes.
+      centers = descriptors.map(descriptor => galaxyRelativeCenter(descriptor, cell));
+      const positions = populationChanged ? new Float32Array(descriptors.length * count * 3) : geometry.attributes.position.array;
       descriptors.forEach((descriptor, j) => {
-        const center = galaxyRelativeCenter(descriptor, cell), sample = samples[j];
+        const center = centers[j], sample = samples[j];
         for (let i = 0; i < count * 3; i++) positions[j * count * 3 + i] = sample.positions[i] + center[i % 3];
-        colors.set(sample.colors, j * count * 3); sizes.set(sample.sizes, j * count);
       });
-      // Dispose old GPU attribute buffers before replacing the geometry's data.
-      geometry.dispose();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-      geometry.setAttribute('pointRadius', new THREE.BufferAttribute(sizes, 1));
-      geometry.setDrawRange(0, sizes.length);
-      stats.galaxies = descriptors.length; stats.particles = sizes.length; stats.rebuilds++; lastCell = key;
+      if (populationChanged) {
+        const colors = new Float32Array(positions.length), sizes = new Float32Array(descriptors.length * count);
+        samples.forEach((sample, j) => { colors.set(sample.colors, j * count * 3); sizes.set(sample.sizes, j * count); });
+        // Attribute counts may change; release old buffers before replacing.
+        geometry.dispose();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geometry.setAttribute('pointRadius', new THREE.BufferAttribute(sizes, 1));
+        geometry.setDrawRange(0, sizes.length);
+      } else geometry.attributes.position.needsUpdate = true;
+      stats.galaxies = descriptors.length; stats.particles = positions.length / 3; stats.rebuilds++;
+      lastMacro = macroKey; lastCount = count; lastCell = key;
     }
     material.uniforms.cameraLocal.value.fromArray(cameraPosition);
     material.uniforms.pixelHeight.value = Math.max(1, viewportHeight * pixelRatio);
     material.uniforms.sampleWeight.value = COSMOS_QUALITY_COUNTS.auto / count;
     material.uniforms.brightness.value = 1 - Math.max(0, Math.min(1, quiet)) * .52;
     group.visible = !home; stats.visible = group.visible;
-    const volumes = haze.userData.update({ centers: descriptors.map(descriptor => galaxyRelativeCenter(descriptor, cell)), cameraPosition, quality,
+    const volumes = haze.userData.update({ centers, cameraPosition, quality,
       brightness: material.uniforms.brightness.value, home });
     stats.batches = home ? 0 : Number(stats.particles > 0) + volumes;
   };
-  group.userData.dispose = () => { if (disposed) return; disposed = true; geometry.dispose(); material.dispose(); haze.userData.dispose(); group.clear(); samples = []; descriptors = []; stats.visible = false; stats.batches = 0; };
+  group.userData.dispose = () => { if (disposed) return; disposed = true; geometry.dispose(); material.dispose(); haze.userData.dispose(); group.clear(); samples = []; descriptors = []; centers = []; stats.visible = false; stats.batches = 0; };
   return group;
 }
