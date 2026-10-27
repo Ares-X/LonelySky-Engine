@@ -31,6 +31,9 @@ float skyNoise(vec3 p) {
   return mix(mix(mix(skyHash(i),skyHash(i+vec3(1,0,0)),f.x),mix(skyHash(i+vec3(0,1,0)),skyHash(i+vec3(1,1,0)),f.x),f.y),
     mix(mix(skyHash(i+vec3(0,0,1)),skyHash(i+vec3(1,0,1)),f.x),mix(skyHash(i+vec3(0,1,1)),skyHash(i+vec3(1,1,1)),f.x),f.y),f.z);
 }
+// GLSL pow has no defined negative-base domain, including exponent 2.0.
+float seaSquare(float value) { return value*value; }
+
 // Eighteen spatial building blocks share seeded population, erosion and light.
 // Their controls are interpolated in world space, never chosen by a screen or clock.
 vec3 stellarSea(vec3 direction) {
@@ -66,7 +69,7 @@ vec3 stellarSea(vec3 direction) {
   float width=uSeaWidth*(.65+spread*.5);
   float latitude=d.y/width;
   float warped=latitude+(broad-.5)*warp+sin(d.x*pitch+uSeaPhase)*warp*.3;
-  float dustLane=exp(-pow(warped/max(.012,uSeaDust.y),2.));
+  float dustLane=exp(-seaSquare(warped/max(.012,uSeaDust.y)));
   float eroded=smoothstep(.28,.78,middle+fine*.18-uSeaDust.z*.18);
   float transmission=exp(-uSeaDust.x*(dustLane*1.5+eroded*.32)*uSeaState.w);
   float cloud=pow(max(0.,broad*.5+middle*.35+fine*.15),1.8+clump)*2.4;
@@ -80,7 +83,7 @@ vec3 stellarSea(vec3 direction) {
   vec3 color=mix(oldColor,uSeaCool,smoothstep(.35,.72,grain)*uSeaState.x);
   float mass=0.,nucleus=0.,birth=0.;
   if(uSeaMorphA.x>0.) { // broad dust river, with a displaced compact bulge
-    float bulge=exp(-pow((d.z-asymmetry*.6)/(.28+core),2.)-latitude*latitude*38.)*sideFront;
+    float bulge=exp(-seaSquare((d.z-asymmetry*.6)/(.28+core))-latitude*latitude*38.)*sideFront;
     mass+=uSeaMorphA.x*(band*(.25+cloud*1.4)+bulge*core*1.5)*transmission;
     nucleus+=uSeaMorphA.x*bulge*core;
   }
@@ -148,7 +151,7 @@ vec3 stellarSea(vec3 direction) {
   }
   if(uSeaMorphD.y>0.) { // flattened stellar lens and faint annular envelope
     float lens=length(p/vec2(.8+spread*.4,.13+core*.16));
-    mass+=uSeaMorphD.y*(exp(-lens*2.8)+exp(-pow(lens-.9,2.)*60.)*.3)*front*(.5+cloud*.5);
+    mass+=uSeaMorphD.y*(exp(-lens*2.8)+exp(-seaSquare(lens-.9)*60.)*.3)*front*(.5+cloud*.5);
     nucleus+=uSeaMorphD.y*exp(-lens*lens*12.)*front;
   }
   if(uSeaMorphD.z>0.) { // diffuse asymmetric ellipsoid
@@ -170,20 +173,20 @@ vec3 stellarSea(vec3 direction) {
   if(uSeaMorphE.y>0.) { // tidally pulled clusters joined by a curved, faint bridge
     vec2 a=p-vec2(-.3,asymmetry),b=p-vec2(.35,-asymmetry*.5);
     float pair=exp(-dot(a,a)*25.)+exp(-dot(b,b)*55.)*.65;
-    float bridge=exp(-pow(p.y-asymmetry*cos(p.x*3.),2.)*200.-p.x*p.x*3.)*.22;
+    float bridge=exp(-seaSquare(p.y-asymmetry*cos(p.x*3.))*200.-p.x*p.x*3.)*.22;
     mass+=uSeaMorphE.y*(pair+bridge)*front*(.25+cloud)*transmission;
     birth+=uSeaMorphE.y*pair*front*.6;
   }
   if(uSeaMorphE.z>0.) { // braided absorbing columns against scattered light
     float wave=warp*sin(d.z*pitch+uSeaPhase);
-    float braid=exp(-pow(side.x-wave,2.)*80.)+exp(-pow(side.x+wave+.22,2.)*120.);
+    float braid=exp(-seaSquare(side.x-wave)*80.)+exp(-seaSquare(side.x+wave+.22)*120.);
     float backlight=exp(-side.x*side.x*4.-side.y*side.y*3.)*sideFront;
     mass+=uSeaMorphE.z*backlight*(.3+cloud)*exp(-braid*uSeaDust.x*(.6+middle));
     birth+=uSeaMorphE.z*backlight*pow(cloud,3.)*.4;
   }
   if(uSeaMorphF.x>0.) { // an empty molecular eye bounded by illuminated dust
     float eye=length(side/vec2(.6+spread*.3,.3+core*.4))+(broad-.5)*warp;
-    float rim=exp(-pow(eye-.75,2.)*32.);
+    float rim=exp(-seaSquare(eye-.75)*32.);
     float opening=exp(-eye*eye*6.);
     mass+=uSeaMorphF.x*rim*sideFront*(.3+cloud*1.2)*exp(-opening*uSeaDust.x*2.);
   }
