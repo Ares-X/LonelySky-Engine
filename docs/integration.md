@@ -50,3 +50,25 @@ on NASA's [Cosmic Cliffs](https://science.nasa.gov/asset/webb/cosmic-cliffs-in-t
 and [Hubble M74](https://science.nasa.gov/asset/hubble/spiral-galaxy-m74/).
 These are artistic display cues, not calibrated naked-eye colors or radiative
 transfer. No reference photographs or additional dependencies are required.
+
+## Close planets and distant landmarks
+
+Both renderers borrow planet and atmosphere geometry from one lazy per-view
+`createPlanetLod()` pool in `src/render/planet-lod.js`. Selection uses projected
+pixel radius, effective quality and hysteresis. Consumers provide FOV, viewport
+height, pixel ratio, body radius and camera distance, then dispose the pool with
+the view. The consumer still owns every physical body and collision radius.
+
+`src/megastructures.js` supplies an optional independent distant-landmark stream.
+`sampleDistantLandmark({sectorIndex,cameraPosition,seed})` returns one finite visual
+descriptor or null. Supply it as `environment.distantLandmark` to the shared sky
+and lens environment setter. The shape is anchored in world coordinates; its
+appearance theme derives from the nearest seeded galaxy at the anchor. Most
+anchors are empty; rings are a minority and excluded from young/void themes.
+These analytic exterior vistas introduce no landable or collidable bodies.
+Do not add them to a physics provider without a separate world-generation design.
+
+Point-star hosts may use `DISTANT_LANDMARK_OCCLUSION_GLSL` with the same descriptor
+uniforms. Pass world-space star-to-camera directions; local sky vertices must be
+transformed by `modelMatrix` before subtracting world-space `cameraPosition`.
+Surface radiance, ring-band opacity and star masking share the same intersections.

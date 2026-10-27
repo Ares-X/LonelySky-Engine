@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {DISTANT_LANDMARK_GLSL, distantLandmarkUniforms, setDistantLandmark} from './distant-landmark.js';
 
 // The compact power-ten spark kernel has this mean over a unit lattice cell:
 // 4*pi*integral(r^2 * (1 - 2.1*r)^10, r=0..1/2.1).
@@ -107,6 +108,7 @@ vec3 stellarSea(vec3 direction) {
   return (river*uSeaWeightsA.x+blue*uSeaWeightsA.y+gold*uSeaWeightsA.z
     +islands*uSeaWeightsB.x+dark*uSeaWeightsB.y+tide*uSeaWeightsB.z)*uSeaQuiet;
 }
+${DISTANT_LANDMARK_GLSL}
 vec3 deepSky(vec3 direction) {
   vec3 d=normalize(direction);
   float grain=skyNoise(d*11.)*.6+skyNoise(d*31.+17.)*.27+skyNoise(d*79.+29.)*.13;
@@ -133,11 +135,12 @@ vec3 deepSky(vec3 direction) {
   float resolved=1.-smoothstep(${DEEP_SKY_SPARK_FILTER.resolvedFootprint},${DEEP_SKY_SPARK_FILTER.unresolvedFootprint},footprint);
   float filteredSpark=mix(${DEEP_SKY_SPARK_FILTER.mean}*probability,spark*population,resolved);
   sky+=vec3(.55,.63,.7)*filteredSpark*.22;
-  return sky+stellarSea(d);
+  vec4 ring=distantLandmarkRadiance(d);
+  return mix(sky+stellarSea(d),ring.rgb,ring.a);
 }`;
 
 export function deepSkyUniforms({detailTexture = null} = {}) {
-  return {uSkyTint:{value:new THREE.Color(.55,.6,.66)},uSkyBandNormal:{value:new THREE.Vector3(0,1,0)},
+  return {...distantLandmarkUniforms(),uSkyTint:{value:new THREE.Color(.55,.6,.66)},uSkyBandNormal:{value:new THREE.Vector3(0,1,0)},
     uSkyBrightness:{value:.012},uSkyBandStrength:{value:0},uSkyStarDensity:{value:.12},
     uSeaWeightsA:{value:new THREE.Vector3()},uSeaWeightsB:{value:new THREE.Vector3()},
     uSeaFrame:{value:new THREE.Matrix3()},uSeaPhase:{value:0},uSeaWidth:{value:1},uSeaQuiet:{value:1},
@@ -145,6 +148,7 @@ export function deepSkyUniforms({detailTexture = null} = {}) {
 }
 export function setDeepSkyEnvironment(uniforms, environment, quiet = 0) {
   if (!environment) return;
+  setDistantLandmark(uniforms, environment.distantLandmark);
   uniforms.uSkyTint.value.fromArray(environment.ambientTint);
   uniforms.uSkyBandNormal.value.fromArray(environment.bandNormal);
   uniforms.uSkyBrightness.value = environment.skyBrightness * (1 - Math.max(0,Math.min(1,quiet))*.35);

@@ -49,6 +49,58 @@ test('families select different structure and composition rather than only tint'
   assert.ok(elevation('grand-spiral')>.7);assert.ok(elevation('dust-disk')<.1);
 });
 
+test('seeded populations vary structure while preserving family contrast and established viewpoints', () => {
+  const populations = new Map(families.map(family => [family, []]));
+  const viewpoints = {
+    'grand-spiral': [[.16, 2, 1.45], 52], 'barred-spiral': [[.8, 1.5, 1.75], 52],
+    'dust-disk': [[.23, .17, 2.55], 50], 'ancient-halo': [[1.1, .65, 2.4], 50],
+    'tidal-islands': [[1.8, .65, 1.8], 54], 'stellar-nursery': [[.5, 1.8, 1.9], 52],
+  };
+  for (let i = 0; i < 128; i++) for (const [morphology, bar] of [['spiral', false], ['spiral', true], ['elliptical', false], ['irregular', false]]) {
+    const descriptor = {seed: `population-${i}`, morphology, bar};
+    const appearance = describeGalaxyAppearance(descriptor);
+    assert.deepEqual(appearance, describeGalaxyAppearance(structuredClone(descriptor)));
+    const [offset, fov] = viewpoints[appearance.family];
+    assert.deepEqual(appearance.viewing, {offset, fov}, 'existing scenic and bookmark framing remains fixed');
+    for (const value of Object.values(appearance)) if (typeof value === 'number') assert.ok(Number.isFinite(value) && value >= 0 && value <= 6);
+    populations.get(appearance.family).push(appearance);
+  }
+  const extent = (family, field) => {
+    const values = populations.get(family).map(profile => profile[field]);
+    return [Math.min(...values), Math.max(...values)];
+  };
+  for (const family of families) {
+    const profiles = populations.get(family);
+    assert.ok(profiles.length > 20);
+    const varying = family === 'ancient-halo' ? ['coreStrength', 'haloStrength']
+      : family === 'tidal-islands' || family === 'stellar-nursery' ? ['knotScale', 'bridgeStrength', 'youngStrength']
+        : ['armStrength', 'coreStrength', 'dustStrength', 'youngStrength'];
+    for (const field of varying) {
+      const [minimum, maximum] = extent(family, field);
+      assert.ok(maximum / minimum > 1.2, `${family} must vary its ${field}, beyond exposure changes`);
+    }
+    if (family === 'ancient-halo' || family === 'tidal-islands' || family === 'stellar-nursery') {
+      assert.ok(profiles.every(profile => profile.armStrength === 0 && profile.dustStrength === 0));
+    }
+  }
+  assert.ok(extent('dust-disk', 'dustStrength')[0] > extent('grand-spiral', 'dustStrength')[1] * 4);
+  assert.ok(extent('ancient-halo', 'haloStrength')[0] > extent('grand-spiral', 'haloStrength')[1] * 5);
+  assert.ok(extent('tidal-islands', 'bridgeStrength')[0] > extent('stellar-nursery', 'bridgeStrength')[1] * 5);
+  assert.ok(extent('tidal-islands', 'knotScale')[0] > extent('stellar-nursery', 'knotScale')[1] * 1.5);
+  for (const family of ['grand-spiral', 'barred-spiral']) {
+    const profiles = populations.get(family).toSorted((a, b) => a.armStrength - b.armStrength);
+    assert.ok(profiles.at(-1).coreStrength < profiles[0].coreStrength);
+    assert.ok(profiles.at(-1).youngStrength > profiles[0].youngStrength);
+    assert.ok(profiles.at(-1).dustStrength > profiles[0].dustStrength);
+  }
+  const halos = populations.get('ancient-halo').toSorted((a, b) => a.coreStrength - b.coreStrength);
+  assert.ok(halos.at(-1).haloStrength < halos[0].haloStrength, 'a concentrated nucleus trades light with its envelope');
+  const islands = populations.get('tidal-islands').toSorted((a, b) => a.knotScale - b.knotScale);
+  assert.ok(islands.at(-1).bridgeStrength > islands[0].bridgeStrength, 'diffuse islands carry more connecting light');
+  assert.ok(populations.get('tidal-islands').every(profile => profile.knotScale < .81 && profile.haloStrength < .08));
+  assert.ok(populations.get('stellar-nursery').every(profile => profile.knotScale < .43 && profile.bridgeStrength < .024 && profile.haloStrength < .05));
+});
+
 test('profiles share bounded volumes, shader, texture and quadrature without extra draw calls', () => {
   const descriptors=[...examples.values()],haze=createGalaxyHaze();
   haze.userData.setDescriptors(descriptors);

@@ -12,6 +12,7 @@ import { createNebula } from './nebula.js';
 import { createBlackHole } from './blackhole.js';
 import { createCosmos } from './cosmos.js';
 import { createDeepSky } from './deep-sky.js';
+import { createPlanetLod } from './planet-lod.js';
 import { nebulaVisibility } from '../nebula-volume.js';
 
 const QUALITIES = new Set(['auto', 'low', 'high']);
@@ -88,7 +89,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(55, 1, .5, 220000);
   scene.add(camera);
   const resources = [], chunks = new Map();
-  let renderer, composer, bloom, stars, sky, cosmos, sphere, distantSphere, ringGeometry, glow, fallbackTexture;
+  let renderer, composer, bloom, stars, sky, cosmos, sphere, planetLod, ringGeometry, glow, fallbackTexture;
   let disposed = false, running = false, lost = false, resumeAfterRestore = false, raf = null;
   let width = 1, height = 1, sectorIndex = 0, loadedIndex = -1, loadedRevision, time = 0, epoch = null;
   const cameraPosition = new THREE.Vector3(), bodyPosition = new THREE.Vector3();
@@ -102,11 +103,11 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     const surface = track(isStar ? starMaterial(data.color) : planetMaterial(data, { lightDirection: illumination }));
     if (!isStar && !surface.uniforms.surface.value) surface.uniforms.surface.value = fallbackTexture;
     const body = new THREE.Mesh(sphere, surface); body.scale.setScalar(data.radius); group.add(body);
-    const visibleMaterials = [surface];
+    const visibleMaterials = [surface], lodMeshes = [body];
     if (isStar || ['gas', 'ocean', 'ice'].includes(data.kind)) {
       const air = track(atmosphereMaterial(isStar ? data.color : data.colorA, illumination));
       const atmosphere = new THREE.Mesh(sphere, air); atmosphere.scale.setScalar(data.radius * (isStar ? 1.06 : 1.015));
-      group.add(atmosphere); visibleMaterials.push(air);
+      group.add(atmosphere); visibleMaterials.push(air); lodMeshes.push(atmosphere);
     }
     if (data.rings && !isStar) {
       const material = track(ringMaterial(data.ringColor, data.seed, { planetRadius: data.radius, lightDirection: illumination }));
@@ -123,7 +124,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
         const halo = new THREE.Sprite(material); halo.scale.setScalar(data.radius * scale); halo.userData.baseOpacity = opacity; group.add(halo);
       }
     }
-    group.userData = { ...group.userData, surface, body, isStar, materials: visibleMaterials };
+    group.userData = { ...group.userData, surface, body, isStar, lodMeshes, radius: data.radius, materials: visibleMaterials };
     return group;
   }
 
@@ -214,8 +215,9 @@ export function createUniverseView(container, { universe = createUniverse(), qua
         if (!group.visible) continue;
         for (const material of group.userData.materials) material.uniforms.visibility.value = visibility;
         group.userData.surface.depthWrite = visibility === 1;
-        group.traverse(object => { if (object.geometry === sphere || object.geometry === distantSphere) object.geometry = distance > 15000 ? distantSphere : sphere; });
+        if (!group.userData.isStar) planetLod.update(group.userData.lodMeshes, {radius: group.userData.radius, distance, fov: camera.fov, viewportHeight: height, pixelRatio: renderer.getPixelRatio(), quality});
         if (group.userData.isStar) {
+          for (const mesh of group.userData.lodMeshes) mesh.geometry = distance > 15000 ? planetLod.geometry(0) : sphere;
           group.userData.surface.uniforms.time.value = time;
           for (const object of group.children) if (object.isSprite) object.material.opacity = object.userData.baseOpacity * visibility;
         } else group.userData.body.rotation.y = time * .003;
@@ -280,7 +282,8 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     renderer.domElement.setAttribute('aria-label', 'Procedural three-dimensional universe');
     renderer.domElement.style.display = 'block'; renderer.domElement.style.width = '100%'; renderer.domElement.style.height = '100%';
     container.append(renderer.domElement); resources.push(() => renderer.domElement.remove());
-    sphere = own(new THREE.SphereGeometry(1, 96, 64)); distantSphere = own(new THREE.SphereGeometry(1, 48, 32));
+    planetLod = createPlanetLod(); resources.push(() => planetLod.dispose());
+    sphere = planetLod.geometry(1);
     ringGeometry = own(new THREE.RingGeometry(1.18, 2.26, 256, 1)); glow = own(createGlow());
     fallbackTexture = own(new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1)); fallbackTexture.needsUpdate = true;
     stars = createStarfield(universe.seed); own(stars.geometry); own(stars.material); scene.add(stars);

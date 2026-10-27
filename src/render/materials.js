@@ -202,6 +202,23 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
             float polar=kind==2?smoothstep(.55,.88,abs(p.y))*.32:0.;
             base=mix(colorA,colorB,clamp(relief*.83+polar,0.,1.))*(.72+.45*detail);
           }
+          if(kind!=0){
+            // Resolve only stationary local grain near the surface. The pixel
+            // footprint suppresses detail before it can alias; coastlines and
+            // the original broad albedo remain authoritative.
+            float altitude=max(0.,length(cameraPosition-vCenter)-bodyRadius)/max(bodyRadius,1.);
+            float closeDetail=1.-smoothstep(.035,.55,altitude);
+            if(closeDetail>0.){
+              vec3 grainPoint=p*864.+seedOffset;
+              float footprint=max(length(dFdx(grainPoint)),length(dFdy(grainPoint)));
+              float resolved=1.-smoothstep(.25,.8,footprint);
+              float grain=noise3(grainPoint)-.5;
+              float ground=kind==1?1.-oceanMask:1.;
+              float strength=closeDetail*resolved*ground;
+              base*=1.+grain*.075*strength;
+              n=geologicalNormal(grain*.000035*strength,n);
+            }
+          }
         }
         else if(hasSurface){base=texture2D(surface,vUV).rgb;if(kind==1)oceanMask=smoothstep(.015,.12,base.b-max(base.r,base.g)*.85);if(kind==2)base=mix(base,base*vec3(.78,.9,1.1),.45);}
         else if(kind==4){float f=fbm(p*5.+seed);float crack=pow(1.-abs(sin(f*32.)),23.);base=colorA*.25+colorB*crack*3.;}
