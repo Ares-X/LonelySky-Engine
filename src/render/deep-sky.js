@@ -381,10 +381,14 @@ const SEA_PROFILE = {
   shape: [1,.2,.3,.65], structure: [3,2.8,.5,0], dust: [1,.035,.4,1], state: [.4,.15,1,.5],
 };
 const MORPH_GROUPS = ['A','B','C','D','E','F'];
+const MORPH_UNIFORMS = MORPH_GROUPS.map(suffix => `uSeaMorph${suffix}`);
+const PROFILE_UNIFORMS = Object.entries(SEA_PROFILE).map(([key, defaults]) => ({key, defaults, uniform: `uSea${key[0].toUpperCase()+key.slice(1)}`}));
+const morphWeight = (profile, sea, index) => profile?.[index] ?? (index < 6 ? sea?.[index] ?? 0 : 0);
 const LANDSCAPE_DEFAULTS = {
   offset:[0,0,0],shape:[1,1,0,.1],topology:[0,0,0,0],contour:[0,2,0,0],
   material:[0,0,0,0],light:[0,0,0,0],cool:[0,0,0],warm:[0,0,0],
 };
+const LANDSCAPE_FIELDS = Object.entries(LANDSCAPE_DEFAULTS);
 function landscapeComponent() {
   return {frame:new THREE.Matrix3(),...Object.fromEntries(Object.entries(LANDSCAPE_DEFAULTS).map(([key,values])=>
     [key,values.length===4?new THREE.Vector4(...values):new THREE.Vector3(...values)]))};
@@ -411,7 +415,8 @@ export function setDeepSkyEnvironment(uniforms, environment, quiet = 0) {
   uniforms.uSkyBandStrength.value = environment.bandStrength;
   uniforms.uSkyStarDensity.value = environment.starDensity;
   const sea = environment.starSea;
-  uniforms.uSeaWeightsA.value.fromArray(sea?.weights ?? [0,0,0]);
+  if (sea) uniforms.uSeaWeightsA.value.fromArray(sea.weights);
+  else uniforms.uSeaWeightsA.value.set(0,0,0);
   if (sea) uniforms.uSeaWeightsB.value.fromArray(sea.weights,3);
   else uniforms.uSeaWeightsB.value.set(0,0,0);
   if (sea) {uniforms.uSeaFrame.value.fromArray(sea.frame);uniforms.uSeaPhase.value=sea.phase;uniforms.uSeaWidth.value=sea.width;}
@@ -420,7 +425,7 @@ export function setDeepSkyEnvironment(uniforms, environment, quiet = 0) {
   for(let i=0;i<4;i++) {
     const target=uniforms.uSeaComponents.value[i],source=uniforms.uSeaHasLandscape.value?landscape.components[i]:null;
     if(source?.frame)target.frame.fromArray(source.frame);else target.frame.identity();
-    for(const [key,defaults] of Object.entries(LANDSCAPE_DEFAULTS))target[key].fromArray(source?.[key]??defaults);
+    for(const [key,defaults] of LANDSCAPE_FIELDS)target[key].fromArray(source?.[key]??defaults);
   }
   const profile = sea?.appearance;
   for (let group=0;group<MORPH_GROUPS.length;group++) {
@@ -428,10 +433,11 @@ export function setDeepSkyEnvironment(uniforms, environment, quiet = 0) {
     // Published descriptors without an appearance still address the original
     // six shapes. Clearing an environment also clears every new light source.
     const weights=profile?.morphologyWeights;
-    uniforms[`uSeaMorph${MORPH_GROUPS[group]}`].value.set(...[0,1,2].map(i=>weights?.[offset+i]??(offset+i<6?sea?.weights?.[offset+i]??0:0)));
+    uniforms[MORPH_UNIFORMS[group]].value.set(morphWeight(weights,sea?.weights,offset),
+      morphWeight(weights,sea?.weights,offset+1),morphWeight(weights,sea?.weights,offset+2));
   }
-  for (const [name,defaults] of Object.entries(SEA_PROFILE)) {
-    uniforms[`uSea${name[0].toUpperCase()+name.slice(1)}`].value.fromArray(profile?.[name]??defaults);
+  for (const {key,defaults,uniform} of PROFILE_UNIFORMS) {
+    uniforms[uniform].value.fromArray(profile?.[key]??defaults);
   }
   uniforms.uSeaQuiet.value=1-Math.max(0,Math.min(1,quiet))*.15;
 }

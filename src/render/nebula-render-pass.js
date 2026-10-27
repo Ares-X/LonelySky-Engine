@@ -14,44 +14,68 @@ export class NebulaRenderPass extends RenderPass {
     this._hiddenMaterial.visible = false;
     this._attachedDepth = new Map();
     this._depthTarget = null;
-  }
-
-  render(renderer, writeBuffer, readBuffer, deltaTime, maskActive) {
-    const volumes = [];
-    this.scene.traverseVisible(object => {
+    this._clearColor = new THREE.Color();
+    this._volumes = [];
+    this._objects = [];
+    this._volumeCount = 0;
+    this._objectCount = 0;
+    this._collectVolume = object => {
       if (object.userData.setSceneDepth && object.layers.test(this.camera.layers)
         && object.material?.visible !== false && object.material.uniforms.uVisibility.value > .001
         && object.material.uniforms.uDensity.value > 0
-        && object.parent?.userData.isInView?.(this.camera) !== false) volumes.push(object);
-    });
+        && object.parent?.userData.isInView?.(this.camera) !== false) this._volumes[this._volumeCount++] = object;
+    };
+    this._collectObject = object => {
+      if (!object.material) return;
+      const index = this._objectCount++;
+      const record = this._objects[index] ?? (this._objects[index] = {object: null, original: null, filtered: []});
+      record.object = object; record.original = object.material;
+    };
+  }
+
+  _filterMaterials(surfaces) {
+    for (let i = 0; i < this._objectCount; i++) {
+      const {object, original, filtered} = this._objects[i];
+      if (Array.isArray(original)) {
+        filtered.length = original.length;
+        for (let j = 0; j < original.length; j++) filtered[j] = this._selectMaterial(object, original[j], surfaces);
+        object.material = filtered;
+      } else object.material = this._selectMaterial(object, original, surfaces);
+    }
+  }
+
+  _selectMaterial(object, material, surfaces) {
+    if (!material) return material;
+    const isSurface = !object.userData.setSceneDepth
+      && (material.depthWrite || (object.renderOrder < 0 && material.depthTest === false));
+    return isSurface === surfaces ? material : this._hiddenMaterial;
+  }
+
+  render(renderer, writeBuffer, readBuffer, deltaTime, maskActive) {
+    const volumes = this._volumes;
+    this._volumeCount = 0;
+    this.scene.traverseVisible(this._collectVolume);
+    volumes.length = this._volumeCount;
     // An ordinary scene keeps the single RenderPass path and allocates no depth
     // textures. Direct-to-screen callers also retain the normal RenderPass API.
     if (!volumes.length || this.renderToScreen || !readBuffer || this.overrideMaterial !== null) {
+      this._objects.length = 0;
+      volumes.fill(null);
       super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
       return;
     }
 
     const previousTarget = renderer.getRenderTarget();
     const autoClear = renderer.autoClear, background = this.scene.background;
-    const clearColor = renderer.getClearColor(new THREE.Color()), clearAlpha = renderer.getClearAlpha();
+    const clearColor = renderer.getClearColor(this._clearColor), clearAlpha = renderer.getClearAlpha();
     const overrideMaterial = this.scene.overrideMaterial;
     const resolveDepth = readBuffer.resolveDepthBuffer;
     const storeDepth = readBuffer.storeMultisampledDepthBuffer;
-    const objects = [];
-    this.scene.traverse(object => {
-      if (object.material) objects.push([object, object.material]);
-    });
-    const filter = surfaces => {
-      for (const [object, original] of objects) {
-        const select = material => {
-          if (!material) return material;
-          const isSurface = !object.userData.setSceneDepth
-            && (material.depthWrite || (object.renderOrder < 0 && material.depthTest === false));
-          return isSurface === surfaces ? material : this._hiddenMaterial;
-        };
-        object.material = Array.isArray(original) ? original.map(select) : select(original);
-      }
-    };
+    this._objectCount = 0;
+    this.scene.traverse(this._collectObject);
+    // Capacity follows this scene, and dropped objects are never retained by a
+    // pass-owned record after a frame or a streaming/lifecycle change.
+    this._objects.length = this._objectCount;
     let completed = false;
     try {
       if (!readBuffer.depthTexture) {
@@ -74,7 +98,7 @@ export class NebulaRenderPass extends RenderPass {
       this._depthTarget.setSize(readBuffer.width, readBuffer.height);
       readBuffer.resolveDepthBuffer = true;
       readBuffer.storeMultisampledDepthBuffer = true;
-      filter(true);
+      this._filterMaterials(true);
       super.render(renderer, writeBuffer, readBuffer, deltaTime, maskActive);
       // renderer.render resolves the MSAA depth attachment before this public
       // texture copy. Sampling a distinct target avoids a framebuffer feedback
@@ -84,7 +108,7 @@ export class NebulaRenderPass extends RenderPass {
       renderer.setRenderTarget(readBuffer);
       for (const volume of volumes) volume.userData.setSceneDepth(
         this._depthTarget.depthTexture, readBuffer.width, readBuffer.height, this.camera);
-      filter(false);
+      this._filterMaterials(false);
       renderer.autoClear = false;
       this.scene.background = null;
       const matrixWorldAutoUpdate = this.scene.matrixWorldAutoUpdate;
@@ -99,8 +123,14 @@ export class NebulaRenderPass extends RenderPass {
       }
       completed = true;
     } finally {
-      for (const [object, material] of objects) object.material = material;
+      for (let i = 0; i < this._objectCount; i++) {
+        const record = this._objects[i];
+        record.object.material = record.original;
+        record.object = record.original = null;
+        record.filtered.fill(null);
+      }
       for (const volume of volumes) volume.userData.setSceneDepth(null);
+      volumes.fill(null);
       this.scene.background = background;
       this.scene.overrideMaterial = overrideMaterial;
       renderer.autoClear = autoClear;
@@ -120,5 +150,6 @@ export class NebulaRenderPass extends RenderPass {
       depth.dispose();
     }
     this._attachedDepth.clear();
+    this._objects.length = this._volumes.length = 0;
   }
 }

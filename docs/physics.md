@@ -2,6 +2,8 @@
 
 The original 0.1 physics API remains available in the pure JavaScript core. It provides deterministic coordinates and random streams, a softened
 gravity field, and continuous point sweeps against sphere exclusion envelopes.
+Optional elliptic two-body orbits supply the same time-dependent body state to
+gravity and collision; both APIs still return independent snapshots by default.
 The modules operate on plain data and run in Node.js or modern browsers.
 
 These physics modules use caller-provided sphere descriptors. For the optional
@@ -73,6 +75,8 @@ an array of spheres. A sphere has:
 | `type` | `planet`, `star`, or `black-hole`; other values use planet defaults |
 | `id`, `name` | Optional caller metadata, passed through in source/contact records |
 | `influence` | Optional positive gravity cutoff in world units |
+| `mu` | Optional positive gravitational parameter, in world units³/s² |
+| `orbit` | Optional elliptic two-body elements about the fixed `position` focus |
 | `collisionClearance` | Optional finite envelope radius that can widen the default clearance |
 
 The provider is a trusted simulation-data boundary: it must return valid,
@@ -92,6 +96,18 @@ a smooth finite cutoff. Defaults are tuned in world units, not SI units:
 `createGravityField().sample(index, position)` sums supplied sources, caps the
 total at `MAX_GRAVITY` (120), and returns `{ acceleration, magnitude, source }`.
 The strongest individual source is reported; an empty field has `source: null`.
+With positive finite `mu`, the acceleration magnitude before the cutoff is
+`mu / max(distance, radius)²`; legacy descriptors retain the softened profile.
+The outer 35% of influence tapers smoothly to zero, so this finite-range field
+is a local approximation and does not model gravity outside the queried range.
+
+For repeated integration queries, allocate `const out = field.createSample()`
+once per consumer and call `field.sampleInto(index, position, timeSeconds, out)`.
+It writes the same acceleration array and a per-output source record; `source`
+still becomes `null` when there is no contributor. The next call using that output
+replaces its contents. Outputs must come from that field's `createSample()`;
+independent consumers need independent outputs. `sample()` remains a detached
+snapshot, including the strongest source's position and velocity.
 
 `createCollisionWorld().move(index, start, end, velocity)` sweeps continuously
 against sphere clearances. It stops inward motion while retaining available
@@ -107,9 +123,13 @@ argument when calling `bodyCollisionRadius` directly; its default is `planet`.
 
 Both systems cache up to 128 sector descriptors and query the surrounding 27
 cells. Collision splits long motion into segments of at most `CELL_SIZE / 4`.
-Collision recovery and sweeps reuse at most two private sampling snapshots for
-the same neighborhood and exact time, distinguished by curvature margin. A time,
-cell or world revision change invalidates that reuse. Returned bodies and contact
+Collision recovery and sweeps reuse at most two private sampling buffers for
+the active neighborhood, distinguished by curvature margin. Their vectors are
+updated in place for changing time; static neighborhoods can retain their sampled
+state across times. Prepared orbit coefficients belong to cached descriptors,
+and dynamic chord endpoints belong to the active neighborhood and exact interval.
+A cell or world revision change replaces the active neighborhood; no past-time
+history is retained. Returned bodies and contact
 vectors remain detached; callers can modify them without changing later queries.
 It processes at most 64 sweep events; remaining motion is discarded and marked
 `corrected` when that limit is reached. This bounds work and prevents teleporting
@@ -117,16 +137,63 @@ past unchecked geometry, but very long requests may not reach their endpoint.
 
 Recovery scans at most 64 steps of `CELL_SIZE / 4` and verifies the final pose.
 If an overlap chain cannot be exited within that bound, or the resulting pose
-remains inside a queried envelope, `ensureSafe` throws `RangeError`; `move`
-propagates that failure. Input vectors are unchanged and no recovered pose is
-returned as safe. Callers must handle this explicit failure and retain their last
-known safe pose or select a different valid spawn location.
+remains inside a queried envelope, `ensureSafe` throws `RangeError`. `move`
+returns an explicit `failure` for these bounded recovery failures. If no initial
+safe pose was found, `failure.safeAtStart` is `false` and its returned position is
+the unchanged input, **not** a recovered safe pose. Input vectors are unchanged.
+The caller must stop simulated time and select a valid pose or retain an earlier
+known safe pose. Invalid vectors, invalid times and nonrepresentable orbital
+scales still throw; they are not converted to a successful collision result.
 
 Keep gravity influence at most `CELL_SIZE`, sphere centers within their centered
 cells, and collision envelopes below `CELL_SIZE / 2`. Larger ranges require a
-broader spatial query than this release provides. The physics core models fixed sphere
-envelopes and a moving point; it has no mesh, moving-body or rigid-body solver,
-time integration or astronomical accuracy claim.
+broader spatial query than this release provides. The physics core models a
+moving point against static or prescribed orbiting sphere envelopes. It has no
+mesh contacts, finite-mass rigid-body dynamics or astronomical accuracy claim.
+
+For moving sources, pass `{ timeSeconds, deltaTime }` as `move`'s fifth argument.
+Time is the interval's start. Chords at at most `1/120 s` use a conservative
+`accelerationBound * h² / 8` envelope containing each curved orbit segment.
+Intervals above `64/120 s` must be subdivided by the caller. Contact response
+projects relative motion into the intersection of surface half-spaces, retaining
+possible tangential motion. Two or three simultaneous sphere contacts therefore
+need a manifold even though each individual collider is a sphere. Moving
+surfaces have prescribed motion and transfer energy; this is an infinite-mass
+surface approximation, not a conserved-energy finite-mass collision model.
+Near a squeezing pinch, it can demand a large tangential impulse.
+
+If moving contact constraints have no representable feasible candidate, or a
+moving sweep exceeds its 64-event work limit, `move` returns `failure` with a
+code, cause, start/failure times, and detached contact normals/surface velocities.
+It returns the initial safe snapshot with `distance: 0` and
+`failure.safeAtStart: true`; the requested time interval **has not advanced**.
+This distinguishes an unresolved solver step from a completed safe sweep. The
+caller must freeze time and report the incident, without automatically retrying
+the same interval or teleporting through the contacts.
+
+## Two-body orbital states
+
+`evaluateOrbit(elements, timeSeconds)` solves the unperturbed elliptic Kepler
+problem, `M = E - e sin(E)`, for `a > 0`, `mu > 0`, and `0 <= e < 1`. Lengths
+share a caller-chosen unit; `mu` has L³/s², time is seconds, angles are radians.
+The reference plane is right-handed XY with +Z normal, rotated by
+`Rz(ascendingNode) Rx(inclination) Rz(argumentOfPeriapsis)`. The result includes
+relative position, velocity, acceleration and the conservative periapsis
+acceleration maximum. This does not solve perturbations, precession or N-body
+interactions. `evaluateBodyState(body, timeSeconds)` adds the fixed focus in
+`body.position`; a missing/null orbit denotes a stationary body. Returned states
+are independent snapshots.
+
+For a repeated consumer, `createBodyStateSampler(body)` validates and snapshots
+the descriptor once and prepares its invariant orbital rates/orientation. Its
+returned `sample(timeSeconds, out?)` accepts caller-owned position, velocity and
+acceleration arrays; omitting `out` creates a snapshot. Supplied outputs are
+caller-owned workspaces and are overwritten by the next sample.
+Recreate the sampler after a descriptor revision; mutation of the original body
+does not change an existing sampler. Finite-time and computed-state range checks
+remain at sampling, and malformed/nonrepresentable descriptors still fail at
+factory creation. Gravity and collision recreate these samplers when their
+world revision invalidates cached descriptors.
 
 ## Revising a world
 
