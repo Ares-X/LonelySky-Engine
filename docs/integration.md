@@ -30,6 +30,12 @@ the default embedding example produces its own world. [Image credits](showcase-c
 Pin an engine commit in a Git submodule. Upgrade and validate the consumer before
 changing its recorded revision. Avoid a moving branch in production builds.
 
+The cosmos renderer retains particle buffers when a cell rebase stays inside
+the same macro neighborhood and quality level. Only positions are uploaded;
+colors and radii keep their existing storage. Population or quality changes
+replace the buffers. Particle coordinates, counts, distance fades and volume
+sampling budgets are unchanged.
+
 ## Procedural scenery appearance
 
 The directional sky shares absorbing dust lanes with the black-hole lens. Galaxy

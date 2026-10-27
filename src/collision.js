@@ -93,6 +93,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   if (typeof sector !== 'function') throw new TypeError('A sector sphere provider is required');
   const cache = new Map(), sampledSources = new WeakMap();
   let neighborhoodIndex = null, sources = [], revision = world?.revision;
+  let sampledNeighborhood = null, sampledTime, sampledMargins = [];
   function refresh() {
     if (revision === world?.revision) return;
     revision = world?.revision; cache.clear(); neighborhoodIndex = null; sources = [];
@@ -121,16 +122,28 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     return sources;
   }
   function sampled(index, timeSeconds, marginSpan = 0) {
-    return neighborhood(index).map(({ body, offset }) => {
+    const entries = neighborhood(index);
+    if (sampledNeighborhood !== entries || !Object.is(sampledTime, timeSeconds)) {
+      sampledNeighborhood = entries; sampledTime = timeSeconds; sampledMargins = [];
+    }
+    const cached = sampledMargins.find(sample => Object.is(sample.marginSpan, marginSpan));
+    if (cached) return cached.bodies;
+    const bodies = entries.map(source => {
+      const { body, offset } = source;
       const state = evaluateBodyState(body, timeSeconds);
       const sweepMargin = marginSpan ? state.accelerationBound * marginSpan ** 2 / 8 : 0;
       if (!Number.isFinite(sweepMargin)) throw new RangeError('Collision curvature margin is not representable');
       const sampled = { ...body, position: state.position.map((n, i) => n + offset[i]),
         ...(body.orbit ? { orbit: { ...body.orbit } } : {}),
-        velocity: [...state.velocity], clearance: body.clearance + sweepMargin, sweepMargin };
-      sampledSources.set(sampled, { body, offset });
+        velocity: state.velocity, clearance: body.clearance + sweepMargin, sweepMargin };
+      sampledSources.set(sampled, source);
       return sampled;
     });
+    // Recovery and sweeps revisit the same instant with and without curvature
+    // inflation. Keep both private snapshots, without retaining earlier times.
+    sampledMargins.push({ marginSpan, bodies });
+    if (sampledMargins.length > 2) sampledMargins.shift();
+    return bodies;
   }
   // Work in the caller's coordinate frame even while a long sweep crosses cells.
   function frame(index, position) {
@@ -312,7 +325,6 @@ export function createCollisionWorld({ world, sector = world && (index => world.
           const chordVelocity = subtract(finish.position, begin.position).map(n => n / duration);
           const center = begin.position.map((n, i) => n + source.offset[i] + chordVelocity[i] * elapsed);
           const bodyMotion = chordVelocity.map(n => n * h);
-          const chordBody = { ...body, position: center };
           const relative = subtract(local, center), sweep = subtract(motion, bodyMotion);
           const squared = dot(sweep, sweep), along = dot(relative, sweep);
           if (squared < EPSILON ** 2 || along >= -EPSILON) continue;
@@ -323,7 +335,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
           const root = (-along - Math.sqrt(discriminant)) / squared;
           const entryFraction = dot(relative, relative) <= radius * radius ? 0 : root;
           if (entryFraction >= -EPSILON && entryFraction < first) {
-            first = Math.min(1, Math.max(0, entryFraction)); hit = { body: chordBody, bodyMotion, source };
+            first = Math.min(1, Math.max(0, entryFraction)); hit = { body: { ...body, position: center }, bodyMotion, source };
           }
         }
         const used = hit ? first : 1;
@@ -358,7 +370,9 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   return { move, ensureSafe,
     bodies(index, timeSeconds = 0) {
       if (!Number.isFinite(timeSeconds)) throw new TypeError('timeSeconds must be finite');
-      return sampled(index, timeSeconds);
+      return sampled(index, timeSeconds).map(body => ({ ...body,
+        position: [...body.position], velocity: [...body.velocity],
+        ...(body.orbit ? { orbit: { ...body.orbit } } : {}) }));
     },
     get cacheSize() { return cache.size; } };
 }
