@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { NebulaRenderPass } from './nebula-render-pass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { createUniverse } from '../generator.js';
@@ -12,6 +12,7 @@ import { createNebula } from './nebula.js';
 import { createBlackHole } from './blackhole.js';
 import { createCosmos } from './cosmos.js';
 import { createDeepSky } from './deep-sky.js';
+import { nebulaVisibility } from '../nebula-volume.js';
 
 const QUALITIES = new Set(['auto', 'low', 'high']);
 function checkQuality(value) {
@@ -202,8 +203,8 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     for (const chunk of chunks.values()) {
       const nebula = chunk.userData.nebula;
       if (nebula) {
-        const visibility = THREE.MathUtils.clamp((16000 - chunk.position.distanceTo(cameraPosition)) / 7000, 0, 1);
-        nebula.visible = visibility > .001;
+        const visibility = nebulaVisibility(nebula.userData.distanceToVolume(cameraPosition));
+        nebula.visible = visibility > .001 && nebula.userData.isInView(camera);
         if (nebula.visible) nebula.userData.update(camera, time, { quality, visibility });
       }
       for (const group of chunk.userData.bodies) {
@@ -286,7 +287,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     sky = createDeepSky(); resources.push(() => sky.userData.dispose()); scene.add(sky);
     cosmos = createCosmos({ seed: universe.seed }); resources.push(() => cosmos.userData.dispose()); scene.add(cosmos);
     composer = own(new EffectComposer(renderer));
-    const renderPass = own(new RenderPass(scene, camera)); bloom = own(new UnrealBloomPass(new THREE.Vector2(1, 1), .32, .65, 1));
+    const renderPass = own(new NebulaRenderPass(scene, camera)); bloom = own(new UnrealBloomPass(new THREE.Vector2(1, 1), .32, .65, 1));
     const output = own(new OutputPass()); composer.addPass(renderPass); composer.addPass(bloom); composer.addPass(output);
     renderer.domElement.addEventListener('webglcontextlost', handleLost);
     renderer.domElement.addEventListener('webglcontextrestored', handleRestored);
