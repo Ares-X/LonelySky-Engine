@@ -1,12 +1,21 @@
 {
   "name": "lonelysky-engine",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "A seeded procedural universe generator with an optional Three.js renderer, streaming, gravity and continuous collision.",
   "homepage": "https://lonelysky.app/",
-  "repository": { "type": "git", "url": "https://github.com/Ares-X/LonelySky-Engine.git" },
-  "keywords": ["universe", "procedural-generation", "threejs", "space", "webgl"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ares-X/LonelySky-Engine.git"
+  },
+  "keywords": [
+    "universe",
+    "procedural-generation",
+    "threejs",
+    "space",
+    "webgl"
+  ],
   "license": "Apache-2.0",
   "exports": {
     ".": "./src/index.js",

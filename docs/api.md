@@ -108,7 +108,13 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   Nebula update also accepts visibility; black holes expose `setVisibility`
   and `setSkyTransform`. Shared noise survives until its final user releases it.
   Injected sky textures remain caller-owned.
-- `createDeepSky()` creates the directional background also sampled by the
+- Nebula `userData.distanceToVolume(worldPosition)` accepts a Three.js `Vector3`
+  and returns world-unit distance to its transformed box volume, including parent
+  transforms that preserve orthogonal box axes (translation, rotation and scale,
+  without shear). Points inside or on the box return zero. Use this distance for
+  visibility fading instead of distance to the group's origin; the box bounds
+  the volume, rather than tracing individual dust features. The input is unchanged.
+- `createDeepSky({detailTexture})` creates the directional background also sampled by the
   default black-hole lens. Pass the same trusted environment to
   `sky.userData.update(environment, quiet)` and
   `hole.userData.setEnvironment(environment, quiet)` to customize both. The
@@ -116,6 +122,22 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   plus finite `skyBrightness`, `bandStrength`, and `starDensity` values. An
   explicit environment supersedes the legacy photographic sky texture path.
   Both groups expose idempotent `userData.dispose()`.
+- The environment may include a trusted `starSea` descriptor: `weights` is six
+  finite nonnegative blend weights (all zero disables the layer), `frame` is a
+  nine-number column-major rotation matrix mapping sky directions to the sea's
+  local frame, `phase` is a finite spatial variation offset, and `width` is a
+  positive finite latitude scale. The six weights select a stellar river, folded
+  blue veil, old stellar halo, broken star islands, dark rift, and curved arc.
+  The application owns sampling, seeding and transitions; the renderer copies the
+  descriptor values without generating regions. Omitting `starSea` on a later
+  environment update clears its contribution. Creation defaults to no sea.
+  `deepSkyUniforms({detailTexture})` and
+  `setDeepSkyEnvironment(uniforms, environment, quiet = 0)` expose the same setup
+  for custom materials. Supply the same optional `detailTexture` to
+  `createBlackHole({detailTexture})` and `createDeepSky({detailTexture})` to share
+  celestial detail in both views. It is borrowed and never disposed by either
+  group; without it, the layer uses procedural detail. Like the environment,
+  the texture is supplied by the application, with no engine asset dependency.
 - `createCosmos({seed})` creates sparse spiral, elliptical and irregular galaxies.
   Its update takes `{sectorIndex, cameraPosition, viewportHeight, pixelRatio,
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions

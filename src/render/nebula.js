@@ -271,6 +271,15 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
   group.add(volume);
   let disposed = false;
   const cameraPosition = new THREE.Vector3();
+  const boundsPoint = new THREE.Vector3();
+  // Fade from the transformed cloud volume, not its caller's chunk origin.
+  // The nearest point on this oriented box remains zero everywhere inside it.
+  group.userData.distanceToVolume = worldPosition => {
+    volume.updateWorldMatrix(true, false);
+    boundsPoint.copy(worldPosition);
+    volume.worldToLocal(boundsPoint).clampScalar(-1, 1);
+    return volume.localToWorld(boundsPoint).distanceTo(worldPosition);
+  };
   group.userData.stats = { steps: 32, morphology, noiseResolution: 32, bounds: [9000, 6700, 16300], opticalApproximation: true };
   group.userData.update = (camera, time, { quality = 'auto', visibility = 1 } = {}) => {
     if (disposed || !camera) return;
