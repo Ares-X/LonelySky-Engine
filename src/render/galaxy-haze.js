@@ -64,10 +64,10 @@ const fragmentShader = /* glsl */`
     laneOffset-=floor(laneOffset/period+.5)*period;
     return vec2(armLobe(angularOffset,width,angularVariance,period),armLobe(laneOffset,width*.24,angularVariance,period));
   }
-  // Analytic foreground extinction through a finite radial dust sheet. The
-  // Lorentzian column has a stable grazing limit and needs no extra ray steps.
+  // Analytic column through a finite dust sheet, modulated by filtered clouds.
+  // The Lorentzian column has a stable grazing limit and needs no extra ray steps.
   // Only this volume's emission is absorbed; empty sky remains untouched.
-  float dustTransmission(vec3 q){
+  float dustTransmission(vec3 q,float footprint){
     if(dustStrength<=0.) return 1.;
     vec3 p=q*shapeScale,camera=localCamera*shapeScale;
     vec3 delta=camera-p;float reach=length(delta);
@@ -84,13 +84,16 @@ const fragmentShader = /* glsl */`
     float crossing=abs(direction.y)<.0001?reach*.5:clamp(-p.y/direction.y,0.,reach);
     vec3 sheetPoint=p+direction*crossing;
     float radial=exp(-length(sheetPoint.xz)*2.2);
+    float dustLod=max(0.,log2(max(1.,footprint*64.*.73)));
+    float dustCloud=textureLod(structureNoise,sheetPoint.xz*.73+noiseOffset,dustLod).r;
+    radial*=.22+2.8*smoothstep(.32,.69,dustCloud);
     return exp(-clamp(max(0.,column)*radial*dustStrength*6.,0.,12.));
   }
   vec3 islandCenter(float k){
     float theta=k*2.1+asymmetry;
     return vec3(cos(theta)*(.2+k*.17),(k-1.)*.12,sin(theta)*(.2+k*.17));
   }
-  vec4 density(vec3 q,float footprint){
+  vec4 density(vec3 q,float footprint,float dustFootprint){
     float edge=1.-smoothstep(.8,1.,length(q));
     if(edge<=0.) return vec4(0.);
     vec3 p=q*shapeScale;
@@ -98,15 +101,19 @@ const fragmentShader = /* glsl */`
       float r=length(p.xz);
       // Resolved stellar mottling lies inside a continuous arm envelope. The
       // former low-frequency multiplicative gates broke arms into large beads.
-      // Both existing texture fetches remain mip-filtered in world coordinates.
+      // All structural texture samples remain mip-filtered in world coordinates.
       float coarseLod=max(0.,log2(max(1.,footprint*64.*.31)));
       float fineLod=max(0.,log2(max(1.,footprint*64.*1.71)));
       float coarse=textureLod(structureNoise,p.xz*.31+noiseOffset,coarseLod).r;
       float fine=textureLod(structureNoise,p.xz*1.71+noiseOffset.yx+vec2(.37,.19),fineLod).r;
-      float angleWarp=(coarse-.5)*.035,radialWarp=1.+(fine-.5)*.012;
+      float grainLod=max(0.,log2(max(1.,footprint*64.*6.1)));
+      float grain=textureLod(structureNoise,p.xz*6.1+noiseOffset+vec2(.13,.47),grainLod).r;
+      // Correlated structure bends the arm spine gently; resolved star particles
+      // still sit in the same arm envelope and retain their original positions.
+      float angleWarp=(coarse-.5)*.13,radialWarp=1.+(fine-.5)*.045;
       mat2 warp=mat2(cos(angleWarp),-sin(angleWarp),sin(angleWarp),cos(angleWarp));
       vec2 armPoint=warp*p.xz*radialWarp;
-      float width=.27+.035*clamp((coarse-.25)*2.,0.,1.);
+      float width=.20+.14*clamp((coarse-.25)*2.,0.,1.);
       float vertical=p.y/(thickness*(.4+r));
       float disk=exp(-r*2.8)*exp(-.5*vertical*vertical);
       vec2 armPair=armDensities(armPoint,width,footprint*radialWarp);
@@ -123,12 +130,20 @@ const fragmentShader = /* glsl */`
       // Additional taper avoids thick, equally bright edges in grazing views.
       float height=p.y/(thickness*.65);
       float taper=exp(-r*r*1.5)*exp(-.5*height*height);
-      float interarm=.15*(.85+.15*coarse);
-      float amount=edge*disk*taper*(interarm+armStrength*armLight)*smoothstep(.025,.08,r)*dustTransmission(q);
+      float interarm=.38*(.85+.15*coarse);
+      // Dust complexes absorb starlight within the arms at several scales.
+      // Keep a positive transmission floor through optical depth rather than
+      // cutting disconnected holes into the stellar population.
+      float cloudTransmission=exp(-dustStrength*(.4+lane*2.)*smoothstep(.35,.68,coarse)*smoothstep(.4,.65,grain)*2.8);
+      float amount=edge*disk*taper*(interarm+armStrength*armLight)*smoothstep(.025,.08,r)*cloudTransmission*dustTransmission(q,dustFootprint);
       float core=exp(-r*9.);
-      float cool=smoothstep(.46,.68,fine)*smoothstep(.2,.6,r)*youngStrength;
-      vec3 population=mix(vec3(1.),vec3(.79,.9,1.12),cool);
+      float cool=smoothstep(.42,.64,fine)*smoothstep(.16,.5,r)*youngStrength;
+      vec3 population=mix(vec3(1.03,.99,.91),vec3(.52,.76,1.3),cool);
       population=mix(population,vec3(1.12,.94,.74),core);
+      // Sparse H-II regions follow dusty arms, between the cool young clusters.
+      // This is a display palette inspired by Hubble, not an infrared sky map.
+      float ionized=smoothstep(.64,.82,grain)*smoothstep(.48,.68,fine)*arm*youngStrength;
+      population+=vec3(.85,.14,.23)*ionized*1.6;
       return vec4(tint*population,amount);
     }
     if(morphology<1.5) return vec4(0.);
@@ -168,7 +183,7 @@ const fragmentShader = /* glsl */`
     vec3 population=mix(vec3(1.08,.96,.84),vec3(.64,.85,1.32),clamp(knots*youngStrength,0.,1.));
     return vec4(tint*population,edge*result);
   }
-  vec3 coreEmission(vec3 q,float footprint){
+  vec3 coreEmission(vec3 q,float footprint,float dustFootprint){
     float edge=1.-smoothstep(.8,1.,length(q));
     if(morphology>.5){
       float stellarRadius=length(q);
@@ -186,7 +201,7 @@ const fragmentShader = /* glsl */`
     // already used by the unchanged particle generator's central bar.
     vec3 barMetric=p/vec3(.36,.055,.07);
     float stellarBar=bar*exp(-.5*dot(barMetric,barMetric))*1.6;
-    return tint*mix(vec3(1.),vec3(1.12,.94,.74),exp(-length(p.xz)*9.))*edge*(bulge*coreStrength+halo+stellarBar)*dustTransmission(q);
+    return tint*mix(vec3(1.),vec3(1.12,.94,.74),exp(-length(p.xz)*9.))*edge*(bulge*coreStrength+halo+stellarBar)*dustTransmission(q,dustFootprint);
   }
   void main(){
     vec3 direction=normalize(localExit-localCamera);
@@ -211,7 +226,10 @@ const fragmentShader = /* glsl */`
         float visibility=1.-smoothstep(420000.,520000.,trueDistance);
         float sampleFootprint=max(binFootprint,angularFootprint*distanceAlongRay);
         if(morphology>=1.5) sampleFootprint=max(sampleFootprint,physicalSpeed*rayRange*2./float(steps));
-        vec4 light=density(q,sampleFootprint);
+        // A dust-plane crossing is localized; ray-bin width only filters
+        // stellar integration, not the transverse structure of that crossing.
+        float dustFootprint=angularFootprint*distanceAlongRay;
+        vec4 light=density(q,sampleFootprint,dustFootprint);
         emission+=light.rgb*light.a*visibility*physicalSpeed*rayRange*node.y;
       }
     }
@@ -229,8 +247,8 @@ const fragmentShader = /* glsl */`
         vec2 node=coreQuadrature[i];float u=node.x;
         vec2 distanceAlongRay=vec2(center)-vec2(reach.x,-reach.y)*u*u;
         vec2 visibility=1.-smoothstep(vec2(420000.),vec2(520000.),distanceAlongRay*physicalSpeed*radius);
-        vec3 nearCore=coreEmission(localCamera+direction*distanceAlongRay.x,max(binFootprint,angularFootprint*distanceAlongRay.x));
-        vec3 farCore=coreEmission(localCamera+direction*distanceAlongRay.y,max(binFootprint,angularFootprint*distanceAlongRay.y));
+        vec3 nearCore=coreEmission(localCamera+direction*distanceAlongRay.x,max(binFootprint,angularFootprint*distanceAlongRay.x),angularFootprint*distanceAlongRay.x);
+        vec3 farCore=coreEmission(localCamera+direction*distanceAlongRay.y,max(binFootprint,angularFootprint*distanceAlongRay.y),angularFootprint*distanceAlongRay.y);
         emission+=(nearCore*reach.x*visibility.x+farCore*reach.y*visibility.y)*2.*u*node.y*physicalSpeed;
       }
     }
@@ -252,15 +270,23 @@ export function createGalaxyHaze({ seed = 'lonelysky' } = {}) {
   const group = new THREE.Group(); group.name = 'galaxy-emission-volumes';
   const geometry = new THREE.SphereGeometry(1, 40, 24);
   const noiseRandom = randomFromSeed(`${seed}:galaxy-dust-texture-v1`);
-  let pixels = Uint8Array.from({ length: 64 * 64 }, () => Math.floor(noiseRandom() * 256));
-  // Toroidal smoothing makes linear repeat sampling continuous at both seams.
-  for (let pass = 0; pass < 2; pass++) {
-    const filtered = new Uint8Array(pixels.length);
-    for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) {
-      const at = (dx, dy) => pixels[((y + dy + 64) % 64) * 64 + (x + dx + 64) % 64];
-      filtered[y * 64 + x] = Math.round(at(0, 0) * .5 + (at(-1, 0) + at(1, 0) + at(0, -1) + at(0, 1)) * .125);
+  const lattice = Float32Array.from({length: 64 * 64}, () => noiseRandom());
+  const pixels = new Uint8Array(64 * 64);
+  // A periodic multiscale field gives broad dusty complexes and fine structure.
+  // Blurring white noise alone erased its contrast and left smooth neon arms.
+  for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) {
+    let value = 0;
+    for (const [frequency, weight] of [[4, .52], [8, .28], [16, .14], [32, .06]]) {
+      const px = x / 64 * frequency, py = y / 64 * frequency;
+      const ix = Math.floor(px), iy = Math.floor(py);
+      const tx = px - ix, ty = py - iy;
+      const fx = tx * tx * (3 - 2 * tx), fy = ty * ty * (3 - 2 * ty);
+      const at = (dx, dy) => lattice[((iy + dy) % frequency) * 64 + (ix + dx) % frequency];
+      const lower = at(0, 0) * (1 - fx) + at(1, 0) * fx;
+      const upper = at(0, 1) * (1 - fx) + at(1, 1) * fx;
+      value += (lower * (1 - fy) + upper * fy) * weight;
     }
-    pixels = filtered;
+    pixels[y * 64 + x] = Math.round(THREE.MathUtils.clamp(.5 + (value - .5) * 1.65, 0, 1) * 255);
   }
   const structureNoise = new THREE.DataTexture(pixels, 64, 64, THREE.RedFormat, THREE.UnsignedByteType);
   structureNoise.minFilter = THREE.LinearMipmapLinearFilter; structureNoise.magFilter = THREE.LinearFilter;

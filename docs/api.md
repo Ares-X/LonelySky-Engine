@@ -1,5 +1,16 @@
 # Generation and rendering API
 
+## Filtered scenery appearance (0.7.1)
+
+Nebula appearance descriptors may supply `rimColor` independently of `colorA`
+and `colorB`. Invalid colors fall back to their profile; a dark-cloud profile
+still cannot gain emission. The shared noise tile is 64 cubed with mipmaps,
+and paired quadrature keeps the existing 16/32/48 view-sample budgets. Density
+and lighting are an appearance revision, while generated body addresses,
+volume bounds and per-seed offsets stay unchanged. The depth-composition API
+below remains supported. More detail does add GPU work; the sample budget is
+not a promise of unchanged render time.
+
 ## Nebula depth composition (0.7)
 
 `NebulaRenderPass(scene, camera)` from the optional `three` entry point replaces a

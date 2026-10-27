@@ -110,10 +110,17 @@ vec3 stellarSea(vec3 direction) {
 vec3 deepSky(vec3 direction) {
   vec3 d=normalize(direction);
   float grain=skyNoise(d*11.)*.6+skyNoise(d*31.+17.)*.27+skyNoise(d*79.+29.)*.13;
-  float latitude=abs(dot(d,uSkyBandNormal));
-  float band=exp(-latitude*latitude*105.)*uSkyBandStrength;
-  float dust=smoothstep(.26,.74,grain);
-  vec3 sky=uSkyTint*uSkyBrightness*(.11+band*(1.2+3.8*dust));
+  float latitude=dot(d,uSkyBandNormal);
+  float warpedLatitude=latitude+(grain-.5)*.065;
+  float band=exp(-warpedLatitude*warpedLatitude*105.)*uSkyBandStrength;
+  // Dark absorbing lanes interrupt a broader stellar population. Noise belongs
+  // to the sky direction, so turning or lensing cannot make the dust swim.
+  float dustLatitude=(latitude+(grain-.5)*.12)/.023;
+  float dust=exp(-dustLatitude*dustLatitude);
+  float transmission=exp(-dust*(1.6+grain*2.4));
+  float stellarCloud=.55+2.6*smoothstep(.28,.72,grain);
+  vec3 stellarTint=mix(vec3(.73,.82,1.),vec3(1.08,.95,.78),smoothstep(.3,.7,grain));
+  vec3 sky=uSkyTint*uSkyBrightness*(.055+band*stellarCloud*stellarTint*transmission);
   // Very faint unresolved points keep a lens from showing a painted photograph.
   vec3 cell=floor(d*720.); float star=skyHash(cell);
   float spark=pow(max(0.,1.-length(fract(d*720.)-.5)*2.1),10.);

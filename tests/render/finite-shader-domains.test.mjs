@@ -23,6 +23,20 @@ function evaluate(source,values={}) {
   return Function(...Object.keys(scope),`return (${source});`)(...Object.values(scope));
 }
 
+test('shared sky dust stays finite on both sides of the galactic plane', () => {
+  const band=DEEP_SKY_GLSL.slice(DEEP_SKY_GLSL.indexOf('vec3 deepSky('));
+  const coordinate=expression(band,'dustLatitude');
+  const absorption=expression(band,'dust');
+  for(const latitude of [-1,-.1,-.02,0,.02,.1,1]) for(const grain of [0,.25,.5,.75,1]) {
+    const dustLatitude=evaluate(coordinate,{latitude,grain});
+    const dust=evaluate(absorption,{dustLatitude});
+    assert.ok(Number.isFinite(dust)&&dust>=0&&dust<=1);
+    const mirrored=evaluate(coordinate,{latitude:-latitude,grain:1-grain});
+    assert.ok(Math.abs(dust-evaluate(absorption,{dustLatitude:mirrored}))<1e-12);
+  }
+  assert.equal(evaluate(absorption,{dustLatitude:0}),1,'the dust lane has maximum optical depth at its centre');
+});
+
 test('planet limb and atmosphere remain finite at float32 facing extrema', () => {
   const planet=planetMaterial({kind:'gas',seed:1,radius:100,colorA:0x668899,colorB:0xaabbcc});
   const atmosphere=atmosphereMaterial(0x72bded);

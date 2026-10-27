@@ -29,3 +29,24 @@ the default embedding example produces its own world. [Image credits](showcase-c
 
 Pin an engine commit in a Git submodule. Upgrade and validate the consumer before
 changing its recorded revision. Avoid a moving branch in production builds.
+
+## Procedural scenery appearance
+
+The directional sky shares absorbing dust lanes with the black-hole lens. Galaxy
+volumes use a shared, mip-filtered 64 by 64 periodic multiscale texture for dusty
+complexes, uneven arm widths and small star-forming regions. Dust reduces the
+galaxy's own emission; it does not cover unrelated foreground geometry or sky.
+Descriptors, addresses, particle positions and quality prefixes are unchanged.
+
+Nebula volumes fade to zero before their bounds, use one mip-filtered 64-cubed
+noise texture, directional ray/pixel footprints and paired Gauss samples within
+the existing 16/32/48-step budgets. Extinction follows the world-space optical
+length through a scaled volume. Appearance profiles add tapered trunks, broad
+seeded shear, depth-coherent dust erosion and two-point light-column shading.
+An optional `rimColor` separates ionized skins from reflected dust light. Calls
+without appearance descriptors retain their palette and source controls. The warm emission-cloud palette and optical galaxy populations draw
+on NASA's [Cosmic Cliffs](https://science.nasa.gov/asset/webb/cosmic-cliffs-in-the-carina-nebula-nircam-image/),
+[Pillars of Creation](https://science.nasa.gov/asset/webb/pillars-of-creation-nircam-image/)
+and [Hubble M74](https://science.nasa.gov/asset/hubble/spiral-galaxy-m74/).
+These are artistic display cues, not calibrated naked-eye colors or radiative
+transfer. No reference photographs or additional dependencies are required.
