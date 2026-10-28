@@ -40,6 +40,9 @@ function bodyGravityInto(body, center, position, out) {
 }
 
 /** Cache generated descriptors and the 27-cell neighborhood until a rebase.
+ * world.gravitySourcesInBounds may supply additional large-range spheres in
+ * the calling sector's frame. Its candidates must cover the entire cell over
+ * every orbital phase, so changing time never needs another spatial query.
  * sample.source identifies the strongest contributor. Its detached position is
  * in the sampled sector's local frame; velocity is evaluated at timeSeconds in
  * the same frame (zero for static bodies), including across wrapped cell seams. */
@@ -47,6 +50,8 @@ export function createGravityField({ world, sector = world && (index => world.se
   if (typeof sector !== 'function') throw new TypeError('A sector sphere provider is required');
   const cache = new Map(), sampleStorage = new WeakMap();
   const state = { position: [0, 0, 0], velocity: [0, 0, 0], acceleration: [0, 0, 0] }, pull = [0, 0, 0];
+  const queryBounds = { min: [-CELL_SIZE / 2, -CELL_SIZE / 2, -CELL_SIZE / 2], max: [CELL_SIZE / 2, CELL_SIZE / 2, CELL_SIZE / 2] };
+  const extendedIds = new Set(), zeroOffset = [0, 0, 0];
   let neighborhoodIndex = null, sources = [], revision = world?.revision;
   function refresh() {
     if (revision === world?.revision) return;
@@ -75,9 +80,27 @@ export function createGravityField({ world, sector = world && (index => world.se
     if (neighborhoodIndex !== sectorIndex) {
       const origin = decodeCell(sectorIndex);
       sources = [];
+      extendedIds.clear();
+      if (world?.gravitySourcesInBounds) {
+        for (const body of world.gravitySourcesInBounds(sectorIndex, queryBounds)) {
+          if (typeof body.id !== 'string' || !body.id.length) throw new TypeError('Gravity bounds sources require a stable string id');
+          if (extendedIds.has(body.id)) continue;
+          if (!(body.radius > 0) || !Number.isFinite(body.radius)
+            || !(body.mu > 0) || !Number.isFinite(body.mu)
+            || !(body.influence > 0) || !Number.isFinite(body.influence)) {
+            throw new RangeError('Gravity bounds sources require positive finite radius, mu and influence');
+          }
+          const descriptor = { ...body, sectorIndex, position: [...body.position],
+            ...(body.orbit == null ? {} : { orbit: { ...body.orbit } }) };
+          sources.push({ body: descriptor, sample: createBodyStateSampler(descriptor), offset: zeroOffset });
+          extendedIds.add(body.id);
+        }
+      }
       for (let x = -1; x <= 1; x += 1) for (let y = -1; y <= 1; y += 1) for (let z = -1; z <= 1; z += 1) {
         const index = encodeCell({ x: wrap(origin.x + x), y: wrap(origin.y + y), z: wrap(origin.z + z) });
-        for (const entry of descriptors(index)) sources.push({ ...entry, offset: [x * CELL_SIZE, y * CELL_SIZE, z * CELL_SIZE] });
+        for (const entry of descriptors(index)) {
+          if (!extendedIds.has(entry.body.id)) sources.push({ ...entry, offset: [x * CELL_SIZE, y * CELL_SIZE, z * CELL_SIZE] });
+        }
       }
       neighborhoodIndex = sectorIndex;
     }

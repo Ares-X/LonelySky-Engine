@@ -6,3 +6,7 @@ export * from './generator.js';
 export * from './streaming.js';
 export * from './orbits.js';
 export * from './nebula-volume.js';
+export * from './solid-geometry.js';
+export * from './cosmic-bodies.js';
+export * from './cosmic-structures.js';
+export * from './cosmic-systems.js';

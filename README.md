@@ -181,6 +181,15 @@ its own random stream, leaving galaxy addresses and particle prefixes unchanged.
 `describeGalaxyAppearance` exposes the structural controls and suggested local
 view offset/FOV; the application owns destinations, names and navigation.
 
+The unreleased V3 open-cluster particle sampler uses a narrower vertical Gaussian
+and a smooth outer tail within the existing support. This removes the dense
+spherical rim caused by clipping Gaussian outliers onto one radius. The cluster
+becomes thinner and more concentrated while retaining a 3D population; individual
+V3 open-cluster tracer positions change. Descriptor identity, radius, orientation,
+colors, sizes and exact quality prefixes are retained. Legacy revision 1 and other
+structure families retain their existing samples. These tracers are scenery;
+body placement, gravity, collision and application bookmarks have separate owners.
+
 Version 0.5 adds optional astronomy-inspired appearance adapters. Natural planets
 with stable IDs can use ten seeded surface families through
 `describePlanetAppearance` / `PLANET_APPEARANCE_FAMILIES`; explicit texture maps,

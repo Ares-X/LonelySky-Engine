@@ -215,6 +215,34 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions
   and particle samples.
 
+Each cosmos instance may retain up to 8 MiB of exact-count particle templates
+for the built-in `describeMacro` and raw `describeCosmicStructures` providers.
+Custom or wrapped providers remain uncached; exported `sampleGalaxy` always
+returns independent arrays. The byte ceiling counts retained position/color/size
+arrays, not total application RAM or GPU memory. An oversized batch renders
+without caching; `dispose()` releases cached references. Numeric stats expose
+`sampleCacheLimit`, `sampleCacheBytes`, `sampleCacheEntries`, `sampleCacheHits`
+and `sampleGenerations`. First-time sampling and geometry rebuilding still occur.
+
+The canonical V3 renderer, selected only by
+`createCosmos({structures: true, descriptorProvider: describeCosmicStructures,
+gridCells: COSMIC_GRID_CELLS, seed})` with the raw built-in provider, fades each
+whole structure by the distance to its spherical support:
+`max(0, distance(camera, center) - radius)`. It remains fully visible through
+80 million units and fades to zero at 100 million. The parent and each child use
+their own support; the same weight drives tracer points and emission. This is
+not a per-point or per-ray-sample distance cutoff: with the maximum 42-million
+radius, far-side light can extend to 184 million units. The fixed 5³ streaming
+neighborhood, seeds, physical coordinates and opaque occlusion are unchanged.
+
+This path adds one float descriptor index (4 bytes per point, in both its CPU
+array and GPU buffer) and a reused 432-byte visibility table per cosmos instance.
+It adds no dependencies or draw calls. The separate 8 MiB sample-cache ceiling
+above does not include these arrays or total RAM. Custom and wrapped providers,
+other grid sizes and legacy calls retain their existing per-sample fading and
+are not subject to a new 108-descriptor limit. Direct
+`createGalaxyHaze({structures: true})` calls also retain their previous path.
+
 Galaxy emission uses 16/32/48 bounded disk samples for low/auto/high quality.
 The smooth core is integrated separately with samples concentrated around the
 closest point of the ray. Dust uses mip filtering; analytic spiral arms are
@@ -275,3 +303,24 @@ different spatial provider. This module does not implement N-body interactions,
 parabolic/hyperbolic trajectories, relativistic or surface-terrain physics.
 Basis: [NASA Kepler's laws](https://science.nasa.gov/solar-system/orbits-and-keplers-laws/)
 and [NASA orbital mechanics](https://science.nasa.gov/learn/basics-of-space-flight/chapter3-3/).
+
+## Hierarchical cosmic structure catalogue
+
+The pure data entry point also exports the `cosmic-structures` module. Its
+`describeCosmicStructures(coordinate, seed)` accepts a macro coordinate in a
+4096-cell grid and returns a frozen sparse parent galaxy and its existing child
+clusters and nebula, or an empty array. `loadedCosmicStructures(sectorIndex, seed)`
+returns the fixed 5³ neighborhood. It does not invent nearby objects or promise
+an infinite catalogue: the address torus contains only 8³ macro coordinates.
+Counts and layouts depend on the supplied seed.
+
+`cosmicStructureRelativeCenter(descriptor, decodedCell, output?)` returns the
+true, wrapped centre in the caller's sector frame. Omitting `output` creates an
+independent three-number snapshot; an explicit array or typed array is overwritten
+and returned by reference. Navigation uses these true coordinates and radii.
+`cosmicDrawDistance` and its inverse are drawing-depth maps only; applying them
+to physical positions changes navigation and collision semantics.
+
+The default public seed is `lonelysky`. Applications own their world seed,
+names, save provenance and generation-migration decisions. A generator revision
+is not an instruction to replace an application's universe identity.

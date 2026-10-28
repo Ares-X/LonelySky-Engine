@@ -1,7 +1,8 @@
 # Coordinates and physics reference
 
 The original 0.1 physics API remains available in the pure JavaScript core. It provides deterministic coordinates and random streams, a softened
-gravity field, and continuous point sweeps against sphere exclusion envelopes.
+gravity field, continuous point sweeps against sphere exclusion envelopes, and
+finite-radius ship sweeps against static sphere/compound solids.
 Optional elliptic two-body orbits supply the same time-dependent body state to
 gravity and collision; both APIs still return independent snapshots by default.
 The modules operate on plain data and run in Node.js or modern browsers.
@@ -95,11 +96,35 @@ a smooth finite cutoff. Defaults are tuned in world units, not SI units:
 
 `createGravityField().sample(index, position)` sums supplied sources, caps the
 total at `MAX_GRAVITY` (120), and returns `{ acceleration, magnitude, source }`.
-The strongest individual source is reported; an empty field has `source: null`.
+The cap is a gameplay acceleration limit applied after the vector sum, not a
+physical mass law. The strongest individual source is reported for display;
+it never replaces the sum. Opposing sources can cancel even while a strongest
+source is reported. An empty field has `source: null`.
 With positive finite `mu`, the acceleration magnitude before the cutoff is
 `mu / max(distance, radius)²`; legacy descriptors retain the softened profile.
 The outer 35% of influence tapers smoothly to zero, so this finite-range field
 is a local approximation and does not model gravity outside the queried range.
+
+For large-range spheres, a world may also expose the synchronous
+`gravitySourcesInBounds(sectorIndex, { min: [x,y,z], max: [x,y,z] })` method.
+Gravity queries it once for the complete centered cell, in that cell's frame,
+when the active cell or world revision changes. It must return every source
+whose influence intersects those bounds at **any orbital phase**, including
+sources centered many cells away or across toroidal seams. The bounds object
+and its arrays are private reusable query storage; consume them synchronously
+without retaining or modifying them. The provider is independent of visibility.
+
+These descriptors require a stable nonempty string `id`, positive finite
+`radius`, `mu`, and `influence`, and a finite `position` in the calling cell's
+frame. For an orbiting source, `position` is its fixed focus; `orbit` uses the
+two-body elements below. The field snapshots descriptors and prepares samplers
+at query time, then evaluates their centers and velocities at the supplied
+`timeSeconds` on each integration query without rebuilding candidate arrays.
+Repeated IDs contribute once. A bounds descriptor supersedes a local-sector
+descriptor with the same ID; ordinary local-sector behavior is unchanged.
+Only supplied mass spheres attract: a ring-shaped collision solid does not
+implicitly create a central mass. Prescribed source orbits do not respond to
+each other or to the ship; vector superposition here is not an N-body solver.
 
 For repeated integration queries, allocate `const out = field.createSample()`
 once per consumer and call `field.sampleInto(index, position, timeSeconds, out)`.
@@ -145,11 +170,13 @@ The caller must stop simulated time and select a valid pose or retain an earlier
 known safe pose. Invalid vectors, invalid times and nonrepresentable orbital
 scales still throw; they are not converted to a successful collision result.
 
-Keep gravity influence at most `CELL_SIZE`, sphere centers within their centered
-cells, and collision envelopes below `CELL_SIZE / 2`. Larger ranges require a
-broader spatial query than this release provides. The physics core models a
-moving point against static or prescribed orbiting sphere envelopes. It has no
-mesh contacts, finite-mass rigid-body dynamics or astronomical accuracy claim.
+For the legacy 27-cell path, keep gravity influence at most `CELL_SIZE`, sphere
+centers within their centered cells, and collision envelopes below
+`CELL_SIZE / 2`. Larger gravity ranges require `gravitySourcesInBounds`; larger
+collision envelopes require the solid provider below. The legacy sphere path models a
+moving point against static or prescribed orbiting sphere envelopes. Static
+solids additionally use the finite ship radius described below. Neither path
+provides mesh contacts, finite-mass rigid-body dynamics or astronomical accuracy.
 
 For moving sources, pass `{ timeSeconds, deltaTime }` as `move`'s fifth argument.
 Time is the interval's start. Chords at at most `1/120 s` use a conservative
@@ -170,6 +197,146 @@ It returns the initial safe snapshot with `distance: 0` and
 This distinguishes an unresolved solver step from a completed safe sweep. The
 caller must freeze time and report the incident, without automatically retrying
 the same interval or teleporting through the contacts.
+
+## Static solid geometry and finite-radius ships
+
+`createCollisionWorld({ world, sector, solidProvider, shipRadius: 8,
+solidSweepBudget: 32768 })` optionally includes a synchronous
+`solidProvider(sectorIndex, { min: [x,y,z], max: [x,y,z] })`. With a `world`, this
+defaults to `world.solidsInBounds`. Bounds include the swept ship radius. The
+provider returns every overlapping static solid in the **caller's sector frame**,
+including solids centered outside the ordinary 27-cell neighborhood and across
+world seams. It must query the authoritative world, independently of rendering
+or visibility. The bounds object is private reusable query storage: consume it
+synchronously and do not retain or mutate it.
+
+A solid has `{ id, position, frame?, boundsRadius, shape }`. Positions and all
+radii/heights are world units. `frame` is an orthonormal world-to-local matrix in
+Three.js Matrix3 column order; omitting it means identity. A shape is either
+`{ type: 'sphere', radius }` or `{ type: 'compound', parts }`, where every part is
+`{ type: 'annular-sector-slab', innerRadius, outerRadius, minY, maxY, gapCenter,
+gapHalfAngle }`. The radial coordinate is `hypot(localX, localZ)`. The missing
+angular sector is centered on `gapCenter` (radians); `gapHalfAngle: 0` means a
+complete ring. Heights are along local Y. Parts form a union, including their
+boundaries. Descriptors are trusted, stable simulation data; dimensions must be
+finite, radii ordered and nonnegative, slabs have positive height, and gaps lie
+in `[0, π)`. `boundsRadius` must enclose the actual geometry: for a compound use
+at least `max(hypot(part.outerRadius, max(abs(part.minY), abs(part.maxY))))` over
+all parts. It is a spatial-query/CCD bound, never the solid collision surface.
+
+`shipRadius` expands only these new solids. Legacy `safeRadius` and
+`collisionClearance` retain their historical meanings and receive no additional
+ship-radius margin. `collision.setShipRadius(radius)` changes the current solid
+expansion without rebuilding the collision world, descriptor caches or query
+workspaces. It accepts any finite nonnegative radius, including `0` and `0.5`;
+invalid values throw before changing the radius. Independent consumers can keep
+separate collision instances with different radii. Each static or timed event
+compares both providers' earliest TOI, then re-sweeps the constrained remaining motion against their union.
+`ensureSafe` likewise verifies both providers. Solid contacts carry `type:
+'solid'`, a world normal, `part`, `feature`, and `contactKey` keyed by solid ID,
+part and feature. Separate cap, wall and corner contacts are retained rather
+than replacing every contact sharing a solid ID.
+
+The pure `solid-geometry.js` API exposes:
+
+```js
+const workspace = createSolidWorkspace(); // one per consumer
+const out = { distance: 0, normal: [0, 0, 0], feature: '', part: -1 };
+solidDistance(solid, point, out, workspace);
+const sweep = sweepSolid(solid, start, end, shipRadius,
+  { maxIterations: 32768 }, workspace.result, workspace);
+```
+
+`solidDistance` returns exact exterior Euclidean distance and an outward world
+normal. Inside a primitive it returns negative nearest-boundary distance. For
+an overlapping compound, the minimum part distance identifies overlap, but its
+negative magnitude is **not** claimed as exact distance to the union's exterior.
+The sphere center and tied features have deterministic normals. Omitted output
+or workspace arguments create independent boundary snapshots; repeated queries
+should retain their own output/workspace. Reusing one workspace replaces its
+previous result, so consumers needing retained records must copy at that
+boundary. No module-global mutable query workspace is shared between consumers.
+
+A sweep requires an initially non-overlapping ship center (use `ensureSafe` for
+recovery). It returns `status: 'clear' | 'hit' | 'failed'`, `fraction`,
+`safeFraction`, normal and feature. Faces, radial cylinders, straight edges and
+vertices yield linear/quadratic candidates. Circular slab lips yield torus
+quartics, evaluated in the `rho² - R²` form to avoid subtracting two enormous
+`O(R⁴)` terms beside a small ship. Derivative roots partition `[0,1]` into
+monotonic polynomial intervals; sign-changing roots are bisected for at most 52
+iterations to a parameter width of `2e-15`. Every candidate must match the
+actual nearest distance within `1e-6` world units and have an entering interior
+interval; this excludes squared-equation artifacts and convex tangencies.
+Interior-interval discrimination uses `64 * Number.EPSILON * max(1,
+shipRadius, boundsRadius)` world units. Contact roots are backed off along the
+incoming ray by a `1e-7` world-unit normal skin plus the measured root residual,
+scaled by normal approach speed. The backed-off pose is verified within `1e-8`
+world units; an unverified result reports `solid-root-precision` instead of a
+successful hit. An exact tangent to a concave inner wall enters at
+second order and is handled as contact, rather than being confused with a
+traversable convex tangent.
+
+At a concave inner-wall contact, a bounded four-iteration normal constraint
+accounts for the current finite step: it preserves tangential displacement,
+solves the active feature's required normal clearance, then submits the entire
+candidate chord to the same union sweep again. It does not assign an orbital
+path or apply a push after unchecked travel. Other features, old spheres and
+other solids still compete during that new sweep. This is an inelastic
+kinematic contact approximation, not a finite-mass force integrator. At the V3
+scale, tests cover radius 900,000, ship radii 8/12 and 2,025 units/s over 1,200
+steps at 120 Hz, with no budget failures or penetration above `1e-6`. Arbitrary
+large concave-wall steps may still reach the explicit event limit.
+
+The root-evaluation budget bounds all parts together. Exhaustion reports
+`status: 'failed', reason: 'solid-root-budget', safeFraction: 0`; it never
+substitutes an unchecked endpoint. `move` exposes an explicit `failure` at a
+verified safe pose for static sweeps; timed solver failures retain the initial
+safe snapshot and do not advance their requested interval. A solid-enabled
+64-event sweep exhaustion is also an explicit failure. Input vectors and solid
+descriptors remain unchanged. Recovery retains one deterministic escape ray,
+uses analytic old-sphere exits and actual solid depth advances, and checks the
+final pose against the full queried union. After 64 unsuccessful advances it
+throws/reports `solid-recovery-scan-limit`. Recovery is a pose correction with
+zero flown distance; it is not collision-free travel through the correction
+path. It does not change world coordinates, seeds, or existing save contracts.
+
+## Macro spheres and orbital phase rates
+
+`createCollisionWorld` also accepts `bodyProvider(index, bounds)`, defaulting to
+`world.bodiesInBounds`. It returns neutral sphere descriptors whose complete
+orbital envelopes intersect the query, with fixed orbital foci in the caller's
+sector frame. The engine queries each cached sector over `±(15000 + shipRadius)`
+and merges these sources into the same recovery, relative-motion chords and
+earliest-contact solver as local spheres. Stable IDs deduplicate sources;
+macro descriptors take precedence. Their clearance is `radius + shipRadius`;
+legacy sphere clearances remain unchanged. The 128-sector cache invalidates on
+world revision or an actual `setShipRadius` change.
+
+`move(..., {timeSeconds, deltaTime, timeScale = 1})` separates orbital phase from
+physical ship time. `deltaTime` remains ship seconds; phase advances by physical
+elapsed time times `timeScale`, which must be finite in `[0,1]`. Surface velocity
+and acceleration bounds scale by that rate and its square. At zero, celestial
+spheres freeze while the ship still undergoes complete collision checking.
+`ensureSafe(index, position, velocity, timeSeconds, timeScale)` and
+`bodies(index, timeSeconds, timeScale)` have the same optional rate. Cache keys
+include the rate. Failure timestamps refer to orbital phase. Default rate one
+preserves the existing trajectory and finite solver budgets.
+
+`cosmic-systems.js` adds named, independent satellite candidates to unchanged
+cosmic primaries. Its game-unit `mu = surfaceGravity * radius²` sets both the
+Kepler period and the primary's test-particle field. Full-phase radial envelopes,
+small relative inclinations, a conservative fluid Roche limit and mutual-Hill
+spacing reject unsuitable candidates. These checks do not prove long-term
+stability under external perturbations. Primaries remain fixed and moons follow
+prescribed Kepler paths; their superposed attraction affects the ship, without
+integrating celestial reflex motion or mutual perturbations.
+
+`cosmicSystemOccupancyInBounds` returns placement-only annular orbital bands.
+They keep generated static bodies and home approaches out of complete satellite
+paths. They must not be passed to the real collision world as walls: empty orbital
+space is traversable. Actual moving spheres come from `cosmicSystemBodiesInBounds`;
+finite gravity candidates come from `cosmicGravitySourcesInBounds`. Artificial
+rings receive no invented central point mass.
 
 ## Two-body orbital states
 

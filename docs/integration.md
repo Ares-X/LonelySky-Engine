@@ -76,3 +76,116 @@ on NASA's [Cosmic Cliffs](https://science.nasa.gov/asset/webb/cosmic-cliffs-in-t
 and [Hubble M74](https://science.nasa.gov/asset/hubble/spiral-galaxy-m74/).
 These are artistic display cues, not calibrated naked-eye colors or radiative
 transfer. No reference photographs or additional dependencies are required.
+
+## V3 large-scale structure catalogue
+
+`src/cosmic-structures.js` is a separate deterministic scenery stream. It keeps
+cell size 20,000, signed 32,768-cell wrapping and Morton addresses intact. It
+contains no game names, saves, authored destinations or collision shells.
+`describeCosmicStructures(gridCoordinate, seed)` returns a sparse parent galaxy
+and two clusters plus a cloud complex nested within its support. Galaxies have
+40–84 million-unit diameters, clusters 6–15 million and cloud complexes 10–26
+million. These are navigable artistic scales, not astronomical SI distances or
+N-body dynamics. Emission volumes and statistical star tracers have no solid
+collision boundary; local bodies remain the physics world's responsibility.
+
+Parents occupy a 4,096-cell grid (81.92 million units); at most one candidate in
+each 2³ block survives its seeded density choice. A fixed 5³ neighborhood contains
+at most 27 parents / 108 total structures. Removed supports lie beyond the
+100-million-unit visibility limit, including the address seam. Visibility fades
+from 80 to 100 million units. `cosmicStructureContext({sectorIndex,
+cameraPosition, seed})` returns a containing parent's `{id, family, theme}`, or
+null in a void. Body providers may consume that semantic theme without copying
+the catalogue's positioning decisions or adding game content to this module.
+
+The public renderer retains its original catalogue by default. Enable V3 with:
+
+```js
+import { describeCosmicStructures, COSMIC_GRID_CELLS } from './src/cosmic-structures.js';
+import { createCosmos } from './src/render/cosmos.js';
+const cosmos = createCosmos({ seed,
+  descriptorProvider: describeCosmicStructures,
+  gridCells: COSMIC_GRID_CELLS, structures: true });
+```
+
+`descriptorProvider(coordinate, seed)` can return one descriptor, an array, or
+null. Descriptors specify their grid size, 3D offset and Euler XYZ orientation;
+rendering and semantic context read the same positions. Star samples remain
+quality prefixes; cell rebases retain GPU attributes and mesh/material instances.
+Cloud complexes use three world-fixed texture planes to produce dusty depth;
+galaxy arms have uneven emission, dark inter-arm gaps, a compact core and a dim
+halo. Crossing the support changes the integrated ray interval continuously;
+there is no collision surface, painted plane or camera-facing complete galaxy.
+The unresolved emission continuum blends into the unchanged 3D star tracers
+between 1.8 and 0.6 support radii, retaining only 0.4% of that continuum nearby.
+This is a visual level-of-detail transition: a raw full-column emission integral
+inside the galaxy otherwise becomes a screen-filling luminous fog. It does not
+change physical travel, catalogue positions, star count or collision bounds.
+The display palette is informed by NASA's [star clusters](https://science.nasa.gov/mission/hubble/science/universe-uncovered/hubble-star-clusters/),
+[nebulae](https://science.nasa.gov/mission/hubble/science/universe-uncovered/hubble-nebulae/)
+and [Whirlpool galaxy](https://science.nasa.gov/asset/hubble/the-two-faced-whirlpool-galaxy/).
+It is an emission/dust approximation, not calibrated radiative transfer.
+
+All V3 renderers share `cosmicDrawDistance`, `cosmicTrueDistance` and the exact
+`COSMIC_DEPTH_GLSL` counterpart. Distance through 160,000 is unchanged; beyond it
+a monotone rational map approaches 200,000 drawing units. Angular positions and
+physical generation, travel and collision distances remain unchanged. The volume
+vertex shader preserves physical perspective interpolation at a safe raster
+depth. Its back face supplies ray coverage only; depth testing and depth writes
+are disabled for that proxy, avoiding float32 far-plane clipping at huge scales. V3 volumes implement the existing `NebulaRenderPass` scene-depth
+handshake: opaque depth is reconstructed along each view ray, uncompressed and
+used to terminate the physical emission integral. Use that pass before bloom to
+obtain opaque occlusion; an ordinary RenderPass has no depth texture for a volume
+to read. Transparent glows still use the existing sorted/additive approximation.
+The camera/depth-buffer precision still bounds distant occlusion accuracy; CPU
+round-trip checks do not establish GPU precision, appearance or long-run frame
+performance. Validate those at the host's actual camera and quality settings.
+
+Hosts needing distant depth ordering can request Three's `reversedDepthBuffer`
+and supply `FloatType` depth textures on their composer targets before first use.
+Both are necessary: reversed projection alone retains 24-bit fixed depth if no
+float attachment is supplied. Check `renderer.capabilities.reversedDepthBuffer`;
+Three keeps ordinary projection when `EXT_clip_control` is unavailable. Optical
+shaders support both conventions through Three's `USE_REVERSED_DEPTH_BUFFER`:
+reverse depth clears to zero and uses zero-to-one NDC, while ordinary depth clears
+to one and uses negative-one-to-one NDC. Custom optical depth reads the renderer's
+active projection so its first reversed draw does not consume a stale cached
+matrix. Frustum consumers must pass the camera coordinate system and reversed
+flag to `setFromProjectionMatrix`. This preserves ordinary-depth compatibility;
+it does not fix the ordinary path's far-distance precision on unsupported GPUs.
+
+## Physical cosmic surfaces
+
+The optional Three.js entry exports `createCosmicBodies({surfaceTexture,
+cloudTexture, stellarTexture})`. Its group has `userData.update({bodies, camera,
+viewportHeight, pixelRatio})` and `userData.dispose()`. Each input supplies
+`id`, `kind` (`ring`, `gas-giant`, `dark-world`, `stellar-giant`, or `moon`),
+`radius`, world-to-local orthonormal `frame`, camera-relative **physical** `center`,
+local light direction, linear tint, phase and `shape`. Shapes use the exact
+world-unit sphere or six-section annular compound from the physics catalogue.
+Visibility zero hides the slot; one writes opaque surface depth; fractional
+visibility uses a depth-tested transparent far LOD. Slots and the quad are reused.
+Translucent gas rings and stellar prominences have separate depth-tested passes.
+The host samples orbital descriptors at its simulation time before updating
+moving moon surfaces. Rotating a moon's local frame towards its parent can keep
+its material phase tidally locked without changing the sphere's collision.
+
+Surface detail is fixed in body space and filtered by projected footprint.
+Ring plate dimensions and continental detail do not change the analytic slab
+geometry: its current inner terrain remains a flat radial deck. Material normals
+are not real mountains. The stellar surface models a restrained photosphere,
+not false-color chromospheric imagery. Texture inputs are optional host assets;
+the engine does not package a game's art or reference photographs.
+
+At million-unit radii, float32 intersection error is measurable even with
+reversed Float32 depth. In the tested 1M-radius scene, a camera at 0.55 units
+from the surface with a 0.5-unit near plane can miss the near face; separations
+of at least one unit passed the bounded component cases. Hosts must preserve a
+tested near-plane/intersection clearance, rather than claiming arbitrary close
+precision. A host can keep two units of camera clearance for a 0.5-unit near
+plane and verify its supported radius range. Physical body thickness is unchanged.
+
+`createPlanetLod` owns a reusable unit-sphere pool. Projected screen coverage,
+quality caps and hysteresis choose detail; surfaces and atmospheres borrow the
+same level and the view disposes the pool once. `createUniverseView` uses this
+for planetary surfaces while retaining its existing stellar geometry budget.
