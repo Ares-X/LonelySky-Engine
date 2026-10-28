@@ -125,9 +125,9 @@ function orbitOccupancy(satellite, position) {
 }
 
 function querySystems({ sectorIndex, bounds, seed = 'lonelysky' }, mode) {
-  if (!bounds || !['min', 'max'].every(key => Array.isArray(bounds[key]) && bounds[key].length === 3
-    && bounds[key].every(Number.isFinite))) throw new TypeError('Invalid cosmic system query bounds');
-  if (bounds.min.some((n, i) => n > bounds.max[i])) throw new RangeError('Inverted cosmic system query bounds');
+  if (!bounds || !Array.isArray(bounds.min) || bounds.min.length !== 3 || !bounds.min.every(Number.isFinite)
+    || !Array.isArray(bounds.max) || bounds.max.length !== 3 || !bounds.max.every(Number.isFinite)) throw new TypeError('Invalid cosmic system query bounds');
+  if (bounds.min[0] > bounds.max[0] || bounds.min[1] > bounds.max[1] || bounds.min[2] > bounds.max[2]) throw new RangeError('Inverted cosmic system query bounds');
   // Parent surfaces need not touch the query. Search by the greatest supported
   // orbital/influence reach, then test each family's full phase envelope.
   const expanded = { min: bounds.min.map(n => n - COSMIC_SYSTEM_MAX_REACH), max: bounds.max.map(n => n + COSMIC_SYSTEM_MAX_REACH) };

@@ -208,6 +208,12 @@ the supplied body radius; coronae and beam illustrations are
 non-solid. The application owns world placement, encounters, catalogs and safety.
 These are bounded artistic shaders, not stellar evolution or radiation simulations.
 
+Version 0.10.4 reduces temporary allocations in cosmic bounds queries. Cached
+body lookups no longer allocate a cell array, queries reuse their own candidate
+address, and discarded bodies do not allocate result positions. Public queries
+still return independent result arrays and positions; descriptor seeds, wrapped
+coordinates, query order and the existing 4096-entry descriptor cache are unchanged.
+
 Version 0.10.1 sets the canonical V3 structure support fade interval to
 125–150 million world units (previously 80–100 million). The fixed 5³ streaming neighborhood, catalogue, particle
 counts and quality levels are unchanged. Even at cell and torus seams, omitted
