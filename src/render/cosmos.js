@@ -205,7 +205,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
   let sampleGeneration = 0;
   let lastCell = '', lastMacro = '', lastCount = 0, descriptors = [], samples = [], centers = [], disposed = false;
   let currentIndex = -1, currentCell, key = '', macroKey = '';
-  const hazeFrame = { centers: null, cameraPosition: null, quality: 'auto', brightness: 1, home: false };
+  const hazeFrame = { centers: null, cameraPosition: null, camera: null, quality: 'auto', brightness: 1, home: false };
   const stats = { revision: structures ? 3 : COSMOS_VERSION, galaxies: 0, clusters: 0, nebulae: 0, structures: 0, particles: 0, maxParticles: (structures ? COSMIC_MAX_STRUCTURES * PARTICLES_PER_GALAXY : MAX_COSMOS_PARTICLES), batches: 0, visible: true, rebuilds: 0,
     sampleCacheLimit: cacheSamples ? SAMPLE_CACHE_BYTE_LIMIT : 0, sampleCacheBytes: 0, sampleCacheHits: 0, sampleGenerations: 0 };
   Object.defineProperty(group.userData, 'stats', { get: () => ({ ...stats, sampleCacheEntries: sampleCache.size }) });
@@ -244,7 +244,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
       return sample;
     });
   }
-  group.userData.update = ({ sectorIndex, cameraPosition, quality = 'auto', quiet = 0, home = false, viewportHeight = 1, pixelRatio = 1 }) => {
+  group.userData.update = ({ sectorIndex, cameraPosition, camera = null, quality = 'auto', quiet = 0, home = false, viewportHeight = 1, pixelRatio = 1 }) => {
     if (disposed) return;
     if (sectorIndex !== currentIndex) {
       currentCell = decodeCell(sectorIndex); currentIndex = sectorIndex;
@@ -305,6 +305,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     material.uniforms.brightness.value = 1 - Math.max(0, Math.min(1, quiet)) * .52;
     group.visible = !home; stats.visible = group.visible;
     hazeFrame.centers = centers; hazeFrame.cameraPosition = cameraPosition; hazeFrame.quality = quality;
+    hazeFrame.camera = camera;
     hazeFrame.brightness = material.uniforms.brightness.value; hazeFrame.home = home;
     const volumes = haze.userData.update(hazeFrame);
     stats.batches = home ? 0 : Number(stats.particles > 0) + volumes;

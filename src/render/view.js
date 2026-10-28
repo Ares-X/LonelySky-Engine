@@ -203,7 +203,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     scene.updateMatrixWorld(true); camera.getWorldPosition(cameraPosition);
     stars.position.copy(cameraPosition);
     sky.position.copy(cameraPosition);
-    cosmos.userData.update({ sectorIndex, cameraPosition: cameraPosition.toArray(), quality, viewportHeight: height, pixelRatio: renderer.getPixelRatio() });
+    cosmos.userData.update({ sectorIndex, cameraPosition: cameraPosition.toArray(), camera, quality, viewportHeight: height, pixelRatio: renderer.getPixelRatio() });
     for (const chunk of chunks.values()) {
       const nebula = chunk.userData.nebula;
       if (nebula) {

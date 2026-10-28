@@ -420,6 +420,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
   structureNoise.wrapS = structureNoise.wrapT = THREE.RepeatWrapping;
   structureNoise.generateMipmaps = true; structureNoise.needsUpdate = true;
   const camera = new THREE.Vector3(), inverse = new THREE.Quaternion();
+  const viewProjection = new THREE.Matrix4(), viewFrustum = new THREE.Frustum();
   let descriptors = [], disposed = false;
   group.userData.setDescriptors = (next) => {
     if (disposed) return;
@@ -471,14 +472,42 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       mesh.frustumCulled = false; group.add(mesh);
     }
   };
-  group.userData.update = ({ centers, cameraPosition, quality, brightness, home }) => {
+  group.userData.update = ({ centers, cameraPosition, camera: viewCamera, quality, brightness, home }) => {
     if (disposed) return 0;
     camera.fromArray(cameraPosition); let visible = 0;
+    const cullToView = structures && viewCamera?.isPerspectiveCamera === true;
+    if (cullToView) {
+      viewCamera.updateWorldMatrix(true, false);
+      viewProjection.multiplyMatrices(viewCamera.projectionMatrix, viewCamera.matrixWorldInverse);
+      viewFrustum.setFromProjectionMatrix(viewProjection);
+      group.updateWorldMatrix(true, false);
+    }
     for (let i = 0; i < group.children.length; i++) {
       const mesh = group.children[i];
       mesh.position.fromArray(centers[i]);
       const distance = mesh.position.distanceTo(camera);
       mesh.visible = !home && (supportVisibility ? supportVisibility[i] > 0 : distance - descriptors[i].radius < (structures ? COSMIC_VIEW_FAR : 520000));
+      if (mesh.visible && cullToView) {
+        // All proxy vertices lie in the unit sphere. Transform its support
+        // into the same world space as the planes, including parent scale,
+        // rotation and shear, without allocating a per-frame bounding object.
+        mesh.updateWorldMatrix(false, false);
+        const e = mesh.matrixWorld.elements;
+        // Radial depth compression preserves directions, not physical z.
+        // Only the four viewport sides apply; true-space near/far planes do not.
+        for (let side = 0; side < 4; side++) {
+          const plane = viewFrustum.planes[side], n = plane.normal;
+          const supportRadius = Math.hypot(n.x * e[0] + n.y * e[1] + n.z * e[2],
+            n.x * e[4] + n.y * e[5] + n.z * e[6], n.x * e[8] + n.y * e[9] + n.z * e[10]);
+          const centerDistance = n.x * e[12] + n.y * e[13] + n.z * e[14] + plane.constant;
+          const tolerance = 64 * Number.EPSILON * (Math.abs(e[12]) + Math.abs(e[13])
+            + Math.abs(e[14]) + Math.abs(plane.constant) + supportRadius + 1);
+          if (centerDistance < -supportRadius - tolerance) {
+            mesh.visible = false;
+            break;
+          }
+        }
+      }
       if (supportVisibility) mesh.material.uniforms.structureVisibility.value = supportVisibility[i];
       if (structures) {
         mesh.material.uniforms.uVisibility.value = Number(mesh.visible);

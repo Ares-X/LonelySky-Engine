@@ -5,8 +5,8 @@ import { randomFromSeed } from './random.js';
 export const COSMIC_STRUCTURE_REVISION = 3;
 export const COSMIC_GRID_CELLS = 4096;
 export const COSMIC_GRID_SIZE = COSMIC_GRID_CELLS * CELL_SIZE;
-export const COSMIC_VIEW_FADE_START = 80000000;
-export const COSMIC_VIEW_FAR = 100000000;
+export const COSMIC_VIEW_FADE_START = 125000000;
+export const COSMIC_VIEW_FAR = 150000000;
 export const COSMIC_MAX_RADIUS = 42000000;
 export const COSMIC_MAX_STRUCTURES = 27 * 4;
 export const COSMIC_THEMES = Object.freeze(['silver-dust', 'blue-nursery', 'old-gold', 'tidal-islands', 'dark-rift']);
@@ -94,7 +94,11 @@ export function cosmicStructureRelativeCenter(descriptor, cell, output = [0, 0, 
   return output;
 }
 
-/** Fixed 5³ neighborhood; removed supports are beyond the 100M fade even at seams. */
+/** Fixed 5³ neighborhood on the eight-cell torus. An omitted parent support is
+ * at least (2.5 - .06) * GRID_SIZE - MAX_RADIUS - CELL_SIZE / 2 = 157.8748M
+ * away, including a camera at its cell edge. Children stay inside their parent.
+ * The 150M fade therefore ends before catalogue changes, including torus seams.
+ */
 export function loadedCosmicStructures(sectorIndex, seed = 'lonelysky') {
   const cell = decodeCell(sectorIndex), macro = AXES.map(axis => Math.floor(cell[axis] / COSMIC_GRID_CELLS));
   const result = [];
