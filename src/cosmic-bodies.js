@@ -41,8 +41,9 @@ export function cosmicRingParts({radius,halfWidth,thickness,phase,broken}){
 /** Fixed independent candidates: no observer, render quality or visitation RNG. */
 export function describeCosmicBody(coordinate,seed='lonelysky'){
   if(typeof seed!=='string'||!AXES.every(axis=>Number.isSafeInteger(coordinate?.[axis])))throw new TypeError('Invalid cosmic body address');
-  const cell=AXES.map(axis=>wrap(coordinate[axis],PERIOD)),key=`${seed}:cosmic-body-v3:${cell}`;
+  const cx=wrap(coordinate.x,PERIOD),cy=wrap(coordinate.y,PERIOD),cz=wrap(coordinate.z,PERIOD),key=`${seed}:cosmic-body-v3:${cx},${cy},${cz}`;
   if(cache.has(key))return cache.get(key);
+  const cell=[cx,cy,cz];
   const random=randomFromSeed(key),offset=AXES.map(()=>(random()-.5)*COSMIC_BODY_GRID_SIZE*.06);
   let descriptor=null;
   if(random()<.08){
@@ -86,16 +87,22 @@ export function cosmicBodyCenter(body,sectorIndex,cameraPosition=[0,0,0]){
 
 /** Broadphase in macro space; independent of visibility and small-cell streaming. */
 export function cosmicSolidsInBounds({sectorIndex,bounds,seed='lonelysky'}){
-  if(!bounds||!['min','max'].every(k=>Array.isArray(bounds[k])&&bounds[k].length===3&&bounds[k].every(Number.isFinite)))throw new TypeError('Invalid cosmic query bounds');
+  if(!bounds||!Array.isArray(bounds.min)||bounds.min.length!==3||!bounds.min.every(Number.isFinite)
+    ||!Array.isArray(bounds.max)||bounds.max.length!==3||!bounds.max.every(Number.isFinite))throw new TypeError('Invalid cosmic query bounds');
   const cell=decodeCell(sectorIndex),padding=1250000+COSMIC_BODY_GRID_SIZE*.03;
-  const ranges=AXES.map((axis,i)=>[Math.ceil((cell[axis]*CELL_SIZE+bounds.min[i]-padding)/COSMIC_BODY_GRID_SIZE),Math.floor((cell[axis]*CELL_SIZE+bounds.max[i]+padding)/COSMIC_BODY_GRID_SIZE)]);
-  if(ranges.some(([a,b],i)=>bounds.min[i]>bounds.max[i]||b-a>PERIOD))throw new RangeError('Cosmic query exceeds one world period');
-  const result=[],seen=new Set();
-  for(let x=ranges[0][0];x<=ranges[0][1];x++)for(let y=ranges[1][0];y<=ranges[1][1];y++)for(let z=ranges[2][0];z<=ranges[2][1];z++){
-    const body=describeCosmicBody({x,y,z},seed);if(!body||seen.has(body.id))continue;seen.add(body.id);
-    const position=cosmicBodyCenter(body,sectorIndex),r=body.boundsRadius;
-    if(position.some((n,i)=>n+r<bounds.min[i]||n-r>bounds.max[i]))continue;
-    result.push({...body,position});
+  const minX=Math.ceil((cell.x*CELL_SIZE+bounds.min[0]-padding)/COSMIC_BODY_GRID_SIZE),maxX=Math.floor((cell.x*CELL_SIZE+bounds.max[0]+padding)/COSMIC_BODY_GRID_SIZE);
+  const minY=Math.ceil((cell.y*CELL_SIZE+bounds.min[1]-padding)/COSMIC_BODY_GRID_SIZE),maxY=Math.floor((cell.y*CELL_SIZE+bounds.max[1]+padding)/COSMIC_BODY_GRID_SIZE);
+  const minZ=Math.ceil((cell.z*CELL_SIZE+bounds.min[2]-padding)/COSMIC_BODY_GRID_SIZE),maxZ=Math.floor((cell.z*CELL_SIZE+bounds.max[2]+padding)/COSMIC_BODY_GRID_SIZE);
+  if(bounds.min[0]>bounds.max[0]||maxX-minX>PERIOD||bounds.min[1]>bounds.max[1]||maxY-minY>PERIOD||bounds.min[2]>bounds.max[2]||maxZ-minZ>PERIOD)throw new RangeError('Cosmic query exceeds one world period');
+  const result=[],seen=new Set(),coordinate={x:0,y:0,z:0};
+  for(let x=minX;x<=maxX;x++)for(let y=minY;y<=maxY;y++)for(let z=minZ;z<=maxZ;z++){
+    coordinate.x=x;coordinate.y=y;coordinate.z=z;
+    const body=describeCosmicBody(coordinate,seed);if(!body||seen.has(body.id))continue;seen.add(body.id);
+    const px=wrap(body.cell.x*COSMIC_BODY_GRID_SIZE+body.offset[0]-cell.x*CELL_SIZE-0,WORLD_SIZE);
+    const py=wrap(body.cell.y*COSMIC_BODY_GRID_SIZE+body.offset[1]-cell.y*CELL_SIZE-0,WORLD_SIZE);
+    const pz=wrap(body.cell.z*COSMIC_BODY_GRID_SIZE+body.offset[2]-cell.z*CELL_SIZE-0,WORLD_SIZE),r=body.boundsRadius;
+    if(px+r<bounds.min[0]||px-r>bounds.max[0]||py+r<bounds.min[1]||py-r>bounds.max[1]||pz+r<bounds.min[2]||pz-r>bounds.max[2])continue;
+    result.push({...body,position:[px,py,pz]});
   }
   return result;
 }
