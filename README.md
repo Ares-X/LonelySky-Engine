@@ -210,6 +210,29 @@ positions, colors, sizes and quality prefixes while removing repeated conversion
 work and short-lived arrays. Cold batches are still synchronous; this change
 does not establish a browser frame-time budget or remove first-visit stalls.
 
+`createCosmos({incremental: true, preparationBudgetMs: 2})` optionally prepares
+one complete particle batch in CPU work slices before publishing it at an
+actual matching `group.userData.update(frame)` boundary. The default update
+remains synchronous. Call `await group.userData.prepare(frame, {signal})` before
+revealing a cold scene or discontinuous jump; it yields through host tasks and
+rejects when cancelled or superseded. `requestPopulation({sectorIndex, quality})`
+prepares one target ahead while normal updates retain the active population;
+`isReady({sectorIndex, quality})` becomes true only after exact origin and batch
+publication. `cancelPreparation()` keeps the active scene; `dispose()` also
+settles waiters and releases pending and active resources.
+
+The preparation budget covers legacy particle sampling and buffer assembly,
+not catalogue/haze construction, shader compilation or GPU upload. Exact RNG
+streams, Float32 output, quality counts, view distances and the 8 MiB sample
+cache ceiling are retained. Custom providers keep their previous uncapped
+catalogue semantics; only the canonical V3 support contract uses the fixed
+108-entry support-weight array. Hosts own ahead-target selection, covered
+travel handoff and visibility safety during ordinary flight. The V3 omission
+margin is 7.8748 million units, not a hard deadline for arbitrary velocities.
+CPU tests do not establish browser frame tails, GPU memory or target-device
+performance. The bundled view and consuming applications must explicitly opt
+in and wire preparation/readiness/cancellation before claiming those benefits.
+
 Version 0.5 adds optional astronomy-inspired appearance adapters. Natural planets
 with stable IDs can use ten seeded surface families through
 `describePlanetAppearance` / `PLANET_APPEARANCE_FAMILIES`; explicit texture maps,
