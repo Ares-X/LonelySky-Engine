@@ -10,3 +10,4 @@ export * from './solid-geometry.js';
 export * from './cosmic-bodies.js';
 export * from './cosmic-structures.js';
 export * from './cosmic-systems.js';
+export {relativeStarFlux, starLinearColor} from './star-photometry.js';

@@ -135,6 +135,20 @@ Finite-source eclipses and three-sample ring penumbrae are bounded approximation
 they do not add shadow-map passes or simulate multiple scattering. Source discovery
 and exposure selection remain the consuming world's responsibility.
 
+### Directional stellar light
+
+`relativeStarFlux(magnitude, referenceMagnitude)` computes relative linear light
+on the astronomical magnitude scale. `starLinearColor(kelvin, output)` provides
+a continuous, white-balanced Planck-band color approximation, with unit linear
+RGB luminance. It is an artistic camera response, not a CIE stellar spectrum.
+
+The optional `createDirectionalStars({positions, colors, flux, magnitudes, ranks})`
+adapter consumes caller-owned typed arrays. Spatial population and magnitude
+visibility remain separate. Its Gaussian core and faint wings integrate pixel
+coverage before the existing scene tone mapper; they do not use a star catalog,
+another renderer, or an automatic exposure loop. Update the `ratio` uniform with
+the actual drawing pixel ratio and call `userData.dispose()` when finished.
+
 ## Documentation
 
 - [Generation, rendering and lifecycle API](docs/api.md)
