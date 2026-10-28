@@ -341,7 +341,11 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     for (let axis = 0; axis < 3; axis++) local[axis] = position[axis] - view.offset[axis];
     let inside = null, deepest = 0;
     for (const body of view.bodies) {
-      const depth = body.clearance - distanceTo(local, body.position);
+      const x = local[0] - body.position[0], y = local[1] - body.position[1], z = local[2] - body.position[2];
+      // Outside any axis of the sphere's box cannot overlap. Keep the exact
+      // norm and deepest-first choice for every remaining sampled body.
+      if (Math.abs(x) >= body.clearance || Math.abs(y) >= body.clearance || Math.abs(z) >= body.clearance) continue;
+      const depth = body.clearance - Math.hypot(x, y, z);
       if (depth > Math.max(deepest, EPSILON)) { inside = body; deepest = depth; }
     }
     if (!inside) return writeMoveResult(out, position, velocity, null, 0, false);
