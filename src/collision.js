@@ -340,7 +340,8 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     const view = nearby(sectorIndex, position, timeSeconds, marginSpan, timeScale), local = recoveryLocal;
     for (let axis = 0; axis < 3; axis++) local[axis] = position[axis] - view.offset[axis];
     let inside = null, deepest = 0;
-    for (const body of view.bodies) {
+    for (let i = 0; i < view.bodies.length; i++) {
+      const body = view.bodies[i];
       const x = local[0] - body.position[0], y = local[1] - body.position[1], z = local[2] - body.position[2];
       // Outside any axis of the sphere's box cannot overlap. Keep the exact
       // norm and deepest-first choice for every remaining sampled body.
@@ -628,7 +629,8 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         const view = nearby(sectorIndex, position, now, 0, timeScale), local = moveLocal;
         for (let axis = 0; axis < 3; axis++) local[axis] = position[axis] - view.offset[axis];
         let hit = null, first = 1 + EPSILON;
-        for (const body of view.bodies) {
+        for (let i = 0; i < view.bodies.length; i++) {
+          const body = view.bodies[i];
           const source = sampledSources.get(body);
           chord(source, intervalStart, duration, timeScale);
           const begin = source.begin, chordVelocity = source.chordVelocity;
