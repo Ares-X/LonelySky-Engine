@@ -67,6 +67,9 @@ const fragmentShader = /* glsl */`
       return cosmicTrueDistance(drawDistance);
     }
   #endif
+  #ifdef COSMIC_SUPPORT_FADE
+    uniform float structureVisibility;
+  #endif
   uniform int steps;uniform vec2 quadrature[48];uniform vec2 coreQuadrature[48];
   float armLobe(float angularOffset,float width,float angularVariance,float period){
     float sigma=sqrt(width*width+angularVariance);
@@ -329,8 +332,11 @@ const fragmentShader = /* glsl */`
         vec2 node=quadrature[i];
         float distanceAlongRay=entry+node.x*rayRange;
         vec3 q=localCamera+direction*distanceAlongRay;
-        float trueDistance=distanceAlongRay*physicalSpeed*radius;
-        float visibility=1.-smoothstep(FADE_START,FADE_FAR,trueDistance);
+        float visibility=1.;
+        #ifndef COSMIC_SUPPORT_FADE
+          float trueDistance=distanceAlongRay*physicalSpeed*radius;
+          visibility=1.-smoothstep(FADE_START,FADE_FAR,trueDistance);
+        #endif
         if(visibility==0.) continue;
         float sampleFootprint=max(binFootprint,angularFootprint*distanceAlongRay);
         if(morphology>=1.5) sampleFootprint=max(sampleFootprint,physicalSpeed*rayRange*2./float(steps));
@@ -354,13 +360,19 @@ const fragmentShader = /* glsl */`
         if(i>=steps/2) break;
         vec2 node=coreQuadrature[i];float u=node.x;
         vec2 distanceAlongRay=vec2(center)-vec2(reach.x,-reach.y)*u*u;
-        vec2 visibility=1.-smoothstep(vec2(FADE_START),vec2(FADE_FAR),distanceAlongRay*physicalSpeed*radius);
+        vec2 visibility=vec2(1.);
+        #ifndef COSMIC_SUPPORT_FADE
+          visibility=1.-smoothstep(vec2(FADE_START),vec2(FADE_FAR),distanceAlongRay*physicalSpeed*radius);
+        #endif
         vec3 nearCore=vec3(0.),farCore=vec3(0.);
         if(reach.x!=0.&&visibility.x!=0.) nearCore=coreEmission(localCamera+direction*distanceAlongRay.x,max(binFootprint,angularFootprint*distanceAlongRay.x),angularFootprint*distanceAlongRay.x);
         if(reach.y!=0.&&visibility.y!=0.) farCore=coreEmission(localCamera+direction*distanceAlongRay.y,max(binFootprint,angularFootprint*distanceAlongRay.y),angularFootprint*distanceAlongRay.y);
         emission+=(nearCore*reach.x*visibility.x+farCore*reach.y*visibility.y)*2.*u*node.y*physicalSpeed;
       }
     }
+    #ifdef COSMIC_SUPPORT_FADE
+      emission*=structureVisibility;
+    #endif
     // Restrained warm-white emission; no chromatic fog or time-dependent noise.
     #ifdef COSMIC_STRUCTURES
       // The same density is integrated from outside and inside the structure;
@@ -381,7 +393,7 @@ export function galaxyHazeScale(descriptor) {
   return [1, 1, 1];
 }
 
-export function createGalaxyHaze({ seed = 'lonelysky', structures = false } = {}) {
+export function createGalaxyHaze({ seed = 'lonelysky', structures = false, supportVisibility = null } = {}) {
   const group = new THREE.Group(); group.name = 'galaxy-emission-volumes';
   const geometry = new THREE.SphereGeometry(1, 40, 24);
   const noiseRandom = randomFromSeed(`${seed}:galaxy-dust-texture-v1`);
@@ -425,10 +437,11 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false } = {}
           arms: { value: descriptor.arms }, pitch: { value: descriptor.pitch },
           morphology: { value: descriptor.morphology === 'spiral' ? 0 : descriptor.morphology === 'elliptical' ? 1 : 2 },
           asymmetry: { value: descriptor.asymmetry }, bar: { value: Number(descriptor.bar) }, brightness: { value: 1 }, steps: { value: 32 }, quadrature: { value: integrationRules[32] }, coreQuadrature: { value: integrationRules[16] } },
-        defines: { FADE_START: structures ? `${COSMIC_VIEW_FADE_START}.` : '420000.', FADE_FAR: structures ? `${COSMIC_VIEW_FAR}.` : '520000.', ...(structures ? { COSMIC_STRUCTURES: 1 } : {}) },
+        defines: { FADE_START: structures ? `${COSMIC_VIEW_FADE_START}.` : '420000.', FADE_FAR: structures ? `${COSMIC_VIEW_FAR}.` : '520000.', ...(structures ? { COSMIC_STRUCTURES: 1 } : {}), ...(supportVisibility ? { COSMIC_SUPPORT_FADE: 1 } : {}) },
         vertexShader, fragmentShader, side: THREE.BackSide, transparent: true,
         blending: THREE.AdditiveBlending, depthWrite: false, depthTest: !structures,
       });
+      if (supportVisibility) material.uniforms.structureVisibility = { value: 1 };
       if (structures) {
         material.uniforms.continuumWeight = { value: 1 };
         material.uniforms.structureKind = { value: descriptor.kind === 'nebula' ? 2 : descriptor.kind === 'cluster' ? 1 : 0 };
@@ -465,7 +478,8 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false } = {}
       const mesh = group.children[i];
       mesh.position.fromArray(centers[i]);
       const distance = mesh.position.distanceTo(camera);
-      mesh.visible = !home && distance - descriptors[i].radius < (structures ? COSMIC_VIEW_FAR : 520000);
+      mesh.visible = !home && (supportVisibility ? supportVisibility[i] > 0 : distance - descriptors[i].radius < (structures ? COSMIC_VIEW_FAR : 520000));
+      if (supportVisibility) mesh.material.uniforms.structureVisibility.value = supportVisibility[i];
       if (structures) {
         mesh.material.uniforms.uVisibility.value = Number(mesh.visible);
         // A statistical stellar continuum is appropriate at exterior scales.
@@ -488,7 +502,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false } = {}
   group.userData.dispose = () => {
     if (disposed) return; disposed = true;
     for (const mesh of group.children) mesh.material.dispose();
-    geometry.dispose(); structureNoise.dispose(); group.clear(); descriptors = [];
+    geometry.dispose(); structureNoise.dispose(); group.clear(); descriptors = []; supportVisibility = null;
   };
   return group;
 }

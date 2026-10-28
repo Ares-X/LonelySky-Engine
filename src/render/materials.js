@@ -131,7 +131,7 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
               // Reuse the already loaded lunar map for resolved regolith and
               // varied impacts, with an independent stable longitudinal phase.
               vec2 regolithUV=vec2(fract(vUV.x+seedOffset.x/2048.+seedOffset.z/1048576.),vUV.y);
-              vec3 regolith=texture2D(surface,regolithUV).rgb;
+              vec3 regolith=textureGrad(surface,regolithUV,dFdx(vUV),dFdy(vUV)).rgb;
               vec3 mineralTint=mix(vec3(.94),appearanceB*1.3,.32);
               base=regolith*mineralTint*(.88+broad*.24);
             }

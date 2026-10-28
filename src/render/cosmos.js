@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { CELL_SIZE, decodeCell } from '../coordinates.js';
 import { randomFromSeed } from '../random.js';
 import { createGalaxyHaze } from './galaxy-haze.js';
-import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_MAX_STRUCTURES, COSMIC_DEPTH_GLSL, describeCosmicStructures } from '../cosmic-structures.js';
+import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_GRID_CELLS, COSMIC_MAX_STRUCTURES, COSMIC_DEPTH_GLSL, describeCosmicStructures } from '../cosmic-structures.js';
 
 // Additive scenery has an independent revision from caller-owned bodies and addresses.
 export const COSMOS_VERSION = 1;
@@ -136,20 +136,34 @@ export function loadedMacros(sectorIndex, seed = 'lonelysky', { descriptorProvid
 export function createCosmos({ seed = 'lonelysky', descriptorProvider = describeMacro, gridCells = MACRO_CELLS, structures = false } = {}) {
   if (!Number.isInteger(gridCells) || gridCells <= 0 || 32768 % gridCells !== 0 || typeof descriptorProvider !== 'function') throw new TypeError('Invalid cosmos grid or descriptor provider');
   const catalogueOptions = { descriptorProvider, gridCells };
+  // The canonical catalogue owns the bounded 108-structure support contract.
+  // Custom/wrapped providers retain their existing per-sample visibility.
+  const supportFade = structures && descriptorProvider === describeCosmicStructures && gridCells === COSMIC_GRID_CELLS;
+  let supportVisibility = supportFade ? new Float32Array(COSMIC_MAX_STRUCTURES) : null;
   const fadeStart = structures ? COSMIC_VIEW_FADE_START : COSMOS_FADE_START, viewFar = structures ? COSMIC_VIEW_FAR : COSMOS_VIEW_FAR;
   const group = new THREE.Group(); group.name = 'macrocosmos';
   const geometry = new THREE.BufferGeometry();
   const material = new THREE.ShaderMaterial({
-    defines: { FADE_START: `${fadeStart}.`, FADE_FAR: `${viewFar}.`, ...(structures ? { COSMIC_STRUCTURES: 1 } : {}) },
+    defines: { FADE_START: `${fadeStart}.`, FADE_FAR: `${viewFar}.`, ...(structures ? { COSMIC_STRUCTURES: 1 } : {}), ...(supportFade ? { COSMIC_SUPPORT_FADE: 1 } : {}) },
     uniforms: { cameraLocal: { value: new THREE.Vector3() }, pixelHeight: { value: 1 }, brightness: { value: 1 }, sampleWeight: { value: 1 }, minimumPointSize: { value: 4 } },
     vertexShader: /* glsl */`
       ${COSMIC_DEPTH_GLSL}
       attribute vec3 color;attribute float pointRadius;
       uniform vec3 cameraLocal;uniform float pixelHeight;uniform float minimumPointSize;
+      #ifdef COSMIC_SUPPORT_FADE
+        attribute float descriptorIndex;
+        uniform vec4 structureWeights[${COSMIC_MAX_STRUCTURES / 4}];
+      #endif
       varying vec3 tint;varying float alpha;varying float rasterWeight;
       void main(){
         vec3 relative=position-cameraLocal;float distanceToCamera=length(relative);
-        alpha=1.-smoothstep(FADE_START,FADE_FAR,distanceToCamera);tint=color;
+        #ifdef COSMIC_SUPPORT_FADE
+          int structure=int(descriptorIndex);
+          alpha=structureWeights[structure/4][structure-structure/4*4];
+        #else
+          alpha=1.-smoothstep(FADE_START,FADE_FAR,distanceToCamera);
+        #endif
+        tint=color;
         if(alpha==0.){gl_Position=vec4(0.,0.,2.,1.);gl_PointSize=1.;return;}
         // Keep all nearby depth relationships. Only distant drawing depth is
         // compressed to fit the existing 220k clip plane; angles stay exact.
@@ -180,8 +194,9 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     `,
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true,
   });
+  if (supportFade) material.uniforms.structureWeights = { value: supportVisibility };
   const points = new THREE.Points(geometry, material); points.frustumCulled = false; group.add(points);
-  const haze = createGalaxyHaze({ seed, structures }); group.add(haze);
+  const haze = createGalaxyHaze({ seed, structures, supportVisibility }); group.add(haze);
   // Only these producers guarantee that an ID has the same sampling inputs
   // for this instance's fixed seed. Custom providers may change a shape at
   // the same ID; they retain the uncached path and public snapshot contract.
@@ -261,6 +276,11 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3).setUsage(THREE.DynamicDrawUsage));
         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
         geometry.setAttribute('pointRadius', new THREE.BufferAttribute(sizes, 1));
+        if (supportFade) {
+          const descriptorIndices = new Float32Array(sizes.length);
+          for (let j = 0; j < descriptors.length; j++) descriptorIndices.fill(j, j * count, (j + 1) * count);
+          geometry.setAttribute('descriptorIndex', new THREE.BufferAttribute(descriptorIndices, 1));
+        }
         geometry.setDrawRange(0, sizes.length);
       } else geometry.attributes.position.needsUpdate = true;
       stats.galaxies = 0; stats.clusters = 0; stats.nebulae = 0; stats.structures = descriptors.length;
@@ -272,6 +292,13 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
       stats.particles = positions.length / 3; stats.rebuilds++;
       lastMacro = macroKey; lastCount = count; lastCell = key;
     }
+    if (supportFade) {
+      for (let i = 0; i < descriptors.length; i++) {
+        const center = centers[i];
+        const distance = Math.hypot(center[0] - cameraPosition[0], center[1] - cameraPosition[1], center[2] - cameraPosition[2]);
+        supportVisibility[i] = 1 - smoothstep(COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, Math.max(0, distance - descriptors[i].radius));
+      }
+    }
     material.uniforms.cameraLocal.value.fromArray(cameraPosition);
     material.uniforms.pixelHeight.value = Math.max(1, viewportHeight * pixelRatio);
     material.uniforms.sampleWeight.value = COSMOS_QUALITY_COUNTS.auto / count;
@@ -282,6 +309,6 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     const volumes = haze.userData.update(hazeFrame);
     stats.batches = home ? 0 : Number(stats.particles > 0) + volumes;
   };
-  group.userData.dispose = () => { if (disposed) return; disposed = true; geometry.dispose(); material.dispose(); haze.userData.dispose(); group.clear(); samples = []; descriptors = []; centers = []; sampleCache.clear(); stats.sampleCacheBytes = 0; stats.visible = false; stats.batches = 0; };
+  group.userData.dispose = () => { if (disposed) return; disposed = true; geometry.dispose(); material.dispose(); haze.userData.dispose(); if (supportFade) material.uniforms.structureWeights.value = null; supportVisibility = null; group.clear(); samples = []; descriptors = []; centers = []; sampleCache.clear(); stats.sampleCacheBytes = 0; stats.visible = false; stats.batches = 0; };
   return group;
 }
