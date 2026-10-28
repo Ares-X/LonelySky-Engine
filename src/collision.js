@@ -10,11 +10,26 @@ const MAX_RECOVERY_STEPS = 64;
 const PIECE_LENGTH = CELL_SIZE / 4;
 const MAX_TIME_STEP = 1 / 120;
 const MAX_TIME_STEPS = 64;
-const length = v => Math.hypot(...v);
+const length = v => Math.hypot(v[0], v[1], v[2]);
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const subtract = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+function copyVector(out, value) {
+  for (let axis = 0; axis < 3; axis++) out[axis] = value[axis];
+  return out;
+}
+function createMoveResult() {
+  return { position: [0, 0, 0], velocity: [0, 0, 0], contact: null, distance: 0, corrected: false };
+}
+function writeMoveResult(out, position, velocity, contact, distance, corrected, failure) {
+  copyVector(out.position, position); copyVector(out.velocity, velocity);
+  out.contact = contact; out.distance = distance; out.corrected = corrected;
+  if (failure) out.failure = failure;
+  else if ('failure' in out) delete out.failure;
+  return out;
+}
 const distanceTo = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-const vector = v => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+const vector = v => Array.isArray(v) && v.length === 3
+  && Number.isFinite(v[0]) && Number.isFinite(v[1]) && Number.isFinite(v[2]);
 
 class RecoveryFailure extends RangeError {
   constructor(message, code) { super(message); this.code = code; }
@@ -130,6 +145,11 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     const { shape, frame, ...snapshot } = contact;
     return snapshot;
   }
+  // Instance-owned synchronous solver scratch; published vectors never alias it.
+  const recoveryLocal = [0, 0, 0], travelVelocity = [0, 0, 0], remainingMotion = [0, 0, 0];
+  const stepMotion = [0, 0, 0], traveledMotion = [0, 0, 0], moveLocal = [0, 0, 0];
+  const movingContacts = [], staticNormals = [], staticDirection = [0, 0, 0];
+  const safeMove = createMoveResult(), recoveredMove = createMoveResult();
   const curveEndpoint = [0, 0, 0], solidSweepEnd = [0, 0, 0], staticContactKeys = [];
   function constrainCurvedContact(contact, position, motion) {
     if (contact.feature !== 'inner' && contact.feature !== 'inner-top' && contact.feature !== 'inner-bottom') return;
@@ -305,24 +325,30 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   }
   function nearby(index, position, timeSeconds = 0, marginSpan = 0, timeScale = 1) {
     const view = frame(index, position);
-    return { bodies: sampled(view.index, timeSeconds, marginSpan, timeScale), offset: view.offset };
+    view.bodies = sampled(view.index, timeSeconds, marginSpan, timeScale);
+    return view;
   }
   const contactFor = (body, normal, offset) => ({ ...body,
     normal: [...normal], velocity: [...body.velocity],
     ...(body.orbit ? { orbit: { ...body.orbit } } : {}),
     position: body.position.map((n, i) => n + offset[i]) });
 
-  function recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds = 0, marginSpan = 0, timeScale = 1) {
+  function recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds = 0, marginSpan = 0, timeScale = 1, out = createMoveResult()) {
     if (!Number.isFinite(timeSeconds)) throw new TypeError('timeSeconds must be finite');
     if (!vector(initialPosition) || !vector(initialVelocity)) throw new TypeError('Collision position and velocity must be finite three-dimensional vectors');
-    const position = [...initialPosition], velocity = [...initialVelocity];
-    const view = nearby(sectorIndex, position, timeSeconds, marginSpan, timeScale), local = subtract(position, view.offset);
+    const position = copyVector(out.position, initialPosition), velocity = copyVector(out.velocity, initialVelocity);
+    const view = nearby(sectorIndex, position, timeSeconds, marginSpan, timeScale), local = recoveryLocal;
+    for (let axis = 0; axis < 3; axis++) local[axis] = position[axis] - view.offset[axis];
     let inside = null, deepest = 0;
     for (const body of view.bodies) {
       const depth = body.clearance - distanceTo(local, body.position);
       if (depth > Math.max(deepest, EPSILON)) { inside = body; deepest = depth; }
     }
-    if (!inside) return { position, velocity, contact: null, corrected: false, distance: 0 };
+    if (!inside) return writeMoveResult(out, position, velocity, null, 0, false);
+    return recoverSphereOverlap(sectorIndex, position, velocity, view, local, inside, timeSeconds, marginSpan, timeScale, out);
+  }
+  // Keep overlap-only interval storage and its closure out of free-flight calls.
+  function recoverSphereOverlap(sectorIndex, position, velocity, view, local, inside, timeSeconds, marginSpan, timeScale, out) {
     let direction = subtract(local, inside.position), magnitude = length(direction);
     if (magnitude < EPSILON) {
       // A saved pose at the exact center has no radial direction. Oppose its
@@ -366,9 +392,8 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     }
     const relative = subtract(subtract(position, finalOffset), finalBody.position);
     const distance = length(relative), normal = relative.map(n => n / distance);
-    return { position, velocity: removeInward(subtract(velocity, finalBody.velocity), normal)
-      .map((n, i) => n + finalBody.velocity[i]),
-      contact: contactFor(finalBody, normal, finalOffset), corrected: true, distance: 0 };
+    return writeMoveResult(out, position, removeInward(subtract(velocity, finalBody.velocity), normal)
+      .map((n, i) => n + finalBody.velocity[i]), contactFor(finalBody, normal, finalOffset), 0, true);
   }
 
   // Retain one escape ray and advance only while the current point overlaps
@@ -376,8 +401,8 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   // lower bound on the distance to an exit along that ray. The final pose is
   // checked against both providers, without substituting bounding spheres for
   // actual ring holes or gaps.
-  function recover(sectorIndex, initialPosition, initialVelocity, timeSeconds = 0, marginSpan = 0, timeScale = 1) {
-    if (!solidProvider) return recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds, marginSpan, timeScale);
+  function recover(sectorIndex, initialPosition, initialVelocity, timeSeconds = 0, marginSpan = 0, timeScale = 1, out = createMoveResult()) {
+    if (!solidProvider) return recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds, marginSpan, timeScale, out);
     if (!vector(initialPosition) || !vector(initialVelocity)) throw new TypeError('Collision position and velocity must be finite three-dimensional vectors');
     if (!Number.isFinite(timeSeconds)) throw new TypeError('timeSeconds must be finite');
     const initialSolids = solids(sectorIndex, initialPosition);
@@ -386,7 +411,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       const sample = solidDistance(solid, initialPosition, solidDistanceOut, solidWork), penetration = shipRadius - sample.distance;
       if (penetration > depth) { overlap = solid; depth = penetration; normal = [...sample.normal]; }
     }
-    const sphereSafe = recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds, marginSpan, timeScale);
+    const sphereSafe = recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds, marginSpan, timeScale, out);
     if (!overlap) {
       const candidates = sphereSafe.corrected ? solids(sectorIndex, sphereSafe.position) : initialSolids;
       for (const solid of candidates) {
@@ -425,7 +450,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       if (advance === 0) {
         if (!contact) throw new RecoveryFailure('Solid recovery has no connected exit', 'solid-recovery-no-exit');
         if (contact.shape) contact = solidContact(contact, solidDistance(contact, position, solidDistanceOut, solidWork));
-        return { position, velocity: removeInward(subtract(velocity, contact.velocity), contact.normal).map((n, i) => n + contact.velocity[i]), contact, corrected: true, distance: 0 };
+        return writeMoveResult(out, position, removeInward(subtract(velocity, contact.velocity), contact.normal).map((n, i) => n + contact.velocity[i]), contact, 0, true);
       }
       for (let axis = 0; axis < 3; axis++) position[axis] += direction[axis] * advance;
       if (!position.every(Number.isFinite)) throw new RecoveryFailure('Solid recovery pose is not representable', 'solid-recovery-nonrepresentable');
@@ -440,18 +465,19 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     return result;
   }
 
-  function moveStatic(sectorIndex, start, end, initialVelocity, timeSeconds, timeScale,
-    safe = ensureSafe(sectorIndex, start, initialVelocity, timeSeconds, timeScale)) {
-    let position = safe.position, velocity = safe.velocity, contact = safe.contact;
+  function moveStatic(sectorIndex, timeSeconds, timeScale, safe, out) {
+    let position = copyVector(out.position, safe.position), velocity = copyVector(out.velocity, safe.velocity), contact = safe.contact;
     // Recovery is a pose correction, not a segment flown toward the old end.
-    let remaining = subtract(end, start), distance = 0, corrected = safe.corrected;
-    const normals = [];
+    let remaining = remainingMotion, distance = 0, corrected = safe.corrected;
+    const normals = staticNormals; normals.length = 0;
     staticContactKeys.length = 0;
     for (let event = 0; event < MAX_SWEEP_EVENTS; event += 1) {
       const total = length(remaining);
       if (total < EPSILON) break;
-      const segmentLength = Math.min(total, PIECE_LENGTH), direction = remaining.map(n => n / total);
-      const view = nearby(sectorIndex, position, timeSeconds, 0, timeScale), local = subtract(position, view.offset);
+      const segmentLength = Math.min(total, PIECE_LENGTH), direction = staticDirection;
+      for (let axis = 0; axis < 3; axis++) direction[axis] = remaining[axis] / total;
+      const view = nearby(sectorIndex, position, timeSeconds, 0, timeScale), local = moveLocal;
+      for (let axis = 0; axis < 3; axis++) local[axis] = position[axis] - view.offset[axis];
       let hit = null, first = segmentLength + EPSILON;
       for (const body of view.bodies) {
         const x = local[0] - body.position[0], y = local[1] - body.position[1], z = local[2] - body.position[2];
@@ -469,7 +495,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         for (let axis = 0; axis < 3; axis++) solidSweepEnd[axis] = position[axis] + direction[axis] * segmentLength;
         for (const solid of solids(sectorIndex, position, solidSweepEnd)) {
           const sweep = sweepSolid(solid, position, solidSweepEnd, shipRadius, solidOptions, solidWork.result, solidWork);
-          if (sweep.status === 'failed') return solidFailure(position, velocity, contact, distance, sweep.reason, timeSeconds);
+          if (sweep.status === 'failed') return finishMove(out, solidFailure(position, velocity, contact, distance, sweep.reason, timeSeconds));
           if (sweep.status === 'hit' && sweep.fraction * segmentLength < first) {
             first = sweep.safeFraction * segmentLength; hit = null;
             solidHit = solidContact(solid, sweep);
@@ -497,10 +523,13 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     // The event bound also bounds exceptional caller-supplied long sweeps.
     // Unprocessed motion is discarded, never teleported past unchecked cells.
     if (length(remaining) >= EPSILON) {
-      if (solidProvider) return solidFailure(position, velocity, contact, distance, 'solid-sweep-event-limit', timeSeconds);
+      if (solidProvider) return finishMove(out, solidFailure(position, velocity, contact, distance, 'solid-sweep-event-limit', timeSeconds));
       corrected = true;
     }
-    return { position, velocity, contact: publicContact(contact), distance, corrected };
+    return writeMoveResult(out, position, velocity, publicContact(contact), distance, corrected);
+  }
+  function finishMove(out, result) {
+    return writeMoveResult(out, result.position, result.velocity, result.contact, result.distance, result.corrected, result.failure);
   }
   function blockedMotion(safe, timeSeconds, failedTimeSeconds, code, message, contacts, cause = new RangeError(message)) {
     return { ...safe, corrected: true, distance: 0,
@@ -521,63 +550,79 @@ export function createCollisionWorld({ world, sector = world && (index => world.
    * with moving sources above 64/120 s fail explicitly. Short same-cell static
    * sweeps use the static path and do not need temporal subdivision.
    */
-  function move(sectorIndex, start, end, initialVelocity, { timeSeconds = 0, deltaTime = 0, timeScale = 1 } = {}) {
+  function move(sectorIndex, start, end, initialVelocity, options) {
+    return moveInto(sectorIndex, start, end, initialVelocity, options, createMoveResult());
+  }
+  // Caller owns out; its vectors remain stable until that caller writes it again.
+  // Contacts/failures are independent event snapshots, not solver workspace.
+  function moveInto(sectorIndex, start, end, initialVelocity, { timeSeconds = 0, deltaTime = 0, timeScale = 1 } = {}, out) {
     if (!vector(end)) throw new TypeError('Collision endpoint must be a finite three-dimensional vector');
     if (!Number.isFinite(timeSeconds) || !Number.isFinite(deltaTime)) throw new TypeError('Collision times must be finite');
     validateTimeScale(timeScale);
     if (deltaTime < 0) throw new RangeError('deltaTime must be nonnegative');
     if (!Number.isFinite(timeSeconds + deltaTime * timeScale)) throw new RangeError('Collision end time must be finite');
     let safe;
-    try { safe = ensureSafe(sectorIndex, start, initialVelocity, timeSeconds, timeScale); }
+    try { safe = recover(sectorIndex, start, initialVelocity, timeSeconds, 0, timeScale, safeMove);
+      safe.contact = publicContact(safe.contact); }
     catch (cause) {
       if (!(cause instanceof RecoveryFailure)) throw cause;
       // No safe initial pose was found. Preserve the input without calling it
       // a recovered endpoint; the caller must stop time and choose a valid pose.
-      return { position: [...start], velocity: [...initialVelocity], contact: null, distance: 0, corrected: false,
-        failure: { code: cause.code, message: cause.message, cause, timeSeconds, failedTimeSeconds: timeSeconds,
-          safeAtStart: false, contacts: [] } };
+      return writeMoveResult(out, start, initialVelocity, null, 0, false,
+        { code: cause.code, message: cause.message, cause, timeSeconds, failedTimeSeconds: timeSeconds,
+          safeAtStart: false, contacts: [] });
     }
-    if (!deltaTime || timeScale === 0) return moveStatic(sectorIndex, start, end, initialVelocity, timeSeconds, timeScale, safe);
-    const reach = length(subtract(end, start)), view = frame(sectorIndex, safe.position);
+    for (let axis = 0; axis < 3; axis++) remainingMotion[axis] = end[axis] - start[axis];
+    if (!deltaTime || timeScale === 0) return moveStatic(sectorIndex, timeSeconds, timeScale, safe, out);
+    const reach = length(remainingMotion), view = frame(sectorIndex, safe.position);
     // Static contact only shortens the remaining motion. If its entire possible
     // travel ball stays in this cell and all 27 anchor cells are static, reuse
     // the established static sweep. Longer/cell-crossing sweeps keep checking
     // moving sources as their neighborhoods change.
-    if (safe.position.every((n, i) => Math.abs(n - view.offset[i]) + reach < CELL_SIZE / 2)
-      && !neighborhoodMoving) {
-      return moveStatic(sectorIndex, start, end, initialVelocity, timeSeconds, timeScale, safe);
+    if (Math.abs(safe.position[0] - view.offset[0]) + reach < CELL_SIZE / 2
+      && Math.abs(safe.position[1] - view.offset[1]) + reach < CELL_SIZE / 2
+      && Math.abs(safe.position[2] - view.offset[2]) + reach < CELL_SIZE / 2 && !neighborhoodMoving) {
+      return moveStatic(sectorIndex, timeSeconds, timeScale, safe, out);
     }
     const steps = Math.ceil(deltaTime / MAX_TIME_STEP);
     if (steps > MAX_TIME_STEPS) throw new RangeError('Collision interval exceeds 64 time steps; subdivide the caller interval');
-    let position = safe.position, velocity = safe.velocity, contact = safe.contact;
+    let position = copyVector(out.position, safe.position), velocity = copyVector(out.velocity, safe.velocity), contact = safe.contact;
     let distance = 0, corrected = safe.corrected;
     const duration = deltaTime / steps;
     // A collision changes subsequent displacement; without one, honor the
     // caller endpoint even when it differs from velocity * deltaTime.
-    let travelVelocity = subtract(end, start).map(n => n / deltaTime);
+    for (let axis = 0; axis < 3; axis++) travelVelocity[axis] = remainingMotion[axis] / deltaTime;
     for (let step = 0; step < steps; step++) {
       const intervalStart = timeSeconds + step * duration * timeScale;
       let recovered;
-      try { recovered = recover(sectorIndex, position, velocity, intervalStart, duration, timeScale); }
+      try { recovered = recover(sectorIndex, position, velocity, intervalStart, duration, timeScale, recoveredMove); }
       catch (cause) {
         if (!(cause instanceof RecoveryFailure)) throw cause;
-        return blockedMotion(safe, timeSeconds, intervalStart, cause.code, cause.message, [], cause);
+        return finishMove(out, blockedMotion(safe, timeSeconds, intervalStart, cause.code, cause.message, [], cause));
       }
-      position = recovered.position; velocity = recovered.velocity;
+      copyVector(position, recovered.position); copyVector(velocity, recovered.velocity);
       if (recovered.corrected) {
         corrected = true; contact = recovered.contact;
-        travelVelocity = removeInward(subtract(travelVelocity, contact.velocity), contact.normal)
-          .map((n, i) => n + contact.velocity[i]);
+        const inward = (travelVelocity[0] - contact.velocity[0]) * contact.normal[0]
+          + (travelVelocity[1] - contact.velocity[1]) * contact.normal[1]
+          + (travelVelocity[2] - contact.velocity[2]) * contact.normal[2];
+        for (let axis = 0; axis < 3; axis++) {
+          const relative = travelVelocity[axis] - contact.velocity[axis];
+          travelVelocity[axis] = (inward < 0 ? relative - contact.normal[axis] * inward : relative) + contact.velocity[axis];
+        }
       }
-      const contacts = [];
-      let elapsed = 0, remaining = travelVelocity.map(n => n * duration);
+      const contacts = movingContacts; contacts.length = 0;
+      let elapsed = 0, remaining = remainingMotion;
+      for (let axis = 0; axis < 3; axis++) remaining[axis] = travelVelocity[axis] * duration;
       for (let event = 0; event < MAX_SWEEP_EVENTS && elapsed < duration; event++) {
         const span = duration - elapsed, now = intervalStart + elapsed * timeScale;
         const total = length(remaining);
         // Spatial subdivision preserves neighborhood/cell-crossing bounds.
         const fraction = total > PIECE_LENGTH ? PIECE_LENGTH / total : 1;
-        const h = span * fraction, motion = remaining.map(n => n * fraction);
-        const view = nearby(sectorIndex, position, now, 0, timeScale), local = subtract(position, view.offset);
+        const h = span * fraction, motion = stepMotion;
+        for (let axis = 0; axis < 3; axis++) motion[axis] = remaining[axis] * fraction;
+        const view = nearby(sectorIndex, position, now, 0, timeScale), local = moveLocal;
+        for (let axis = 0; axis < 3; axis++) local[axis] = position[axis] - view.offset[axis];
         let hit = null, first = 1 + EPSILON;
         for (const body of view.bodies) {
           const source = sampledSources.get(body);
@@ -607,17 +652,20 @@ export function createCollisionWorld({ world, sector = world && (index => world.
           for (let axis = 0; axis < 3; axis++) solidSweepEnd[axis] = position[axis] + motion[axis];
           for (const solid of solids(sectorIndex, position, solidSweepEnd)) {
             const sweep = sweepSolid(solid, position, solidSweepEnd, shipRadius, solidOptions, solidWork.result, solidWork);
-            if (sweep.status === 'failed') return blockedMotion(safe, timeSeconds, now, sweep.reason, 'Solid sweep could not establish a safe contact', contacts);
+            if (sweep.status === 'failed') return finishMove(out, blockedMotion(safe, timeSeconds, now, sweep.reason, 'Solid sweep could not establish a safe contact', contacts));
             if (sweep.status === 'hit' && sweep.fraction < first) {
               first = sweep.fraction; solidUsed = sweep.safeFraction; hit = null; solidHit = solidContact(solid, sweep);
             }
           }
         }
         const used = solidHit ? solidUsed : hit ? first : 1;
-        const traveled = motion.map(n => n * used);
-        position = position.map((n, i) => n + traveled[i]);
+        const traveled = traveledMotion;
+        for (let axis = 0; axis < 3; axis++) {
+          traveled[axis] = motion[axis] * used;
+          position[axis] += traveled[axis];
+          remaining[axis] -= traveled[axis];
+        }
         distance += length(traveled);
-        remaining = remaining.map((n, i) => n - traveled[i]);
         elapsed += h * used;
         if (!hit && !solidHit) continue;
         const center = hit && hit.body.position.map((n, i) => n + hit.bodyMotion[i] * used);
@@ -631,24 +679,24 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         if (prior < 0) contacts.push(constraint);
         else contacts[prior] = constraint;
         remaining = constrainedSurfaces(remaining, contacts, timeLeft, item => item.surface);
-        if (!remaining) return blockedMotion(safe, timeSeconds, intervalStart + elapsed * timeScale, 'infeasible-moving-contact',
-          'Moving collision contact constraints have no feasible motion', contacts);
+        if (!remaining) return finishMove(out, blockedMotion(safe, timeSeconds, intervalStart + elapsed * timeScale, 'infeasible-moving-contact',
+          'Moving collision contact constraints have no feasible motion', contacts));
         if (solidHit) constrainCurvedContact(solidHit, position, remaining);
         const actualState = hit && sampleAt(hit.source, intervalStart + elapsed * timeScale, hit.source.actual, timeScale);
         velocity = constrainedSurfaces(velocity, contacts, 1,
           item => item.key ? zeroSurface : sampleAt(item.source, intervalStart + elapsed * timeScale, item.source.actual, timeScale).velocity);
-        if (!velocity) return blockedMotion(safe, timeSeconds, intervalStart + elapsed * timeScale, 'infeasible-moving-contact',
-          'Moving collision contact constraints have no feasible velocity', contacts);
+        if (!velocity) return finishMove(out, blockedMotion(safe, timeSeconds, intervalStart + elapsed * timeScale, 'infeasible-moving-contact',
+          'Moving collision contact constraints have no feasible velocity', contacts));
         contact = solidHit ?? contactFor({ ...hit.body, position: center, velocity: actualState.velocity }, normal, view.offset);
         corrected = true;
-        if (timeLeft > 0) travelVelocity = remaining.map(n => n / timeLeft);
+        if (timeLeft > 0) for (let axis = 0; axis < 3; axis++) travelVelocity[axis] = remaining[axis] / timeLeft;
       }
-      if (elapsed < duration - EPSILON) return blockedMotion(safe, timeSeconds, intervalStart + elapsed * timeScale, 'moving-sweep-event-limit',
-        'Moving collision sweep exceeded its event limit', contacts);
+      if (elapsed < duration - EPSILON) return finishMove(out, blockedMotion(safe, timeSeconds, intervalStart + elapsed * timeScale, 'moving-sweep-event-limit',
+        'Moving collision sweep exceeded its event limit', contacts));
     }
-    return { position, velocity, contact: publicContact(contact), distance, corrected };
+    return writeMoveResult(out, position, velocity, publicContact(contact), distance, corrected);
   }
-  return { move, ensureSafe, setShipRadius,
+  return { move, moveInto, createMoveResult, ensureSafe, setShipRadius,
     bodies(index, timeSeconds = 0, timeScale = 1) {
       validateTimeScale(timeScale);
       if (!Number.isFinite(timeSeconds)) throw new TypeError('timeSeconds must be finite');

@@ -146,6 +146,19 @@ neighborhood collision descriptors. `safeRadius(type, radius)` and `bodyCollisio
 clearance calculations used by collision. Pass `body.type` as the second
 argument when calling `bodyCollisionRadius` directly; its default is `planet`.
 
+For a hot integration loop, allocate `const out = collision.createMoveResult()`
+once, then call `collision.moveInto(index, start, end, velocity, options, out)`.
+It runs the same solver as `move`, updating `out.position` and `out.velocity`
+in place. Reusing that output replaces its contents; separate consumers need
+separate outputs. Contacts and failure records remain independent event
+snapshots, and a later successful move removes a previous `failure`.
+Input vectors stay unchanged unless they are also the caller's output vectors;
+using the previous output as the next input is supported. The solver uses
+instance-owned synchronous scratch: provider callbacks must not reenter that
+same collision instance. `move` and `ensureSafe` continue returning detached
+results. Check `out.failure` before committing a live simulation pose or time;
+the reusable output may already contain the solver's explicit failure endpoint.
+
 Both systems cache up to 128 sector descriptors and query the surrounding 27
 cells. Collision splits long motion into segments of at most `CELL_SIZE / 4`.
 Collision recovery and sweeps reuse at most two private sampling buffers for
