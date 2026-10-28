@@ -174,6 +174,8 @@ the active neighborhood, distinguished by curvature margin. Their vectors are
 updated in place for changing time; static neighborhoods can retain their sampled
 state across times. Prepared orbit coefficients belong to cached descriptors,
 and dynamic chord endpoints belong to the active neighborhood and exact interval.
+The initial overlap and timed sweep scans traverse these private dense candidate
+arrays by index, preserving source order without creating iterator result records.
 A cell or world revision change replaces the active neighborhood; no past-time
 history is retained. Returned bodies and contact
 vectors remain detached; callers can modify them without changing later queries.
