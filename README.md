@@ -204,6 +204,12 @@ colors, sizes and exact quality prefixes are retained. Legacy revision 1 and oth
 structure families retain their existing samples. These tracers are scenery;
 body placement, gravity, collision and application bookmarks have separate owners.
 
+The legacy cosmic sampler prepares descriptor rotation and linear colors once,
+then writes directly into its typed buffers. This preserves exact generated
+positions, colors, sizes and quality prefixes while removing repeated conversion
+work and short-lived arrays. Cold batches are still synchronous; this change
+does not establish a browser frame-time budget or remove first-visit stalls.
+
 Version 0.5 adds optional astronomy-inspired appearance adapters. Natural planets
 with stable IDs can use ten seeded surface families through
 `describePlanetAppearance` / `PLANET_APPEARANCE_FAMILIES`; explicit texture maps,

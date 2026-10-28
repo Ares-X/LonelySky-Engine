@@ -59,7 +59,10 @@ export function sampleGalaxy(descriptor, count = PARTICLES_PER_GALAXY) {
   const openClusterV3 = descriptor.revision === 3 && descriptor.kind === 'cluster' && descriptor.family === 'open' && descriptor.morphology === 'irregular';
   const random = randomFromSeed(`${descriptor.seed}:particles-v1`);
   const positions = new Float32Array(count * 3), colors = new Float32Array(count * 3), sizes = new Float32Array(count);
-  const rotation = new THREE.Euler(...descriptor.orientation), point = new THREE.Vector3(), color = new THREE.Color();
+  const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(...descriptor.orientation));
+  const point = new THREE.Vector3(), color = new THREE.Color();
+  const youngColor = new THREE.Color(0xa2b4ca);
+  const oldColor = new THREE.Color(descriptor.morphology === 'elliptical' ? 0xc8b99d : 0xc5c2b8);
   const gaussian = () => Math.sqrt(-2 * Math.log(Math.max(1e-9, random()))) * Math.cos(random() * Math.PI * 2);
   for (let i = 0; i < count; i++) {
     const component = random(), angle = random() * Math.PI * 2;
@@ -90,11 +93,11 @@ export function sampleGalaxy(descriptor, count = PARTICLES_PER_GALAXY) {
       // Only the outer tail bends; value and first derivative join at .8.
       if (r > .8) { const t = r - .8; point.multiplyScalar((.8 + .18 * t / (.18 + t)) / r); }
     } else if (point.length() > .98) point.setLength(.98);
-    point.multiplyScalar(descriptor.radius).applyEuler(rotation);
-    positions.set(point.toArray(), i * 3);
-    color.set(young ? 0xa2b4ca : descriptor.morphology === 'elliptical' ? 0xc8b99d : 0xc5c2b8);
+    point.multiplyScalar(descriptor.radius).applyQuaternion(rotation);
+    point.toArray(positions, i * 3);
+    color.copy(young ? youngColor : oldColor);
     const luminosityRoll = random();
-    color.multiplyScalar(.22 + luminosityRoll * .38); colors.set(color.toArray(), i * 3);
+    color.multiplyScalar(.22 + luminosityRoll * .38); color.toArray(colors, i * 3);
     sizes[i] = descriptor.radius * (.008 + random() * .008);
     if (descriptor.revision === 3) {
       // Reuse the already-consumed draw: star positions and all following RNG
