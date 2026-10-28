@@ -145,6 +145,10 @@ tangential motion. Exact tangency is traversable. It returns
 position, velocity)` recovers a pose inside connected overlapping spheres without
 counting that correction as flown distance. Recovery retains its initial escape
 direction and queries newly reached cells along the connected overlap chain.
+The initial overlap scan samples bodies at the requested time before rejecting
+centers outside any axis of their sphere clearance box. Remaining candidates
+retain the Euclidean penetration calculation and deepest-overlap order; this
+does not replace continuous sweeps or the connected recovery scan.
 `bodies(index)` returns copied
 neighborhood collision descriptors. `safeRadius(type, radius)` and `bodyCollisionRadius(body, type)` expose the
 clearance calculations used by collision. Pass `body.type` as the second
