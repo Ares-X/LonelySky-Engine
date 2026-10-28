@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { CELL_SIZE, decodeCell } from '../coordinates.js';
 import { randomFromSeed } from '../random.js';
 import { createGalaxyHaze } from './galaxy-haze.js';
-import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_MAX_STRUCTURES, COSMIC_DEPTH_GLSL } from '../cosmic-structures.js';
+import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_MAX_STRUCTURES, COSMIC_DEPTH_GLSL, describeCosmicStructures } from '../cosmic-structures.js';
 
 // Additive scenery has an independent revision from caller-owned bodies and addresses.
 export const COSMOS_VERSION = 1;
@@ -17,6 +17,7 @@ export const COSMOS_QUALITY_COUNTS = Object.freeze({ low: 512, auto: 2048, high:
 export const MAX_COSMOS_PARTICLES = 27 * PARTICLES_PER_GALAXY;
 const AXES = ['x', 'y', 'z'];
 const WORLD_SIZE = 32768 * CELL_SIZE;
+const SAMPLE_CACHE_BYTE_LIMIT = 8 * 1024 * 1024;
 const wrap = (n, period) => ((n + period / 2) % period + period) % period - period / 2;
 const smoothstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
@@ -181,11 +182,53 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
   });
   const points = new THREE.Points(geometry, material); points.frustumCulled = false; group.add(points);
   const haze = createGalaxyHaze({ seed, structures }); group.add(haze);
+  // Only these producers guarantee that an ID has the same sampling inputs
+  // for this instance's fixed seed. Custom providers may change a shape at
+  // the same ID; they retain the uncached path and public snapshot contract.
+  const cacheSamples = descriptorProvider === describeMacro || descriptorProvider === describeCosmicStructures;
+  const sampleCache = new Map();
+  let sampleGeneration = 0;
   let lastCell = '', lastMacro = '', lastCount = 0, descriptors = [], samples = [], centers = [], disposed = false;
   let currentIndex = -1, currentCell, key = '', macroKey = '';
   const hazeFrame = { centers: null, cameraPosition: null, quality: 'auto', brightness: 1, home: false };
-  const stats = { revision: structures ? 3 : COSMOS_VERSION, galaxies: 0, clusters: 0, nebulae: 0, structures: 0, particles: 0, maxParticles: (structures ? COSMIC_MAX_STRUCTURES * PARTICLES_PER_GALAXY : MAX_COSMOS_PARTICLES), batches: 0, visible: true, rebuilds: 0 };
-  Object.defineProperty(group.userData, 'stats', { get: () => ({ ...stats }) });
+  const stats = { revision: structures ? 3 : COSMOS_VERSION, galaxies: 0, clusters: 0, nebulae: 0, structures: 0, particles: 0, maxParticles: (structures ? COSMIC_MAX_STRUCTURES * PARTICLES_PER_GALAXY : MAX_COSMOS_PARTICLES), batches: 0, visible: true, rebuilds: 0,
+    sampleCacheLimit: cacheSamples ? SAMPLE_CACHE_BYTE_LIMIT : 0, sampleCacheBytes: 0, sampleCacheHits: 0, sampleGenerations: 0 };
+  Object.defineProperty(group.userData, 'stats', { get: () => ({ ...stats, sampleCacheEntries: sampleCache.size }) });
+  function sampleDescriptors(count) {
+    // Each exact-count result owns seven float32 components per point. This
+    // ceiling covers cached sample arrays, not active geometry or total RAM.
+    // An oversized batch is sampled normally without churning a partial LRU.
+    const cacheBatch = cacheSamples && descriptors.length * count * 7 * Float32Array.BYTES_PER_ELEMENT <= SAMPLE_CACHE_BYTE_LIMIT;
+    const generation = ++sampleGeneration;
+    if (cacheBatch) for (const descriptor of descriptors) {
+      const entry = sampleCache.get(`${count}:${descriptor.id}`);
+      if (entry) entry.generation = generation;
+    }
+    return descriptors.map(descriptor => {
+      const key = cacheBatch ? `${count}:${descriptor.id}` : null;
+      const entry = cacheBatch && sampleCache.get(key);
+      if (entry) {
+        sampleCache.delete(key); sampleCache.set(key, entry);
+        stats.sampleCacheHits++;
+        return entry.sample;
+      }
+      const sample = sampleGalaxy(descriptor, count);
+      stats.sampleGenerations++;
+      if (cacheBatch) {
+        const bytes = sample.positions.byteLength + sample.colors.byteLength + sample.sizes.byteLength;
+        // Mark the whole incoming batch before eviction: an early miss must
+        // not evict a later hit that this same update still needs.
+        for (const [oldKey, old] of sampleCache) {
+          if (stats.sampleCacheBytes + bytes <= SAMPLE_CACHE_BYTE_LIMIT) break;
+          if (old.generation === generation) continue;
+          sampleCache.delete(oldKey); stats.sampleCacheBytes -= old.bytes;
+        }
+        sampleCache.set(key, { sample, bytes, generation });
+        stats.sampleCacheBytes += bytes;
+      }
+      return sample;
+    });
+  }
   group.userData.update = ({ sectorIndex, cameraPosition, quality = 'auto', quiet = 0, home = false, viewportHeight = 1, pixelRatio = 1 }) => {
     if (disposed) return;
     if (sectorIndex !== currentIndex) {
@@ -197,7 +240,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     const count = COSMOS_QUALITY_COUNTS[quality] ?? COSMOS_QUALITY_COUNTS.auto;
     const populationChanged = macroKey !== lastMacro || count !== lastCount;
     if (populationChanged) {
-      descriptors = loadedMacros(sectorIndex, seed, catalogueOptions); samples = descriptors.map(descriptor => sampleGalaxy(descriptor, count));
+      descriptors = loadedMacros(sectorIndex, seed, catalogueOptions); samples = sampleDescriptors(count);
       if (macroKey !== lastMacro) haze.userData.setDescriptors(descriptors);
       lastCell = '';
     }
@@ -239,6 +282,6 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     const volumes = haze.userData.update(hazeFrame);
     stats.batches = home ? 0 : Number(stats.particles > 0) + volumes;
   };
-  group.userData.dispose = () => { if (disposed) return; disposed = true; geometry.dispose(); material.dispose(); haze.userData.dispose(); group.clear(); samples = []; descriptors = []; centers = []; stats.visible = false; stats.batches = 0; };
+  group.userData.dispose = () => { if (disposed) return; disposed = true; geometry.dispose(); material.dispose(); haze.userData.dispose(); group.clear(); samples = []; descriptors = []; centers = []; sampleCache.clear(); stats.sampleCacheBytes = 0; stats.visible = false; stats.batches = 0; };
   return group;
 }

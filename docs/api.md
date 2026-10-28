@@ -215,6 +215,15 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   quality}`. `describeMacro`, `sampleGalaxy` and `loadedMacros` expose descriptions
   and particle samples.
 
+Each cosmos instance may retain up to 8 MiB of exact-count particle templates
+for the built-in `describeMacro` and raw `describeCosmicStructures` providers.
+Custom or wrapped providers remain uncached; exported `sampleGalaxy` always
+returns independent arrays. The byte ceiling counts retained position/color/size
+arrays, not total application RAM or GPU memory. An oversized batch renders
+without caching; `dispose()` releases cached references. Numeric stats expose
+`sampleCacheLimit`, `sampleCacheBytes`, `sampleCacheEntries`, `sampleCacheHits`
+and `sampleGenerations`. First-time sampling and geometry rebuilding still occur.
+
 Galaxy emission uses 16/32/48 bounded disk samples for low/auto/high quality.
 The smooth core is integrated separately with samples concentrated around the
 closest point of the ray. Dust uses mip filtering; analytic spiral arms are
