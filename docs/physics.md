@@ -104,6 +104,10 @@ With positive finite `mu`, the acceleration magnitude before the cutoff is
 `mu / max(distance, radius)²`; legacy descriptors retain the softened profile.
 The outer 35% of influence tapers smoothly to zero, so this finite-range field
 is a local approximation and does not model gravity outside the queried range.
+The field samples each source's center before excluding sources whose absolute
+distance on any one axis already reaches the cutoff. This conservative check
+avoids an unnecessary norm; remaining sources use the same equations and order.
+Influence values share the descriptor cache's revision lifetime.
 
 For large-range spheres, a world may also expose the synchronous
 `gravitySourcesInBounds(sectorIndex, { min: [x,y,z], max: [x,y,z] })` method.

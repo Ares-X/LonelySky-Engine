@@ -10,6 +10,7 @@ const profile = {
   star: { strength: 75, scale: 2.5, influence: 16000 },
   'black-hole': { strength: 180, scale: 3, influence: 18000 },
 };
+const settingsFor = type => Object.hasOwn(profile, type) ? profile[type] : profile.planet;
 const smooth = t => t * t * (3 - 2 * t);
 
 /** Finite-range gravity: explicit mu uses inverse square outside the surface.
@@ -19,7 +20,7 @@ export function bodyGravity(body, position) {
 }
 
 function bodyGravityInto(body, center, position, out) {
-  const settings = Object.hasOwn(profile, body.type) ? profile[body.type] : profile.planet;
+  const settings = settingsFor(body.type);
   const dx = center[0] - position[0], dy = center[1] - position[1], dz = center[2] - position[2];
   const distance = Math.hypot(dx, dy, dz);
   const effectiveRadius = Math.max(80, body.radius * settings.scale);
@@ -62,7 +63,8 @@ export function createGravityField({ world, sector = world && (index => world.se
     const bodies = sector(index).map(body => {
       const descriptor = { sectorIndex: index, ...body, position: [...body.position],
         ...(body.orbit == null ? {} : { orbit: { ...body.orbit } }) };
-      return { body: descriptor, sample: createBodyStateSampler(descriptor) };
+      return { body: descriptor, sample: createBodyStateSampler(descriptor),
+        influence: descriptor.influence ?? settingsFor(descriptor.type).influence };
     });
     cache.set(index, bodies);
     if (cache.size > GRAVITY_CACHE_LIMIT) cache.delete(cache.keys().next().value);
@@ -92,7 +94,7 @@ export function createGravityField({ world, sector = world && (index => world.se
           }
           const descriptor = { ...body, sectorIndex, position: [...body.position],
             ...(body.orbit == null ? {} : { orbit: { ...body.orbit } }) };
-          sources.push({ body: descriptor, sample: createBodyStateSampler(descriptor), offset: zeroOffset });
+          sources.push({ body: descriptor, sample: createBodyStateSampler(descriptor), influence: descriptor.influence, offset: zeroOffset });
           extendedIds.add(body.id);
         }
       }
@@ -111,6 +113,11 @@ export function createGravityField({ world, sector = world && (index => world.se
     for (const entry of sources) {
       entry.sample(timeSeconds, state);
       for (let i = 0; i < 3; i++) state.position[i] += entry.offset[i];
+      // A component outside the cutoff cannot contribute. Keep the exact norm
+      // and force calculation for remaining sources; no squared-distance overflow.
+      if (Math.abs(state.position[0] - position[0]) >= entry.influence
+        || Math.abs(state.position[1] - position[1]) >= entry.influence
+        || Math.abs(state.position[2] - position[2]) >= entry.influence) continue;
       bodyGravityInto(entry.body, state.position, position, pull);
       const strength = Math.hypot(pull[0], pull[1], pull[2]);
       for (let i = 0; i < 3; i++) {
