@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CELL_SIZE, encodeCell, wrapCell } from '../src/coordinates.js';
-import { COSMIC_GRID_CELLS, COSMIC_GRID_SIZE, COSMIC_VIEW_FAR, COSMIC_MAX_STRUCTURES,
+import { COSMIC_GRID_CELLS, COSMIC_GRID_SIZE, COSMIC_VIEW_FAR, COSMIC_MAX_RADIUS, COSMIC_MAX_STRUCTURES,
   describeCosmicStructures, loadedCosmicStructures, cosmicStructureRelativeCenter,
-  cosmicStructureContext, cosmicDrawDistance, cosmicTrueDistance } from '../src/cosmic-structures.js';
+  cosmicStructureContext, wrapCosmicDistance, cosmicDrawDistance, cosmicTrueDistance } from '../src/cosmic-structures.js';
 
 const axes = ['x', 'y', 'z'];
 const seed = 'structure-fixture';
@@ -63,6 +63,36 @@ test('semantic context follows the same parent through cell rebases and the worl
       const relativeCamera = center.map((n, i) => n - (axes[i] === axis ? CELL_SIZE : 0));
       assert.deepEqual(cosmicStructureContext({ sectorIndex: encodeCell(next), cameraPosition: relativeCamera, seed }), context);
       after.forEach((n, i) => assert.ok(Math.abs(n - relativeCamera[i]) < 1e-6));
+    }
+  }
+});
+
+test('150M horizon fits the omitted support bound without enlarging the catalogue', () => {
+  const minimumOmittedSupport = (2.5 - .06) * COSMIC_GRID_SIZE - COSMIC_MAX_RADIUS - CELL_SIZE / 2;
+  assert.equal(minimumOmittedSupport, 157874800);
+  assert.ok(COSMIC_VIEW_FAR < minimumOmittedSupport);
+  // Rotation preserves length. For q = childRadius / parentRadius in [3/42,
+  // 13/20], the orbit cap r - 1.05c and vertical extent .04r remain nested:
+  // hypot(1 - 1.05q, .04) + q <= 1. The squared margin is concave in q,
+  // so its minimum on this interval lies at an endpoint.
+  for (const q of [3000000 / COSMIC_MAX_RADIUS, 13000000 / 20000000]) {
+    assert.ok(.1 * q - .1025 * q * q >= .04 ** 2);
+  }
+});
+
+test('every torus macro corner retains all visible catalogue supports', () => {
+  for (let x = -4; x < 4; x++) for (let y = -4; y < 4; y++) for (let z = -4; z < 4; z++) {
+    const cell = { x: x * COSMIC_GRID_CELLS, y: y * COSMIC_GRID_CELLS, z: z * COSMIC_GRID_CELLS };
+    const loaded = new Set(loadedCosmicStructures(encodeCell(cell), seed).map(d => d.id));
+    for (const dx of [-.5, COSMIC_GRID_CELLS - .5]) for (const dy of [-.5, COSMIC_GRID_CELLS - .5]) for (const dz of [-.5, COSMIC_GRID_CELLS - .5]) {
+      const camera = [dx, dy, dz].map(n => n * CELL_SIZE);
+      for (const descriptor of catalogue) {
+        if (loaded.has(descriptor.id)) continue;
+        const center = cosmicStructureRelativeCenter(descriptor, cell);
+        // Wrap camera-relative distance too: opposite corners can cross the torus.
+        const distance = Math.hypot(...center.map((n, i) => wrapCosmicDistance(n - camera[i]))) - descriptor.radius;
+        assert.ok(distance > COSMIC_VIEW_FAR, `${descriptor.id} is unloaded inside the horizon`);
+      }
     }
   }
 });

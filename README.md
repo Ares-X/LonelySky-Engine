@@ -207,3 +207,23 @@ each frame, and call `group.userData.dispose()` when removing it. The core uses
 the supplied body radius; coronae and beam illustrations are
 non-solid. The application owns world placement, encounters, catalogs and safety.
 These are bounded artistic shaders, not stellar evolution or radiation simulations.
+
+Version 0.10.1 sets the canonical V3 structure support fade interval to
+125–150 million world units (previously 80–100 million). The fixed 5³ streaming neighborhood, catalogue, particle
+counts and quality levels are unchanged. Even at cell and torus seams, omitted
+parent supports remain at least 157.8748 million units away; their children fit
+inside those supports. This changes visibility only, preserving generated
+descriptors, seeds, coordinates and physics. Legacy cosmos fade is unchanged;
+custom/wrapped providers retain per-sample fading instead of canonical support
+weights (with the shared V3 horizon when `structures: true`). These bounds assume
+a rebased camera within half a cell of its sector origin.
+
+`createCosmos().userData.update(frame)` optionally accepts a current Three.js
+`PerspectiveCamera` as `frame.camera`. V3 haze then skips volumes wholly outside
+the four viewport sides, using the world-space ellipsoid support of the actual
+unit-sphere proxy, including ancestor translation, rotation, scale and shear. Physical
+near/far planes are excluded because radial depth compression preserves
+directions rather than true distances. Camera rotation, FOV changes and rebases
+re-evaluate admission without changing optical weights, integration or buffers.
+Omitting the camera, using a non-perspective camera, or using the legacy cosmos
+path retains the previous behavior. The bundled view supplies its actual camera.
