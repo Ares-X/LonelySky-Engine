@@ -189,3 +189,18 @@ plane and verify its supported radius range. Physical body thickness is unchange
 quality caps and hysteresis choose detail; surfaces and atmospheres borrow the
 same level and the view disposes the pool once. `createUniverseView` uses this
 for planetary surfaces while retaining its existing stellar geometry budget.
+
+## Optional regional panorama
+
+The sky and black-hole lens share an optional observational equirectangular map
+supplied as `detailTexture`; ownership remains with the caller. A host can set
+`environment.classicSkyStrength` in [0,1] and `classicSkyFrame`, a column-major
+orthonormal 3×3 matrix mapping world directions to Galactic coordinates. The
+shader converts to the map's equatorial coordinates and wraps the longitude
+gradient at the seam. Missing controls retain the procedural background.
+
+The host owns region selection, continuous position-dependent fading and
+navigation. No application names, addresses or assets are bundled by this API.
+Use the same environment for the sky and the lens. This is a distant directional
+background, with no translational parallax or physical collision surface;
+foreground geometry continues to supply its own depth and motion.
