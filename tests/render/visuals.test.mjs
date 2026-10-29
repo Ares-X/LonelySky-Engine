@@ -268,6 +268,32 @@ test('custom sky uniforms and both views borrow the same optional detail texture
   } finally { sky.userData.dispose(); hole.userData.dispose(); texture.dispose(); }
 });
 
+test('regional panorama shares a detached world frame with lensing and resets outside its region',()=>{
+  const texture=new THREE.Texture(),released=disposalCount(texture);
+  const sky=createDeepSky({detailTexture:texture}),hole=createBlackHole({detailTexture:texture});
+  const frame=new THREE.Matrix3().set(0,0,-1,0,1,0,1,0,0).toArray();
+  const base={ambientTint:[1,1,1],bandNormal:[0,1,0],skyBrightness:.01,bandStrength:0,starDensity:.2};
+  try{
+    sky.userData.update({...base,classicSkyStrength:.75,classicSkyFrame:frame});
+    hole.userData.setEnvironment({...base,classicSkyStrength:.75,classicSkyFrame:frame});
+    for(const object of [sky,hole]){
+      const uniforms=object.children[0].material.uniforms;
+      assert.equal(uniforms.uSkyPanoramaStrength.value,.75);
+      assert.deepEqual(uniforms.uSkyPanoramaFrame.value.toArray(),frame);
+      assert.equal(uniforms.uSeaDetail.value,texture);
+    }
+    frame.fill(0);
+    assert.ok(sky.children[0].material.uniforms.uSkyPanoramaFrame.value.determinant()>0);
+    sky.userData.update(base);hole.userData.setEnvironment(base);
+    for(const object of [sky,hole]){
+      const uniforms=object.children[0].material.uniforms;
+      assert.equal(uniforms.uSkyPanoramaStrength.value,0);
+      assert.deepEqual(uniforms.uSkyPanoramaFrame.value.toArray(),new THREE.Matrix3().toArray());
+    }
+    sky.userData.dispose();hole.userData.dispose();assert.equal(released(),0);
+  }finally{sky.userData.dispose();hole.userData.dispose();texture.dispose();}
+});
+
 test('nebula distance follows transformed volume bounds and remains stable after rebasing', () => {
   const parent = new THREE.Group(), nebula = createNebula(), volume = nebula.children[0];
   parent.position.set(20000, -40000, 60000);

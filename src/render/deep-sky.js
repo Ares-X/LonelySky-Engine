@@ -22,6 +22,8 @@ uniform mat3 uSeaFrame;
 uniform float uSeaPhase,uSeaWidth,uSeaQuiet;
 uniform sampler2D uSeaDetail;
 uniform bool uSeaHasDetail;
+uniform mat3 uSkyPanoramaFrame;
+uniform float uSkyPanoramaStrength;
 uniform vec3 uSeaMorphA,uSeaMorphB,uSeaMorphC,uSeaMorphD,uSeaMorphE,uSeaMorphF;
 uniform vec3 uSeaCool,uSeaWarm,uSeaAccent,uSeaOffset;
 uniform vec4 uSeaShape,uSeaStructure,uSeaDust,uSeaState;
@@ -33,6 +35,17 @@ float skyNoise(vec3 p) {
 }
 // GLSL pow has no defined negative-base domain, including exponent 2.0.
 float seaSquare(float value) { return value*value; }
+vec2 skyCatalogUv(vec3 galactic) {
+  vec3 equatorial=mat3(-.05487556,-.87343709,-.48383502,
+    .49410943,-.44482963,.74698224,-.86766615,-.19807637,.45598378)*galactic;
+  float longitude=dot(equatorial.xy,equatorial.xy)>.0000001?atan(equatorial.y,equatorial.x):0.;
+  return vec2(.5-longitude/6.28318530718,asin(clamp(equatorial.z,-1.,1.))/3.14159265359+.5);
+}
+vec3 skyCatalog(vec3 galactic) {
+  vec2 uv=skyCatalogUv(galactic),uvDx=dFdx(uv),uvDy=dFdy(uv);
+  uvDx.x-=floor(uvDx.x+.5);uvDy.x-=floor(uvDy.x+.5);
+  return textureGrad(uSeaDetail,uv,uvDx,uvDy).rgb;
+}
 
 // Eighteen spatial building blocks share seeded population, erosion and light.
 // Their controls are interpolated in world space, never chosen by a screen or clock.
@@ -52,14 +65,8 @@ vec3 stellarSea(vec3 direction) {
     // Borrow only filtered high-frequency stellar grain. The catalogue's
     // recognizable Galactic panorama must never determine another galaxy's shape.
     vec3 galactic=normalize(d+vec3(uSeaOffset.xy*.013,0.));
-    vec3 equatorial=mat3(-.05487556,-.87343709,-.48383502,
-      .49410943,-.44482963,.74698224,-.86766615,-.19807637,.45598378)*galactic;
-    float longitude=dot(equatorial.xy,equatorial.xy)>.0000001?atan(equatorial.y,equatorial.x):0.;
-    vec2 uv=vec2(.5-longitude/6.28318530718,asin(clamp(equatorial.z,-1.,1.))/3.14159265359+.5);
-    vec2 uvDx=dFdx(uv),uvDy=dFdy(uv);
-    uvDx.x-=floor(uvDx.x+.5);
-    uvDy.x-=floor(uvDy.x+.5);
-    vec3 catalog=textureGrad(uSeaDetail,uv,uvDx,uvDy).rgb;
+    vec2 uv=skyCatalogUv(galactic);
+    vec3 catalog=skyCatalog(galactic);
     float lowFrequency=dot(textureLod(uSeaDetail,uv,5.).rgb,vec3(.2126,.7152,.0722));
     float grainRatio=dot(catalog,vec3(.2126,.7152,.0722))/max(lowFrequency,.003);
     stellarGrain*=mix(.8,1.2,clamp(grainRatio*.5,0.,1.));
@@ -239,7 +246,12 @@ vec3 deepSky(vec3 direction) {
     filteredSpark=mix(${DEEP_SKY_SPARK_FILTER.mean}*probability,spark*population,resolved);
   }
   sky+=vec3(.55,.63,.7)*filteredSpark*.22;
-  return sky+stellarSea(d);
+  sky+=stellarSea(d);
+  // A caller may retain one observational panorama in its own fixed region.
+  // The same world direction is used by the visible sky and lensing shader.
+  if(uSkyPanoramaStrength>0.&&uSeaHasDetail)
+    sky=mix(sky,skyCatalog(normalize(uSkyPanoramaFrame*d)),uSkyPanoramaStrength);
+  return sky;
 }`;
 
 // Defaults retain the public pre-profile starSea descriptor contract. New
@@ -258,7 +270,8 @@ export function deepSkyUniforms({detailTexture = null} = {}) {
     uSkyBrightness:{value:.012},uSkyBandStrength:{value:0},uSkyStarDensity:{value:.12},
     uSeaWeightsA:{value:new THREE.Vector3()},uSeaWeightsB:{value:new THREE.Vector3()},
     uSeaFrame:{value:new THREE.Matrix3()},uSeaPhase:{value:0},uSeaWidth:{value:1},uSeaQuiet:{value:1},
-    uSeaDetail:{value:detailTexture},uSeaHasDetail:{value:Boolean(detailTexture)}};
+    uSeaDetail:{value:detailTexture},uSeaHasDetail:{value:Boolean(detailTexture)},
+    uSkyPanoramaFrame:{value:new THREE.Matrix3()},uSkyPanoramaStrength:{value:0}};
   for (const suffix of MORPH_GROUPS) uniforms[`uSeaMorph${suffix}`] = {value:new THREE.Vector3()};
   for (const [name,values] of Object.entries(SEA_PROFILE)) {
     uniforms[`uSea${name[0].toUpperCase()+name.slice(1)}`] = {value:values.length===4?new THREE.Vector4(...values):new THREE.Vector3(...values)};
@@ -272,6 +285,9 @@ export function setDeepSkyEnvironment(uniforms, environment, quiet = 0) {
   uniforms.uSkyBrightness.value = environment.skyBrightness * (1 - Math.max(0,Math.min(1,quiet))*.35);
   uniforms.uSkyBandStrength.value = environment.bandStrength;
   uniforms.uSkyStarDensity.value = environment.starDensity;
+  uniforms.uSkyPanoramaStrength.value=environment.classicSkyStrength??0;
+  if(environment.classicSkyFrame)uniforms.uSkyPanoramaFrame.value.fromArray(environment.classicSkyFrame);
+  else uniforms.uSkyPanoramaFrame.value.identity();
   const sea = environment.starSea;
   if (sea) uniforms.uSeaWeightsA.value.fromArray(sea.weights);
   else uniforms.uSeaWeightsA.value.set(0,0,0);
