@@ -1,6 +1,7 @@
 import {hashSeed, randomFromSeed} from './random.js';
 
 export const GALACTIC_SPATIAL_MEDIUM_REVISION = 3;
+export const GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION = 32;
 const SOURCE_RESOLUTION = 64, DUST_RESOLUTION = 128;
 const MAX_SOURCE_KERNELS = 32, MAX_DUST_KERNELS = 24;
 const Y = [.2126, .7152, .0722];
@@ -67,7 +68,7 @@ function compileKernel(kernel, bounds, index, dust, seed) {
     component = kernel.component;
     if (!Number.isInteger(component) || component < 0 || component > 2) throw new RangeError('Source component must be 0, 1 or 2');
   }
-  return {center, inverse, lower, upper, component, contrast, weight, volume,
+  return {center, axes, rotation: r, inverse, lower, upper, component, contrast, weight, volume,
     salt: dust ? hashSeed(`${seed}:galactic-spatial-dust-v3:${index}`) : 0};
 }
 function compileOptions(options) {
@@ -96,7 +97,23 @@ function compileOptions(options) {
   if ((dustIntegral > 0 && dustWeight === 0) || !Number.isFinite(dustWeight)) throw new RangeError('Positive dust requires finite positive kernel weight');
   for (const k of sources) k.amplitude = k.weight / weights[k.component] / k.volume;
   for (const k of dusts) k.amplitude = k.weight / dustWeight / k.volume;
-  return {seed: options.seed, source, dust, luminosities, totalLuminosity, colors, extinctionColor, dustIntegral, resolvedFraction, sources, dusts};
+  let sourceBrick = null;
+  if (options.sourceBrick !== undefined && options.sourceBrick !== null) {
+    const b = options.sourceBrick;
+    if (typeof b !== 'object' || Array.isArray(b) || !Number.isInteger(b.kernelIndex) || b.kernelIndex < 0 || b.kernelIndex >= sources.length)
+      throw new RangeError('Source brick requires one existing source kernel index');
+    if (b.profile !== 'coherent-ribbon-v1') throw new RangeError('Unknown source brick profile');
+    const macroSpan = vector(b.macroSpan, 'brick macro span', true), fineSpan = vector(b.fineSpan, 'brick fine span', true);
+    if (macroSpan.some(v => !Number.isFinite(1 / v)) || fineSpan.some(v => !Number.isFinite(1 / v))) throw new RangeError('Source brick noise spans cannot represent finite coordinates');
+    const kernel = sources[b.kernelIndex], n = GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION;
+    const axes = Object.freeze(kernel.axes.map(a => a * n / (n - 2))), rotation = Object.freeze([...kernel.rotation]);
+    const inverse = Object.freeze(kernel.inverse.map(v => v * (n - 2) / n));
+    const pixelVolume = (2 / n) ** 3 * axes[0] * axes[1] * axes[2];
+    if (!(Number.isFinite(pixelVolume) && pixelVolume > 0)) throw new RangeError('Source brick cannot represent a finite voxel volume');
+    sourceBrick = {kernelIndex: b.kernelIndex, profile: b.profile, kernel, center: kernel.center, axes, rotation, inverse,
+      resolution: n, pixelVolume, macroSpan, fineSpan, salt: hashSeed(`${options.seed}:galactic-spatial-source-brick-v1:${b.kernelIndex}`)};
+  }
+  return {seed: options.seed, source, dust, luminosities, totalLuminosity, colors, extinctionColor, dustIntegral, resolvedFraction, sources, dusts, sourceBrick};
 }
 // Project-owned 12-gradient noise; convex interpolation gives |noise| <= 1.
 function gradient(x, y, z, dx, dy, dz, seed) {
@@ -136,19 +153,24 @@ function profile(kernel, x, y, z, dust) {
   }
   return kernel.amplitude * (1 - r2) ** 2 * modulation;
 }
+function kernelCellAverage(kernel, bounds, x, y, z, dust) {
+  const step = 2 / bounds.resolution;
+  let value = 0;
+  for (let sz = 0; sz < 2; sz++) for (let sy = 0; sy < 2; sy++) for (let sx = 0; sx < 2; sx++)
+    value += profile(kernel, bounds.center[0] + ((x + (sx + .5) / 2) * step - 1) * bounds.axes[0],
+      bounds.center[1] + ((y + (sy + .5) / 2) * step - 1) * bounds.axes[1],
+      bounds.center[2] + ((z + (sz + .5) / 2) * step - 1) * bounds.axes[2], dust) / 8;
+  return value;
+}
 function* bakeKernels(kernels, bounds, table, dust, luminosities) {
-  const n = bounds.resolution, step = 2 / n;
+  const n = bounds.resolution;
   for (const kernel of kernels) {
     if (!dust && luminosities[kernel.component] === 0) continue;
     let kernelIntegral = 0;
     for (let z = kernel.lower[2]; z <= kernel.upper[2]; z++) for (let y = kernel.lower[1]; y <= kernel.upper[1]; y++) {
       yield dust ? 'dust-density-row' : 'source-density-row';
       for (let x = kernel.lower[0]; x <= kernel.upper[0]; x++) {
-        let value = 0;
-        for (let sz = 0; sz < 2; sz++) for (let sy = 0; sy < 2; sy++) for (let sx = 0; sx < 2; sx++)
-          value += profile(kernel, bounds.center[0] + ((x + (sx + .5) / 2) * step - 1) * bounds.axes[0],
-            bounds.center[1] + ((y + (sy + .5) / 2) * step - 1) * bounds.axes[1],
-            bounds.center[2] + ((z + (sz + .5) / 2) * step - 1) * bounds.axes[2], dust) / 8;
+        const value = kernelCellAverage(kernel, bounds, x, y, z, dust);
         kernelIntegral += value * bounds.pixelVolume;
         const cell = (z * n + y) * n + x;
         if (dust) table[cell] += value;
@@ -164,20 +186,94 @@ function hatRadius(bounds, x, y, z) {
   const px = c[0] + ((x + .5) * 2 / n - 1) * a[0], py = c[1] + ((y + .5) * 2 / n - 1) * a[1], pz = c[2] + ((z + .5) * 2 / n - 1) * a[2];
   return Math.hypot(Math.abs(px) + 2 * a[0] / n, Math.abs(py) + 2 * a[1] / n, Math.abs(pz) + 2 * a[2] / n);
 }
+// Measure the removed kernel on the original coarse grid, without allocating
+// an old full source field. This is its isolated Float32 coarse contribution.
+function* coarseKernelIntegral(kernel, bounds) {
+  let integral = 0;
+  for (let z = kernel.lower[2]; z <= kernel.upper[2]; z++) for (let y = kernel.lower[1]; y <= kernel.upper[1]; y++) {
+    yield 'source-brick-coarse-share-row';
+    for (let x = kernel.lower[0]; x <= kernel.upper[0]; x++) integral += Math.fround(kernelCellAverage(kernel, bounds, x, y, z, false)) * bounds.pixelVolume;
+  }
+  if (!(integral > 0 && Number.isFinite(integral))) throw new RangeError('Selected source kernel is unresolved on the original coarse grid');
+  return integral;
+}
+function ribbonDensity(b, x, y, z) {
+  const a = b.kernel.inverse, dx = x - b.center[0], dy = y - b.center[1], dz = z - b.center[2];
+  const u = a[0] * dx + a[1] * dy + a[2] * dz, v = a[3] * dx + a[4] * dy + a[5] * dz, w = a[6] * dx + a[7] * dy + a[8] * dz;
+  const r2 = u * u + v * v + w * w;
+  if (r2 >= 1) return 0;
+  const by = .16 * Math.sin(1.4 * Math.PI * u + .6) * (1 - u * u), bz = .28 * Math.sin(Math.PI * u);
+  const cross = ((v - by) / .62) ** 2 + ((w - bz) / .55) ** 2;
+  const macro = noise3(x / b.macroSpan[0] + 3.1, y / b.macroSpan[1] - 4.7, z / b.macroSpan[2] + 7.3, b.salt);
+  const fine = noise3((.8 * x + .6 * z) / b.fineSpan[0] - 2.3, y / b.fineSpan[1] + 6.1, (-.6 * x + .8 * z) / b.fineSpan[2] - 5.9, b.salt + 43);
+  const edge = 1 - .25 * smooth(.15, .85, .5 + 2.2 * macro), q2 = cross / (edge * edge);
+  if (q2 >= 1) return 0;
+  const longitudinal = 1 - smooth(.65, 1, Math.abs(u)), finite = smooth(0, .18, 1 - r2);
+  const hierarchy = smooth(.12, .82, .5 + 2.4 * macro) * (.25 + .75 * smooth(.18, .82, .5 + 2.2 * fine));
+  return longitudinal * finite * (1 - q2) ** 2 * (.18 + .82 * hierarchy);
+}
+function* bakeSourceBrick(b, target) {
+  yield 'source-brick-allocation';
+  const n = b.resolution, texels = new Float32Array(n ** 3), r = b.rotation;
+  let rawIntegral = 0;
+  if (target > 0) for (let z = 1; z < n - 1; z++) for (let y = 1; y < n - 1; y++) {
+    yield 'source-brick-density-row';
+    for (let x = 1; x < n - 1; x++) {
+      let value = 0;
+      for (let sz = 0; sz < 2; sz++) for (let sy = 0; sy < 2; sy++) for (let sx = 0; sx < 2; sx++) {
+        const lx = ((x + (sx + .5) / 2) * 2 / n - 1) * b.axes[0], ly = ((y + (sy + .5) / 2) * 2 / n - 1) * b.axes[1], lz = ((z + (sz + .5) / 2) * 2 / n - 1) * b.axes[2];
+        value += ribbonDensity(b, b.center[0] + r[0] * lx + r[1] * ly + r[2] * lz,
+          b.center[1] + r[3] * lx + r[4] * ly + r[5] * lz, b.center[2] + r[6] * lx + r[7] * ly + r[8] * lz) / 8;
+      }
+      const i = (z * n + y) * n + x; texels[i] = value; rawIntegral += texels[i] * b.pixelVolume;
+    }
+  }
+  if (target > 0 && !(rawIntegral > 0 && Number.isFinite(rawIntegral))) throw new RangeError('Source ribbon is unresolved on the local 32-cubed grid');
+  const normalization = target === 0 ? 0 : target / rawIntegral;
+  yield 'source-brick-cdf-allocation';
+  const cdf = new Float64Array(n ** 3); let integral = 0, supportRadius = 0, verticalBound = 0;
+  for (let z = 0; z < n; z++) for (let y = 0; y < n; y++) {
+    yield 'source-brick-normalize-cdf-row';
+    for (let x = 0; x < n; x++) {
+      const i = (z * n + y) * n + x; texels[i] *= normalization;
+      if (!(Number.isFinite(texels[i]) && texels[i] >= 0)) throw new RangeError('Source brick exceeds Float32 density range');
+      integral += texels[i] * b.pixelVolume; cdf[i] = integral;
+      if (texels[i] === 0) continue;
+      // Maximum norm on a rotated tent box is attained at one of its corners.
+      for (let sz = -1; sz <= 1; sz += 2) for (let sy = -1; sy <= 1; sy += 2) for (let sx = -1; sx <= 1; sx += 2) {
+        const lx = ((x + .5 + sx) * 2 / n - 1) * b.axes[0], ly = ((y + .5 + sy) * 2 / n - 1) * b.axes[1], lz = ((z + .5 + sz) * 2 / n - 1) * b.axes[2];
+        const px = b.center[0] + r[0] * lx + r[1] * ly + r[2] * lz, py = b.center[1] + r[3] * lx + r[4] * ly + r[5] * lz, pz = b.center[2] + r[6] * lx + r[7] * ly + r[8] * lz;
+        supportRadius = Math.max(supportRadius, Math.hypot(px, py, pz)); verticalBound = Math.max(verticalBound, Math.abs(py));
+      }
+    }
+  }
+  if (target > 0 && !(integral > 0 && Number.isFinite(integral))) throw new RangeError('Source brick luminosity is outside Float32 range');
+  return {published: Object.freeze({component: b.kernel.component, resolution: n, texels, center: b.center, axes: b.axes,
+    inverse: b.inverse, rotation: b.rotation, pixelVolume: b.pixelVolume, integral}), cdf, rawIntegral, normalization, supportRadius, verticalBound};
+}
 function* bakeSpatialMedium(config) {
   const {source, dust, luminosities} = config;
   yield 'source-allocation';
   const sourceTexels = new Float32Array(SOURCE_RESOLUTION ** 3 * 4);
-  yield* bakeKernels(config.sources, source, sourceTexels, false, luminosities);
+  const brickConfig = config.sourceBrick;
+  const baseSources = brickConfig ? config.sources.filter((_, i) => i !== brickConfig.kernelIndex) : config.sources;
+  yield* bakeKernels(baseSources, source, sourceTexels, false, luminosities);
   const rawIntegrals = [0, 0, 0];
   for (let z = 0; z < SOURCE_RESOLUTION; z++) {
     yield 'source-integrals';
     for (let cell = z * SOURCE_RESOLUTION ** 2; cell < (z + 1) * SOURCE_RESOLUTION ** 2; cell++)
       for (let p = 0; p < 3; p++) rawIntegrals[p] += sourceTexels[cell * 4 + p] * source.pixelVolume;
   }
+  const baseTargets = [...luminosities]; let removedCoarseIntegral = 0, brickTarget = 0;
+  if (brickConfig && luminosities[brickConfig.kernel.component] > 0) {
+    removedCoarseIntegral = yield* coarseKernelIntegral(brickConfig.kernel, source);
+    const c = brickConfig.kernel.component;
+    brickTarget = luminosities[c] * (removedCoarseIntegral / (removedCoarseIntegral + rawIntegrals[c]));
+    baseTargets[c] = luminosities[c] - brickTarget;
+  }
   const scales = rawIntegrals.map((v, p) => {
-    if (luminosities[p] > 0 && !(v > 0 && Number.isFinite(v))) throw new RangeError('Positive source component is unresolved on the fixed 64-cubed grid');
-    return luminosities[p] === 0 ? 0 : luminosities[p] / v;
+    if (baseTargets[p] > 0 && !(v > 0 && Number.isFinite(v))) throw new RangeError('Positive source component is unresolved on the fixed 64-cubed grid');
+    return baseTargets[p] === 0 ? 0 : baseTargets[p] / v;
   });
   yield 'source-cdf-allocation';
   const cdfs = [new Float64Array(SOURCE_RESOLUTION ** 3), new Float64Array(SOURCE_RESOLUTION ** 3), new Float64Array(SOURCE_RESOLUTION ** 3)];
@@ -197,8 +293,10 @@ function* bakeSpatialMedium(config) {
       }
     }
   }
-  for (let p = 0; p < 3; p++) if (luminosities[p] > 0 && !(integrals[p] > 0 && Number.isFinite(integrals[p])))
+  for (let p = 0; p < 3; p++) if (baseTargets[p] > 0 && !(integrals[p] > 0 && Number.isFinite(integrals[p])))
     throw new RangeError('Source luminosity is outside the representable Float32 field range');
+  const brick = brickConfig ? yield* bakeSourceBrick(brickConfig, brickTarget) : null;
+  if (brick) {supportRadius = Math.max(supportRadius, brick.supportRadius); stellarVerticalBound = Math.max(stellarVerticalBound, brick.verticalBound);}
   yield 'dust-allocation';
   const dustTexels = new Float32Array(DUST_RESOLUTION ** 3);
   if (config.dustIntegral > 0) yield* bakeKernels(config.dusts, dust, dustTexels, true, luminosities);
@@ -224,9 +322,12 @@ function* bakeSpatialMedium(config) {
   }
   if (config.dustIntegral > 0 && !(dustCloudIntegral > 0 && Number.isFinite(dustCloudIntegral)))
     throw new RangeError('Dust integral is outside the representable Float32 field range');
-  const componentIntegrals = Object.freeze(integrals);
+  const baseIntegrals = Object.freeze(integrals);
+  const combinedIntegrals = brick ? [...baseIntegrals] : integrals;
+  if (brick) combinedIntegrals[brick.published.component] += brick.published.integral;
+  const componentIntegrals = Object.freeze(combinedIntegrals);
   const medium = Object.freeze({revision: GALACTIC_SPATIAL_MEDIUM_REVISION, seed: config.seed,
-    sourceVolumeResolution: SOURCE_RESOLUTION, sourceVolumeTexels: sourceTexels, sourceVolumeCenter: source.center, sourceVolumeAxes: source.axes,
+    sourceBrick: brick ? brick.published : null, sourceVolumeResolution: SOURCE_RESOLUTION, sourceVolumeTexels: sourceTexels, sourceVolumeCenter: source.center, sourceVolumeAxes: source.axes,
     dustVolumeResolution: DUST_RESOLUTION, dustVolumeTexels: dustTexels, dustCloudCenter: dust.center, dustCloudAxes: dust.axes,
     sourceComponentIntegrals: componentIntegrals, sourceVolumePixelVolume: source.pixelVolume, dustCloudPixelVolume: dust.pixelVolume,
     dustCloudIntegral, dustIntegral: config.dustIntegral,
@@ -238,12 +339,16 @@ function* bakeSpatialMedium(config) {
     oldDiskLuminosity: luminosities[0], youngDiskLuminosity: luminosities[1], bulgeLuminosity: luminosities[2],
     oldStellarColor: config.colors[0], youngStellarColor: config.colors[1], bulgeColor: config.colors[2], extinctionColor: config.extinctionColor, resolvedFraction: config.resolvedFraction,
     spatialSynthesis: Object.freeze({kind: 'finite-artistic-ellipsoid-mixture', sourceKernelCount: config.sources.length, dustKernelCount: config.dusts.length,
+      sourceBrick: brick ? Object.freeze({kernelIndex: brickConfig.kernelIndex, profile: brickConfig.profile, macroSpan: brickConfig.macroSpan, fineSpan: brickConfig.fineSpan,
+        coarseIsolatedIntegral: removedCoarseIntegral, remainingRawIntegral: rawIntegrals[brick.published.component], assignedLuminosity: brickTarget,
+        baseComponentIntegrals: baseIntegrals, rawIntegral: brick.rawIntegral, normalization: brick.normalization,
+        semantics: 'Seeded artistic ribbon replaces one coarse kernel; J(x), point positions and CDF change'}) : null,
       sourceRawIntegrals: Object.freeze(rawIntegrals), sourceNormalizations: Object.freeze(scales), dustRawIntegral: rawDustIntegral, dustNormalization: dustScale,
       sourceQuadrature: '2x2x2 midpoint cell-volume average', dustQuadrature: '2x2x2 midpoint cell-volume average',
       reconstruction: 'Trilinear tents; finite-grid approximation, not pointwise analytic-profile equivalence',
       ownership: 'Published typed arrays are owned read-only by this medium; no caller mutation',
       semantics: 'Artist luminosity/extinction density in body-radius coordinates, not matter, fluid, orbit or N-body physics'})});
-  fields.set(medium, {cdfs, integrals: componentIntegrals, total: integrals[0] + integrals[1] + integrals[2]});
+  fields.set(medium, {cdfs, baseIntegrals, brickCdf: brick ? brick.cdf : null, integrals: componentIntegrals, total: componentIntegrals[0] + componentIntegrals[1] + componentIntegrals[2]});
   return medium;
 }
 
@@ -287,6 +392,9 @@ export function createSpatialGalacticMedium(options) {
 
 function scalarVolume(table, n, center, axes, x, y, z) {
   const bx = (x - center[0]) / axes[0], by = (y - center[1]) / axes[1], bz = (z - center[2]) / axes[2];
+  return normalizedScalarVolume(table, n, bx, by, bz);
+}
+function normalizedScalarVolume(table, n, bx, by, bz) {
   if (Math.abs(bx) >= 1 || Math.abs(by) >= 1 || Math.abs(bz) >= 1) return 0;
   const u = (bx + 1) * n * .5 - .5, v = (by + 1) * n * .5 - .5, w = (bz + 1) * n * .5 - .5;
   const ix = Math.floor(u), iy = Math.floor(v), iz = Math.floor(w), fx = u - ix, fy = v - iy, fz = w - iz; let value = 0;
@@ -313,6 +421,13 @@ export function sampleSpatialGalacticMedium(medium, position, output) {
       for (let c = 0; c < 3; c++) emission[c] += weight * (table[i] * medium.oldStellarColor[c] + table[i + 1] * medium.youngStellarColor[c] + table[i + 2] * medium.bulgeColor[c]);
     }
   }
+  const brick = medium.sourceBrick;
+  if (brick && brick.integral > 0) {
+    const a = brick.inverse, x = position[0] - brick.center[0], y = position[1] - brick.center[1], z = position[2] - brick.center[2];
+    const density = normalizedScalarVolume(brick.texels, brick.resolution, a[0] * x + a[1] * y + a[2] * z, a[3] * x + a[4] * y + a[5] * z, a[6] * x + a[7] * y + a[8] * z);
+    const color = brick.component === 0 ? medium.oldStellarColor : brick.component === 1 ? medium.youngStellarColor : medium.bulgeColor;
+    for (let c = 0; c < 3; c++) emission[c] += density * color[c];
+  }
   const dust = scalarVolume(medium.dustVolumeTexels, medium.dustVolumeResolution, medium.dustCloudCenter, medium.dustCloudAxes, position[0], position[1], position[2]);
   for (let c = 0; c < 3; c++) extinction[c] = dust * medium.extinctionColor[c];
   return output;
@@ -328,13 +443,25 @@ export function sampleSpatialGalacticStars(medium, seed, count) {
   for (let star = 0; star < count; star++) {
     const choice = random() * field.total;
     const component = choice < field.integrals[0] ? 0 : choice < field.integrals[0] + field.integrals[1] ? 1 : 2;
-    const cdf = field.cdfs[component], target = random() * field.integrals[component];
+    let cdf = field.cdfs[component], target = random() * field.integrals[component];
+    const brick = medium.sourceBrick, inBrick = brick && brick.component === component && target >= field.baseIntegrals[component];
+    if (inBrick) {cdf = field.brickCdf; target -= field.baseIntegrals[component];}
     let lower = 0, upper = cdf.length - 1;
     while (lower < upper) {const middle = (lower + upper) >>> 1; if (cdf[middle] <= target) lower = middle + 1; else upper = middle;}
     const cell = lower, index = star * 3;
-    positions[index] = medium.sourceVolumeCenter[0] + (((cell % n) + .5 + random() - random()) * 2 / n - 1) * medium.sourceVolumeAxes[0];
-    positions[index + 1] = medium.sourceVolumeCenter[1] + (((Math.floor(cell / n) % n) + .5 + random() - random()) * 2 / n - 1) * medium.sourceVolumeAxes[1];
-    positions[index + 2] = medium.sourceVolumeCenter[2] + ((Math.floor(cell / (n * n)) + .5 + random() - random()) * 2 / n - 1) * medium.sourceVolumeAxes[2];
+    if (inBrick) {
+      const size = brick.resolution, r = brick.rotation;
+      const x = ((cell % size + .5 + random() - random()) * 2 / size - 1) * brick.axes[0];
+      const y = ((Math.floor(cell / size) % size + .5 + random() - random()) * 2 / size - 1) * brick.axes[1];
+      const z = ((Math.floor(cell / (size * size)) + .5 + random() - random()) * 2 / size - 1) * brick.axes[2];
+      positions[index] = brick.center[0] + r[0] * x + r[1] * y + r[2] * z;
+      positions[index + 1] = brick.center[1] + r[3] * x + r[4] * y + r[5] * z;
+      positions[index + 2] = brick.center[2] + r[6] * x + r[7] * y + r[8] * z;
+    } else {
+      positions[index] = medium.sourceVolumeCenter[0] + (((cell % n) + .5 + random() - random()) * 2 / n - 1) * medium.sourceVolumeAxes[0];
+      positions[index + 1] = medium.sourceVolumeCenter[1] + (((Math.floor(cell / n) % n) + .5 + random() - random()) * 2 / n - 1) * medium.sourceVolumeAxes[1];
+      positions[index + 2] = medium.sourceVolumeCenter[2] + ((Math.floor(cell / (n * n)) + .5 + random() - random()) * 2 / n - 1) * medium.sourceVolumeAxes[2];
+    }
     componentIndices[star] = component;
     const color = component === 0 ? medium.oldStellarColor : component === 1 ? medium.youngStellarColor : medium.bulgeColor;
     for (let c = 0; c < 3; c++) colors[index + c] = color[c];

@@ -154,6 +154,31 @@ matrix. Frustum consumers must pass the camera coordinate system and reversed
 flag to `setFromProjectionMatrix`. This preserves ordinary-depth compatibility;
 it does not fix the ordinary path's far-distance precision on unsupported GPUs.
 
+## Finite local source detail
+
+`createSpatialGalacticMedium` optionally accepts one `sourceBrick`:
+`{kernelIndex, profile: 'coherent-ribbon-v1', macroSpan: [x,y,z],
+fineSpan: [x,y,z]}`. Spans are positive lengths in body-radius coordinates.
+The fixed 32-cubed scalar brick follows that source kernel's center and rotation;
+the 64-cubed source base and 128-cubed dust grid retain their resolutions.
+This is a seeded artistic ribbon, not a physical stellar or gas simulation.
+
+The selected kernel is excluded before baking the base. Its original isolated
+coarse integral and the remaining family's actual coarse integral divide that
+family's luminosity between base and brick. CPU queries, point CDF/tent draws and
+the renderer consume their nonnegative sum. Changing this representation changes
+point positions; omitting the option retains the previous field and prefixes.
+The published `sourceBrick` owns its read-only Float32 texels, frame and integral;
+`sourceComponentIntegrals` includes both base and brick.
+
+The renderer owns one additional R16F texture (64 KiB of pixel data), disposed
+with the mesh. Half-float upload is a measured approximation to the CPU field.
+Local grid faces join the existing ordered ray traversal, including segments
+with no dust; the source is not a second light pass. Creation yields at actual
+rows, cancellation releases work in progress, and quality changes reuse fields.
+This bounded storage and finite integration do not establish GPU performance or
+visual acceptance on a host device.
+
 ## Physical cosmic surfaces
 
 The optional Three.js entry exports `createCosmicBodies({surfaceTexture,

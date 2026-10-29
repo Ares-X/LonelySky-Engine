@@ -98,3 +98,38 @@ test('spatial source families share the actual RGBA field and own only their rea
   const counts=resources.map(()=>0);resources.forEach((resource,i)=>resource.addEventListener('dispose',()=>counts[i]++));
   mesh.userData.dispose();mesh.userData.dispose();assert.deepEqual(counts,[1,1,1,1,1,1,1]);
 });
+
+test('an oriented local source transfers its family budget once and owns one stable upload',()=>{
+  const d=descriptor();
+  d.medium=createSpatialGalacticMedium({seed:'local-source-upload',sourceCenter:[0,0,0],sourceAxes:[1,.4,1],
+    dustCenter:[0,0,0],dustAxes:[1,.4,1],luminosities:[.01,.007,.005],
+    colors:[[1,.8,.6],[.6,.8,1],[1,.9,.7]],dustIntegral:0,extinctionColor:[.6,1,1.5],resolvedFraction:.005,
+    sourceKernels:[0,1,2].map(component=>({component,weight:1,center:[(component-1)*.25,(component-1)*.04,0],
+      axes:[.18,.08,.16],rotation:[.2,.5,-.3]})),dustKernels:[],
+    sourceBrick:{kernelIndex:1,profile:'coherent-ribbon-v1',macroSpan:[.036,.02,.036],fineSpan:[.012,.008,.012]}});
+  const mesh=createGalacticMediumVolume(d),stars=mesh.children[0],u=mesh.material.uniforms,brick=d.medium.sourceBrick;
+  try{
+    assert.equal(mesh.material.defines.GALACTIC_LOCAL_SOURCE,1);
+    assert.equal(stars.material.uniforms.localSourceTable,u.localSourceTable);
+    const texture=u.localSourceTable.value,pixels=texture.image.data,version=texture.version;
+    assert.equal(texture.format,THREE.RedFormat);assert.equal(pixels.byteLength,32**3*2);
+    assert.equal(u.localSourceResolution.value,32);
+    let uploaded=0,baseYoung=0;
+    for(const value of pixels)uploaded+=THREE.DataUtils.fromHalfFloat(value)*brick.pixelVolume;
+    for(let i=1;i<u.stellarVolumeTable.value.image.data.length;i+=4)baseYoung+=u.stellarVolumeTable.value.image.data[i];
+    assert.equal(baseYoung,0,'the only young kernel is absent from the coarse field');
+    assert.ok(Math.abs(uploaded/d.medium.sourceComponentIntegrals[1]-1)<.001,'one local upload contains the whole young budget');
+    const local=new THREE.Vector3(.14,-.08,.23),rotation=new THREE.Matrix3().set(...brick.rotation);
+    const body=local.clone().multiply(new THREE.Vector3(...brick.axes)).applyMatrix3(rotation).add(u.localSourceCenter.value);
+    body.sub(u.localSourceCenter.value).applyMatrix3(u.localSourceInverse.value);
+    assert.ok(body.distanceTo(local)<1e-12,'row-major input is uploaded as the same body-to-brick transform');
+    for(const quality of ['high','low','high']){
+      mesh.userData.setQuality(quality,1080,1);
+      assert.equal(u.localSourceTable.value,texture);assert.equal(texture.image.data,pixels);assert.equal(texture.version,version);
+    }
+    const resources=[mesh.geometry,mesh.material,stars.geometry,stars.material,u.stellarVolumeTable.value,
+      u.dustVolumeTable.value,texture,stars.material.uniforms.stellarPsfTable.value];
+    const counts=resources.map(()=>0);resources.forEach((resource,i)=>resource.addEventListener('dispose',()=>counts[i]++));
+    mesh.userData.dispose();mesh.userData.dispose();assert.deepEqual(counts,[1,1,1,1,1,1,1,1]);
+  }finally{mesh.userData.dispose();}
+});

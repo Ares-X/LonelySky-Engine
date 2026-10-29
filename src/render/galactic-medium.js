@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import {COSMIC_DEPTH_GLSL} from '../cosmic-structures.js';
 import {sampleGalacticStars, GALACTIC_MEDIUM_REVISION, GALACTIC_MEDIUM_MAX_STARS, GALACTIC_MEDIUM_STELLAR_VOLUME_RESOLUTION, GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION} from '../galactic-medium.js';
-import {GALACTIC_SPATIAL_MEDIUM_REVISION} from '../galactic-spatial-medium.js';
+import {GALACTIC_SPATIAL_MEDIUM_REVISION, GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION} from '../galactic-spatial-medium.js';
 import {COSMIC_SCENE_DEPTH_GLSL} from './cosmic-scene-depth.js';
 import {STELLAR_PSF_HALO_SIGMA_CSS} from './stellar-psf.js';
 import {createStellarPsfTexture, STELLAR_PSF_TEXTURE_GLSL} from './stellar-psf-texture.js';
@@ -13,6 +13,12 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
   uniform sampler2D verticalGeometryTable;
   precision highp sampler3D;
   uniform sampler3D stellarVolumeTable,dustVolumeTable;
+  #ifdef GALACTIC_LOCAL_SOURCE
+  uniform sampler3D localSourceTable;
+  uniform mat3 localSourceInverse;
+  uniform vec3 localSourceCenter,localSourceColor;
+  uniform float localSourceResolution;
+  #endif
   uniform vec2 mediumHeights;
   uniform float youngStellarHeight;
   uniform vec3 oldStellarColor,youngStellarColor;
@@ -41,6 +47,13 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
     if(all(lessThan(abs(d),vec3(1.))))return texture(dustVolumeTable,d*.5+.5).r;
     return 0.;
   }
+  #ifdef GALACTIC_LOCAL_SOURCE
+  float galacticLocalSourceDensity(vec3 p){
+    vec3 q=localSourceInverse*(p-localSourceCenter);
+    if(all(lessThan(abs(q),vec3(1.))))return texture(localSourceTable,q*.5+.5).r;
+    return 0.;
+  }
+  #endif
   void galacticMedium(vec3 p,float cloudDensity,out vec3 emission,out vec3 extinction){
     galacticPlanarMedium(p,emission,extinction);
     vec3 b=(p-bulgeCenter)/bulgeAxes;
@@ -52,13 +65,14 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
       emission+=bulgeColor*texture(stellarVolumeTable,b*.5+.5).r;
       #endif
     }
+    #ifdef GALACTIC_LOCAL_SOURCE
+    emission+=localSourceColor*galacticLocalSourceDensity(p);
+    #endif
     extinction+=extinctionColor*cloudDensity;
   }
-  bool galacticCloudInterval(vec3 origin,vec3 direction,float minimumDistance,float maximumDistance,out vec2 interval){
+  bool galacticFieldInterval(vec3 qOrigin,vec3 qDirection,float resolution,float minimumDistance,float maximumDistance,out vec2 interval){
     interval=vec2(0.);
-    if(hasDustCloud<.5)return false;
-    vec3 qOrigin=(origin-dustCloudCenter)/dustCloudAxes,qDirection=direction/dustCloudAxes;
-    float entry=minimumDistance,exitDistance=maximumDistance,edge=1.-1./dustVolumeResolution;
+    float entry=minimumDistance,exitDistance=maximumDistance,edge=1.-1./resolution;
     for(int axis=0;axis<3;axis++){
       if(abs(qDirection[axis])>.00000001){
         vec2 t=(vec2(-edge,edge)-qOrigin[axis])/qDirection[axis];
@@ -68,10 +82,9 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
     interval=vec2(entry,exitDistance);
     return exitDistance>entry;
   }
-  void galacticCloudTraversal(vec3 origin,vec3 direction,float entry,out vec3 nextT,out vec3 deltaT){
-    vec3 qOrigin=(origin-dustCloudCenter)/dustCloudAxes,qDirection=direction/dustCloudAxes;
-    vec3 gridOrigin=(qOrigin*.5+.5)*dustVolumeResolution-.5;
-    vec3 gridDirection=qDirection*.5*dustVolumeResolution;
+  void galacticFieldTraversal(vec3 qOrigin,vec3 qDirection,float resolution,float entry,out vec3 nextT,out vec3 deltaT){
+    vec3 gridOrigin=(qOrigin*.5+.5)*resolution-.5;
+    vec3 gridDirection=qDirection*.5*resolution;
     vec3 cell=floor(gridOrigin+gridDirection*entry);
     nextT=vec3(1.e20);deltaT=vec3(1.e20);
     for(int axis=0;axis<3;axis++)if(abs(gridDirection[axis])>.00000001){
@@ -79,6 +92,14 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
       nextT[axis]=(boundary-gridOrigin[axis])/gridDirection[axis];
       deltaT[axis]=abs(1./gridDirection[axis]);
     }
+  }
+  bool galacticCloudInterval(vec3 origin,vec3 direction,float minimumDistance,float maximumDistance,out vec2 interval){
+    interval=vec2(0.);
+    if(hasDustCloud<.5)return false;
+    return galacticFieldInterval((origin-dustCloudCenter)/dustCloudAxes,direction/dustCloudAxes,dustVolumeResolution,minimumDistance,maximumDistance,interval);
+  }
+  void galacticCloudTraversal(vec3 origin,vec3 direction,float entry,out vec3 nextT,out vec3 deltaT){
+    galacticFieldTraversal((origin-dustCloudCenter)/dustCloudAxes,direction/dustCloudAxes,dustVolumeResolution,entry,nextT,deltaT);
   }
   // A trilinear density restricted to a ray is cubic within each grid cell.
   // Two Gauss nodes integrate its optical depth exactly, before exp(-tau).
@@ -184,18 +205,38 @@ export const GALACTIC_VOLUME_FRAGMENT_GLSL = /* glsl */`
     bool crossesCloud=galacticCloudInterval(localCamera,direction,entry,exitDistance,cloudInterval);
     vec3 nextCloud=vec3(1.e20),deltaCloud=vec3(1.e20);
     if(crossesCloud)galacticCloudTraversal(localCamera,direction,cloudInterval.x,nextCloud,deltaCloud);
+    #ifdef GALACTIC_LOCAL_SOURCE
+    vec3 sourceOrigin=localSourceInverse*(localCamera-localSourceCenter),sourceDirection=localSourceInverse*direction;
+    vec2 sourceInterval;
+    bool crossesSource=galacticFieldInterval(sourceOrigin,sourceDirection,localSourceResolution,entry,exitDistance,sourceInterval);
+    vec3 nextSource=vec3(1.e20),deltaSource=vec3(1.e20);
+    if(crossesSource)galacticFieldTraversal(sourceOrigin,sourceDirection,localSourceResolution,sourceInterval.x,nextSource,deltaSource);
+    #endif
     float t=entry,pendingStart=entry;int bin=0;
     // Partition the original quality bins at cloud grid faces. Outside G the
     // original midpoint rule remains; inside each trilinear cell Gauss2 gives
     // its exact optical depth. Ordered homogeneous source pieces still have
     // finite emission/transfer error, rather than an exact transport claim.
-    // A ray crosses at most 3*(N-1)+1 G cells, plus 96 base bins and two edges.
-    for(int i=0;i<${96 + 3 * GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION + 12};i++){
+    // A local source is part of this same transfer, never another light pass.
+    // Its grid faces must survive even empty-G merging, or a narrow coherent
+    // source can fall between the original quality-bin midpoints.
+    #ifdef GALACTIC_LOCAL_SOURCE
+    const int traversalLimit=${96 + 3 * GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION + 12 + 3 * GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION + 4};
+    #else
+    const int traversalLimit=${96 + 3 * GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION + 12};
+    #endif
+    for(int i=0;i<traversalLimit;i++){
       float baseEnd=entry+float(bin+1)*stride;
       float endT=min(exitDistance,baseEnd);
       bool inCloud=crossesCloud&&t>=cloudInterval.x&&t<cloudInterval.y;
       if(crossesCloud&&t<cloudInterval.x)endT=min(endT,cloudInterval.x);
       if(inCloud)endT=min(endT,min(cloudInterval.y,min(nextCloud.x,min(nextCloud.y,nextCloud.z))));
+      bool inSource=false;
+      #ifdef GALACTIC_LOCAL_SOURCE
+      inSource=crossesSource&&t>=sourceInterval.x&&t<sourceInterval.y;
+      if(crossesSource&&t<sourceInterval.x)endT=min(endT,sourceInterval.x);
+      if(inSource)endT=min(endT,min(sourceInterval.y,min(nextSource.x,min(nextSource.y,nextSource.z))));
+      #endif
       endT=max(t,endT);
       float length=endT-t;
       if(length>0.){
@@ -209,7 +250,7 @@ export const GALACTIC_VOLUME_FRAGMENT_GLSL = /* glsl */`
         // between two strictly zero interior nodes. Merge only these empty-G
         // intervals within the original quality bin; never threshold a cloud.
         // J and planar kappa retain finite midpoint error in each merged run.
-        if(nearCloud>0.||farCloud>0.){
+        if(inSource||nearCloud>0.||farCloud>0.){
           if(t>pendingStart)galacticTransferPiece(localCamera+direction*((pendingStart+t)*.5),0.,t-pendingStart,radiance,transmittance);
           galacticTransferPiece(localCamera+direction*nearT,nearCloud,length*.5,radiance,transmittance);
           galacticTransferPiece(localCamera+direction*farT,farCloud,length*.5,radiance,transmittance);
@@ -223,6 +264,9 @@ export const GALACTIC_VOLUME_FRAGMENT_GLSL = /* glsl */`
       if(endT>=exitDistance)break;
       if(endT>=baseEnd)bin++;
       if(inCloud)for(int axis=0;axis<3;axis++)if(nextCloud[axis]<=endT)nextCloud[axis]+=deltaCloud[axis];
+      #ifdef GALACTIC_LOCAL_SOURCE
+      if(inSource)for(int axis=0;axis<3;axis++)if(nextSource[axis]<=endT)nextSource[axis]+=deltaSource[axis];
+      #endif
       t=endT;
     }
     float visibility=structureVisibility*uVisibility*uDensity;
@@ -332,6 +376,7 @@ export function createGalacticMediumVolume(descriptor) {
   const sourceTexels=spatial?medium.sourceVolumeTexels:medium.stellarVolumeTexels;
   const sourceCenter=spatial?medium.sourceVolumeCenter:medium.bulgeCenter;
   const sourceAxes=spatial?medium.sourceVolumeAxes:medium.bulgeAxes;
+  const sourceBrick=spatial?medium.sourceBrick:null;
   if(sourceResolution!==GALACTIC_MEDIUM_STELLAR_VOLUME_RESOLUTION||!(sourceTexels instanceof Float32Array)||sourceTexels.length!==sourceResolution**3*(spatial?4:1))
     throw new TypeError('Galactic volume requires a compiled stellar population');
   if(medium.dustVolumeResolution!==GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION||!(medium.dustVolumeTexels instanceof Float32Array)||medium.dustVolumeTexels.length!==medium.dustVolumeResolution**3)
@@ -340,6 +385,7 @@ export function createGalacticMediumVolume(descriptor) {
   const verticalGeometry=spatial?null:fieldTexture(medium.verticalGeometry,medium.resolution,THREE.RGBAFormat,true);
   const stellarVolumeTable=fieldTexture(sourceTexels,sourceResolution,spatial?THREE.RGBAFormat:THREE.RedFormat,false,true);
   const dustVolumeTable=fieldTexture(medium.dustVolumeTexels,medium.dustVolumeResolution,THREE.RedFormat,false,true);
+  const localSourceTable=sourceBrick?fieldTexture(sourceBrick.texels,sourceBrick.resolution,THREE.RedFormat,false,true):null;
   let uploadedDustBound=medium.dustVerticalBound,uploadedStellarBound=medium.stellarVerticalBound,verticalExpansion=0;
   let uploadedDiskDustBound=0;
   if(!spatial){
@@ -373,6 +419,10 @@ export function createGalacticMediumVolume(descriptor) {
   if(!spatial)Object.assign(mediumUniforms,{mediumTable:{value:table},verticalGeometryTable:{value:verticalGeometry},
     mediumHeights:{value:new THREE.Vector2(medium.stellarHeight,medium.dustHeight)},youngStellarHeight:{value:medium.youngStellarHeight},
     diskDustVerticalBound:{value:uploadedDiskDustBound},diskStellarVerticalBound:{value:uploadedStellarBound}});
+  if(sourceBrick)Object.assign(mediumUniforms,{localSourceTable:{value:localSourceTable},
+    localSourceCenter:{value:new THREE.Vector3(...sourceBrick.center)},localSourceInverse:{value:new THREE.Matrix3().set(...sourceBrick.inverse)},
+    localSourceResolution:{value:sourceBrick.resolution},
+    localSourceColor:{value:new THREE.Color(...[medium.oldStellarColor,medium.youngStellarColor,medium.bulgeColor][sourceBrick.component])}});
   const shared={localCamera:{value:new THREE.Vector3()},radius:{value:descriptor.radius},brightness:{value:1},structureVisibility:{value:1}};
   const uniforms={...mediumUniforms,...shared,shapeScale:{value:new THREE.Vector3(1,1,1)},
     heightBound:{value:Math.max(uploadedStellarBound,uploadedDustBound,Math.abs(sourceCenter[1])+sourceAxes[1])+1e-6},
@@ -380,6 +430,7 @@ export function createGalacticMediumVolume(descriptor) {
     worldOrientation:{value:new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...descriptor.orientation)))},
     uSceneDepth:{value:null},uHasSceneDepth:{value:0},uDepthResolution:{value:new THREE.Vector2(1,1)},uCameraNearFar:{value:new THREE.Vector2(1,220000)}};
   const defines=spatial?{GALACTIC_SPATIAL_EMISSION:1}:{};
+  if(sourceBrick)defines.GALACTIC_LOCAL_SOURCE=1;
   const material=new THREE.ShaderMaterial({uniforms,defines,vertexShader:volumeVertex,fragmentShader:GALACTIC_VOLUME_FRAGMENT_GLSL,
     transparent:true,side:THREE.BackSide,depthWrite:false,depthTest:false,blending:THREE.CustomBlending,
     blendEquation:THREE.AddEquation,blendSrc:THREE.OneFactor,blendDst:THREE.SrcAlphaFactor,
@@ -399,7 +450,7 @@ export function createGalacticMediumVolume(descriptor) {
   const starMaterial=new THREE.ShaderMaterial({uniforms:starUniforms,defines,vertexShader:pointsVertex,fragmentShader:pointsFragment,
     transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,depthTest:true});
   const stars=new THREE.Points(starGeometry,starMaterial);stars.frustumCulled=false;mesh.add(stars);
-  const stats={stars:0,textureBytes:(table?table.image.data.byteLength:0)+(verticalGeometry?verticalGeometry.image.data.byteLength:0)+stellarVolumeTable.image.data.byteLength+dustVolumeTable.image.data.byteLength+psf.texture.image.data.byteLength,drawCalls:2,totalLuminosity:medium.totalLuminosity,resolvedLuminosity:0,unresolvedLuminosity:medium.totalLuminosity};
+  const stats={stars:0,textureBytes:(table?table.image.data.byteLength:0)+(verticalGeometry?verticalGeometry.image.data.byteLength:0)+stellarVolumeTable.image.data.byteLength+dustVolumeTable.image.data.byteLength+(localSourceTable?localSourceTable.image.data.byteLength:0)+psf.texture.image.data.byteLength,drawCalls:2,totalLuminosity:medium.totalLuminosity,resolvedLuminosity:0,unresolvedLuminosity:medium.totalLuminosity};
   mesh.userData.isGalacticMedium=true;mesh.userData.stats=stats;
   let disposed=false,previousCount=-1;
   mesh.userData.setQuality=(quality,pixelHeight=1,pixelRatio=1)=>{
@@ -422,7 +473,7 @@ export function createGalacticMediumVolume(descriptor) {
   };
   mesh.userData.dispose=()=>{
     if(disposed)return;disposed=true;uniforms.uSceneDepth.value=null;uniforms.uHasSceneDepth.value=0;
-    psf.dispose();if(table)table.dispose();if(verticalGeometry)verticalGeometry.dispose();stellarVolumeTable.dispose();dustVolumeTable.dispose();geometry.dispose();material.dispose();starGeometry.dispose();starMaterial.dispose();mesh.clear();
+    psf.dispose();if(table)table.dispose();if(verticalGeometry)verticalGeometry.dispose();if(localSourceTable)localSourceTable.dispose();stellarVolumeTable.dispose();dustVolumeTable.dispose();geometry.dispose();material.dispose();starGeometry.dispose();starMaterial.dispose();mesh.clear();
   };
   return mesh;
 }
