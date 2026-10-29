@@ -15,3 +15,4 @@ export { describeGalaxyAppearance } from './render/galaxy-appearance.js';
 export {createCosmicBodies} from './render/cosmic-bodies.js';
 export {createPlanetLod,projectedPlanetRadius,selectPlanetLod} from './render/planet-lod.js';
 export {createDirectionalStars} from './render/directional-stars.js';
+export {createGalacticMediumVolume} from './render/galactic-medium.js';
