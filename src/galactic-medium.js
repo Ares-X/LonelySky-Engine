@@ -1,4 +1,5 @@
 import { hashSeed, randomFromSeed } from './random.js';
+import {GALACTIC_SPATIAL_MEDIUM_REVISION, sampleSpatialGalacticMedium, sampleSpatialGalacticStars} from './galactic-spatial-medium.js';
 
 export const GALACTIC_MEDIUM_REVISION = 2;
 export const GALACTIC_MEDIUM_MAX_RESOLUTION = 1024;
@@ -662,6 +663,7 @@ export function createGalacticMedium(options) {
  * each). This hot-path sampler does not allocate, validate, or mutate medium.
  */
 export function sampleGalacticMedium(medium, position, output) {
+  if (medium.revision === GALACTIC_SPATIAL_MEDIUM_REVISION) return sampleSpatialGalacticMedium(medium, position, output);
   const x = position[0], y = position[1], z = position[2], n = medium.resolution;
   const emission = output.emission, extinction = output.extinction;
   emission[0] = emission[1] = emission[2] = extinction[0] = extinction[1] = extinction[2] = 0;
@@ -716,6 +718,7 @@ function verticalQuantile(probability) {
 export function sampleGalacticStars(medium, seed, count) {
   if (typeof seed !== 'string') throw new TypeError('Galactic stars require a string seed');
   if (!Number.isInteger(count) || count < 0 || count > GALACTIC_MEDIUM_MAX_STARS) throw new RangeError('Galactic star count must be 0–4096');
+  if (medium.revision === GALACTIC_SPATIAL_MEDIUM_REVISION) return sampleSpatialGalacticStars(medium, seed, count);
   const random = randomFromSeed(`${seed}:galactic-stars-v2`), {diskCdf: cdf, bulgeCdf} = fields.get(medium), n = medium.resolution;
   const positions = new Float32Array(count * 3), colors = new Float32Array(count * 3);
   const rawLuminosities = new Float32Array(count), componentIndices = new Uint8Array(count);

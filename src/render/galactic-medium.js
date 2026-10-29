@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import {COSMIC_DEPTH_GLSL} from '../cosmic-structures.js';
 import {sampleGalacticStars, GALACTIC_MEDIUM_REVISION, GALACTIC_MEDIUM_MAX_STARS, GALACTIC_MEDIUM_STELLAR_VOLUME_RESOLUTION, GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION} from '../galactic-medium.js';
+import {GALACTIC_SPATIAL_MEDIUM_REVISION} from '../galactic-spatial-medium.js';
 import {COSMIC_SCENE_DEPTH_GLSL} from './cosmic-scene-depth.js';
 import {STELLAR_PSF_HALO_SIGMA_CSS} from './stellar-psf.js';
 import {createStellarPsfTexture, STELLAR_PSF_TEXTURE_GLSL} from './stellar-psf-texture.js';
@@ -25,6 +26,7 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
   }
   void galacticPlanarMedium(vec3 p,out vec3 emission,out vec3 extinction){
     emission=vec3(0.);extinction=vec3(0.);
+    #ifndef GALACTIC_SPATIAL_EMISSION
     if(abs(p.x)>=1.||abs(p.z)>=1.
       ||(abs(p.y)>diskDustVerticalBound&&abs(p.y)>diskStellarVerticalBound))return;
     vec4 column=texture2D(mediumTable,p.xz*.5+.5);
@@ -32,6 +34,7 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
     emission=column.r*oldStellarColor*mediumVertical(p.y-geometry.z,mediumHeights.x*geometry.w)
       +column.g*youngStellarColor*mediumVertical(p.y-geometry.z,youngStellarHeight*geometry.w);
     extinction=column.a*mediumVertical(p.y-geometry.x,mediumHeights.y*geometry.y)*extinctionColor;
+    #endif
   }
   float galacticCloudDensity(vec3 p){
     vec3 d=(p-dustCloudCenter)/dustCloudAxes;
@@ -41,7 +44,14 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
   void galacticMedium(vec3 p,float cloudDensity,out vec3 emission,out vec3 extinction){
     galacticPlanarMedium(p,emission,extinction);
     vec3 b=(p-bulgeCenter)/bulgeAxes;
-    if(all(lessThan(abs(b),vec3(1.))))emission+=bulgeColor*texture(stellarVolumeTable,b*.5+.5).r;
+    if(all(lessThan(abs(b),vec3(1.)))){
+      #ifdef GALACTIC_SPATIAL_EMISSION
+      vec3 density=texture(stellarVolumeTable,b*.5+.5).rgb;
+      emission+=density.r*oldStellarColor+density.g*youngStellarColor+density.b*bulgeColor;
+      #else
+      emission+=bulgeColor*texture(stellarVolumeTable,b*.5+.5).r;
+      #endif
+    }
     extinction+=extinctionColor*cloudDensity;
   }
   bool galacticCloudInterval(vec3 origin,vec3 direction,float minimumDistance,float maximumDistance,out vec2 interval){
@@ -97,6 +107,9 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
     if(distance<=.00000001)return vec3(1.);
     vec3 direction=segment/distance;
     vec3 opticalDepth=extinctionColor*galacticCloudOpticalDepth(origin,direction,distance);
+    #ifdef GALACTIC_SPATIAL_EMISSION
+    return exp(-opticalDepth);
+    #else
     // Integrate only the finite planar interval. Sampling an entire distant
     // camera-to-star segment can otherwise skip a thin disk completely.
     float closest=-dot(origin,direction);
@@ -116,6 +129,7 @@ export const GALACTIC_MEDIUM_GLSL = /* glsl */`
       opticalDepth+=extinction*stride;
     }
     return exp(-opticalDepth);
+    #endif
   }
 `;
 
@@ -307,32 +321,41 @@ function fieldTexture(values,resolution,format,signed=false,volume=false){
  */
 export function createGalacticMediumVolume(descriptor) {
   const medium=descriptor.medium;
-  if(!medium||medium.revision!==GALACTIC_MEDIUM_REVISION)
+  const spatial=medium?.revision===GALACTIC_SPATIAL_MEDIUM_REVISION;
+  if(!medium||!spatial&&medium.revision!==GALACTIC_MEDIUM_REVISION)
     throw new TypeError('Galactic volume requires the current medium revision; legacy RGB columns are not population densities');
-  if(!(medium.texels instanceof Float32Array)||medium.texels.length!==medium.resolution**2*4)
+  if(!spatial&&(!(medium.texels instanceof Float32Array)||medium.texels.length!==medium.resolution**2*4))
     throw new TypeError('Galactic volume requires compiled population columns');
-  if(!(medium.verticalGeometry instanceof Float32Array)||medium.verticalGeometry.length!==medium.resolution**2*4)
+  if(!spatial&&(!(medium.verticalGeometry instanceof Float32Array)||medium.verticalGeometry.length!==medium.resolution**2*4))
     throw new TypeError('Galactic volume requires compiled vertical geometry');
-  if(medium.stellarVolumeResolution!==GALACTIC_MEDIUM_STELLAR_VOLUME_RESOLUTION||!(medium.stellarVolumeTexels instanceof Float32Array)||medium.stellarVolumeTexels.length!==medium.stellarVolumeResolution**3)
+  const sourceResolution=spatial?medium.sourceVolumeResolution:medium.stellarVolumeResolution;
+  const sourceTexels=spatial?medium.sourceVolumeTexels:medium.stellarVolumeTexels;
+  const sourceCenter=spatial?medium.sourceVolumeCenter:medium.bulgeCenter;
+  const sourceAxes=spatial?medium.sourceVolumeAxes:medium.bulgeAxes;
+  if(sourceResolution!==GALACTIC_MEDIUM_STELLAR_VOLUME_RESOLUTION||!(sourceTexels instanceof Float32Array)||sourceTexels.length!==sourceResolution**3*(spatial?4:1))
     throw new TypeError('Galactic volume requires a compiled stellar population');
   if(medium.dustVolumeResolution!==GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION||!(medium.dustVolumeTexels instanceof Float32Array)||medium.dustVolumeTexels.length!==medium.dustVolumeResolution**3)
     throw new TypeError('Galactic volume requires compiled dust clouds');
-  const table=fieldTexture(medium.texels,medium.resolution,THREE.RGBAFormat);
-  const verticalGeometry=fieldTexture(medium.verticalGeometry,medium.resolution,THREE.RGBAFormat,true);
-  const stellarVolumeTable=fieldTexture(medium.stellarVolumeTexels,medium.stellarVolumeResolution,THREE.RedFormat,false,true);
+  const table=spatial?null:fieldTexture(medium.texels,medium.resolution,THREE.RGBAFormat);
+  const verticalGeometry=spatial?null:fieldTexture(medium.verticalGeometry,medium.resolution,THREE.RGBAFormat,true);
+  const stellarVolumeTable=fieldTexture(sourceTexels,sourceResolution,spatial?THREE.RGBAFormat:THREE.RedFormat,false,true);
   const dustVolumeTable=fieldTexture(medium.dustVolumeTexels,medium.dustVolumeResolution,THREE.RedFormat,false,true);
-  let uploadedDustBound=medium.dustVerticalBound,uploadedDiskDustBound=medium.dustHeight,uploadedStellarBound=medium.stellarVerticalBound,verticalExpansion=0;
-  const sourceStellarHeight=Math.max(medium.stellarHeight,medium.youngStellarHeight);
-  const dustHeight=Math.fround(medium.dustHeight),stellarHeight=Math.fround(sourceStellarHeight),halfGeometry=verticalGeometry.image.data;
-  for(let i=0;i<halfGeometry.length;i+=4){
-    const dustOffset=THREE.DataUtils.fromHalfFloat(halfGeometry[i]),dustScale=THREE.DataUtils.fromHalfFloat(halfGeometry[i+1]);
-    const stellarOffset=THREE.DataUtils.fromHalfFloat(halfGeometry[i+2]),stellarScale=THREE.DataUtils.fromHalfFloat(halfGeometry[i+3]);
-    uploadedDustBound=Math.max(uploadedDustBound,Math.abs(dustOffset)+dustHeight*dustScale);
-    uploadedDiskDustBound=Math.max(uploadedDiskDustBound,Math.abs(dustOffset)+dustHeight*dustScale);
-    uploadedStellarBound=Math.max(uploadedStellarBound,Math.abs(stellarOffset)+stellarHeight*stellarScale);
-    verticalExpansion=Math.max(verticalExpansion,
-      Math.abs(dustOffset-medium.verticalGeometry[i])+Math.abs(dustHeight*dustScale-medium.dustHeight*medium.verticalGeometry[i+1]),
-      Math.abs(stellarOffset-medium.verticalGeometry[i+2])+Math.abs(stellarHeight*stellarScale-sourceStellarHeight*medium.verticalGeometry[i+3]));
+  let uploadedDustBound=medium.dustVerticalBound,uploadedStellarBound=medium.stellarVerticalBound,verticalExpansion=0;
+  let uploadedDiskDustBound=0;
+  if(!spatial){
+    uploadedDiskDustBound=medium.dustHeight;
+    const sourceStellarHeight=Math.max(medium.stellarHeight,medium.youngStellarHeight);
+    const dustHeight=Math.fround(medium.dustHeight),stellarHeight=Math.fround(sourceStellarHeight),halfGeometry=verticalGeometry.image.data;
+    for(let i=0;i<halfGeometry.length;i+=4){
+      const dustOffset=THREE.DataUtils.fromHalfFloat(halfGeometry[i]),dustScale=THREE.DataUtils.fromHalfFloat(halfGeometry[i+1]);
+      const stellarOffset=THREE.DataUtils.fromHalfFloat(halfGeometry[i+2]),stellarScale=THREE.DataUtils.fromHalfFloat(halfGeometry[i+3]);
+      uploadedDustBound=Math.max(uploadedDustBound,Math.abs(dustOffset)+dustHeight*dustScale);
+      uploadedDiskDustBound=Math.max(uploadedDiskDustBound,Math.abs(dustOffset)+dustHeight*dustScale);
+      uploadedStellarBound=Math.max(uploadedStellarBound,Math.abs(stellarOffset)+stellarHeight*stellarScale);
+      verticalExpansion=Math.max(verticalExpansion,
+        Math.abs(dustOffset-medium.verticalGeometry[i])+Math.abs(dustHeight*dustScale-medium.dustHeight*medium.verticalGeometry[i+1]),
+        Math.abs(stellarOffset-medium.verticalGeometry[i+2])+Math.abs(stellarHeight*stellarScale-sourceStellarHeight*medium.verticalGeometry[i+3]));
+    }
   }
   // Bounds cover the uploaded representation, including outward half/f32
   // rounding. They are coverage/integration bounds, never collision surfaces.
@@ -341,19 +364,23 @@ export function createGalacticMediumVolume(descriptor) {
   if(medium.dustCloudIntegral>0)uploadedDustBound=Math.max(uploadedDustBound,Math.abs(Math.fround(medium.dustCloudCenter[1]))+Math.fround(medium.dustCloudAxes[1])+1e-6);
   uploadedStellarBound=uploadedStellarBound*(1+2**-22)+1e-9;
   const supportRadius=medium.supportRadius+verticalExpansion+1e-6;
-  const mediumUniforms={mediumTable:{value:table},verticalGeometryTable:{value:verticalGeometry},stellarVolumeTable:{value:stellarVolumeTable},dustVolumeTable:{value:dustVolumeTable},dustVerticalBound:{value:uploadedDustBound},supportRadius:{value:supportRadius},mediumHeights:{value:new THREE.Vector2(medium.stellarHeight,medium.dustHeight)},
-    youngStellarHeight:{value:medium.youngStellarHeight},oldStellarColor:{value:new THREE.Color(...medium.oldStellarColor)},youngStellarColor:{value:new THREE.Color(...medium.youngStellarColor)},
-    bulgeCenter:{value:new THREE.Vector3(...medium.bulgeCenter)},bulgeAxes:{value:new THREE.Vector3(...medium.bulgeAxes)},
+  const mediumUniforms={stellarVolumeTable:{value:stellarVolumeTable},dustVolumeTable:{value:dustVolumeTable},dustVerticalBound:{value:uploadedDustBound},supportRadius:{value:supportRadius},
+    oldStellarColor:{value:new THREE.Color(...medium.oldStellarColor)},youngStellarColor:{value:new THREE.Color(...medium.youngStellarColor)},
+    bulgeCenter:{value:new THREE.Vector3(...sourceCenter)},bulgeAxes:{value:new THREE.Vector3(...sourceAxes)},
     bulgeColor:{value:new THREE.Color(...medium.bulgeColor)},extinctionColor:{value:new THREE.Vector3(...medium.extinctionColor)},
     dustCloudCenter:{value:new THREE.Vector3(...medium.dustCloudCenter)},dustCloudAxes:{value:new THREE.Vector3(...medium.dustCloudAxes)},hasDustCloud:{value:Number(medium.dustCloudIntegral>0)},
-    dustVolumeResolution:{value:medium.dustVolumeResolution},diskDustVerticalBound:{value:uploadedDiskDustBound},diskStellarVerticalBound:{value:uploadedStellarBound}};
+    dustVolumeResolution:{value:medium.dustVolumeResolution}};
+  if(!spatial)Object.assign(mediumUniforms,{mediumTable:{value:table},verticalGeometryTable:{value:verticalGeometry},
+    mediumHeights:{value:new THREE.Vector2(medium.stellarHeight,medium.dustHeight)},youngStellarHeight:{value:medium.youngStellarHeight},
+    diskDustVerticalBound:{value:uploadedDiskDustBound},diskStellarVerticalBound:{value:uploadedStellarBound}});
   const shared={localCamera:{value:new THREE.Vector3()},radius:{value:descriptor.radius},brightness:{value:1},structureVisibility:{value:1}};
   const uniforms={...mediumUniforms,...shared,shapeScale:{value:new THREE.Vector3(1,1,1)},
-    heightBound:{value:Math.max(uploadedStellarBound,uploadedDustBound,Math.abs(medium.bulgeCenter[1])+medium.bulgeAxes[1])+1e-6},
+    heightBound:{value:Math.max(uploadedStellarBound,uploadedDustBound,Math.abs(sourceCenter[1])+sourceAxes[1])+1e-6},
     continuumWeight:{value:1-medium.resolvedFraction},structureKind:{value:0},uVisibility:{value:1},uDensity:{value:1},steps:{value:64},
     worldOrientation:{value:new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...descriptor.orientation)))},
     uSceneDepth:{value:null},uHasSceneDepth:{value:0},uDepthResolution:{value:new THREE.Vector2(1,1)},uCameraNearFar:{value:new THREE.Vector2(1,220000)}};
-  const material=new THREE.ShaderMaterial({uniforms,vertexShader:volumeVertex,fragmentShader:GALACTIC_VOLUME_FRAGMENT_GLSL,
+  const defines=spatial?{GALACTIC_SPATIAL_EMISSION:1}:{};
+  const material=new THREE.ShaderMaterial({uniforms,defines,vertexShader:volumeVertex,fragmentShader:GALACTIC_VOLUME_FRAGMENT_GLSL,
     transparent:true,side:THREE.BackSide,depthWrite:false,depthTest:false,blending:THREE.CustomBlending,
     blendEquation:THREE.AddEquation,blendSrc:THREE.OneFactor,blendDst:THREE.SrcAlphaFactor,
     blendSrcAlpha:THREE.ZeroFactor,blendDstAlpha:THREE.OneFactor});
@@ -369,10 +396,10 @@ export function createGalacticMediumVolume(descriptor) {
   starGeometry.boundingSphere=new THREE.Sphere(new THREE.Vector3(),geometry.boundingSphere.radius);
   const psf=createStellarPsfTexture();
   const starUniforms={...psf.uniforms,...mediumUniforms,...shared,pixelHeight:{value:1},ratio:{value:1},powerScale:{value:0}};
-  const starMaterial=new THREE.ShaderMaterial({uniforms:starUniforms,vertexShader:pointsVertex,fragmentShader:pointsFragment,
+  const starMaterial=new THREE.ShaderMaterial({uniforms:starUniforms,defines,vertexShader:pointsVertex,fragmentShader:pointsFragment,
     transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,depthTest:true});
   const stars=new THREE.Points(starGeometry,starMaterial);stars.frustumCulled=false;mesh.add(stars);
-  const stats={stars:0,textureBytes:table.image.data.byteLength+verticalGeometry.image.data.byteLength+stellarVolumeTable.image.data.byteLength+dustVolumeTable.image.data.byteLength+psf.texture.image.data.byteLength,drawCalls:2,totalLuminosity:medium.totalLuminosity,resolvedLuminosity:0,unresolvedLuminosity:medium.totalLuminosity};
+  const stats={stars:0,textureBytes:(table?table.image.data.byteLength:0)+(verticalGeometry?verticalGeometry.image.data.byteLength:0)+stellarVolumeTable.image.data.byteLength+dustVolumeTable.image.data.byteLength+psf.texture.image.data.byteLength,drawCalls:2,totalLuminosity:medium.totalLuminosity,resolvedLuminosity:0,unresolvedLuminosity:medium.totalLuminosity};
   mesh.userData.isGalacticMedium=true;mesh.userData.stats=stats;
   let disposed=false,previousCount=-1;
   mesh.userData.setQuality=(quality,pixelHeight=1,pixelRatio=1)=>{
@@ -395,7 +422,7 @@ export function createGalacticMediumVolume(descriptor) {
   };
   mesh.userData.dispose=()=>{
     if(disposed)return;disposed=true;uniforms.uSceneDepth.value=null;uniforms.uHasSceneDepth.value=0;
-    psf.dispose();table.dispose();verticalGeometry.dispose();stellarVolumeTable.dispose();dustVolumeTable.dispose();geometry.dispose();material.dispose();starGeometry.dispose();starMaterial.dispose();mesh.clear();
+    psf.dispose();if(table)table.dispose();if(verticalGeometry)verticalGeometry.dispose();stellarVolumeTable.dispose();dustVolumeTable.dispose();geometry.dispose();material.dispose();starGeometry.dispose();starMaterial.dispose();mesh.clear();
   };
   return mesh;
 }

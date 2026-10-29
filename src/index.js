@@ -15,3 +15,5 @@ export {createGalacticMedium, createGalacticMediumTask, sampleGalacticMedium, sa
   GALACTIC_MEDIUM_REVISION, GALACTIC_MEDIUM_MAX_RESOLUTION,
   GALACTIC_MEDIUM_MAX_STARS, GALACTIC_MEDIUM_STELLAR_VOLUME_RESOLUTION,
   GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION} from './galactic-medium.js';
+export {createSpatialGalacticMedium, createSpatialGalacticMediumTask,
+  GALACTIC_SPATIAL_MEDIUM_REVISION} from './galactic-spatial-medium.js';

@@ -324,3 +324,51 @@ to physical positions changes navigation and collision semantics.
 The default public seed is `lonelysky`. Applications own their world seed,
 names, save provenance and generation-migration decisions. A generator revision
 is not an instruction to replace an application's universe identity.
+
+## Experimental finite spatial galactic medium
+
+On the development branch, `createSpatialGalacticMedium(options)` and
+`createSpatialGalacticMediumTask(options)` construct revision 3 fields. They do
+not replace the existing revision 2 disk constructor or the stock catalogue.
+This is an unpublished rendering experiment, without visual or performance
+acceptance implied by the API.
+
+Options contain a string `seed`, `sourceCenter/sourceAxes`,
+`dustCenter/dustAxes`, three nonnegative `luminosities`, three linear RGB
+`colors`, `dustIntegral`, `extinctionColor` and `resolvedFraction` in [0,1].
+Coordinates and positive half-axes use the body's radius as their length unit.
+At most 32 `sourceKernels` and 24 `dustKernels` are accepted. Each kernel has a
+positive `weight`, `center`, positive `axes` and Euler XYZ `rotation` in radians.
+A source selects `component` 0, 1 or 2; a dust kernel has `contrast` in [0,1].
+Every positive family and positive dust budget must have a resolvable kernel.
+Rotated support requires one voxel of padding from the supplied frame edges;
+unresolved or clipped positive kernels fail explicitly.
+
+The producer bakes 64³ RGBA source texels (R/G/B are scalar family densities,
+A is zero) and 128³ scalar dust texels. Compact ellipsoid profiles are averaged
+with 2×2×2 cell quadrature, then normalized once per family and once for dust.
+Source colors have unit linear RGB luminance. The published Float32 arrays are
+owned read-only by the medium; its frozen wrapper is not permission to mutate
+their elements. Creation owns three private CDFs through a WeakMap, so dropping
+the medium releases their owner. There is no global growing field cache.
+
+The task supports `step()`, `advance(milliseconds = 2)`, `cancel()` and
+`state/result/error/stage/metrics`. It yields at real density rows and integral,
+normalization and CDF phases; 2ms is a cooperative target rather than a hard
+wall-clock ceiling. Only `complete` exposes the result. Cancellation closes the
+generator and releases its unpublished work buffers; failure retains its cause.
+
+Existing `sampleGalacticMedium(medium, position, output)` consumes either
+revision in place, without stationary-query allocation. Supply reusable
+`output.emission` and `output.extinction` arrays. `sampleGalacticStars` keeps
+its validated 0–4096 count boundary and returns independent snapshots with
+stable prefixes. Component-conditioned CDF draws and per-axis tent offsets
+follow the same actual Float32 source field, up to returned position rounding.
+The Three.js adapter shares these source/dust fields between volume and points;
+revision 3 compiles out the old planar contribution.
+
+These are artist-defined emission/extinction measures, not mass, an observed
+star catalogue, fluid evolution or N-body physics. Grid quadrature, trilinear
+reconstruction, half-float upload and radiative-transfer integration each have
+finite approximation error. A matching total luminosity does not imply equal
+local density, equal finite star realizations or equal received image flux.

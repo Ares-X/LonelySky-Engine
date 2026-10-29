@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {createGalacticMedium} from '../../src/galactic-medium.js';
+import {createSpatialGalacticMedium} from '../../src/galactic-spatial-medium.js';
 import {createGalacticMediumVolume} from '../../src/render/galactic-medium.js';
 import {createCosmos} from '../../src/render/cosmos.js';
 import {encodeCell} from '../../src/coordinates.js';
@@ -75,4 +76,25 @@ test('shared transparent-sort center conservatively contains the physical hull a
     }
     assert.equal(mesh.renderOrder,stars.renderOrder,'foreground transparent ordering remains available to the scene');
   }finally{mesh.userData.dispose();}
+});
+
+test('spatial source families share the actual RGBA field and own only their real textures',()=>{
+  const d=descriptor();
+  d.medium=createSpatialGalacticMedium({seed:'spatial-upload',sourceCenter:[0,0,0],sourceAxes:[1,.4,1],dustCenter:[0,0,0],dustAxes:[1,.4,1],
+    luminosities:[.010,.007,.005],colors:[[1,.8,.6],[.6,.8,1],[1,.9,.7]],dustIntegral:.032,extinctionColor:[.6,1,1.5],resolvedFraction:.005,
+    sourceKernels:[0,1,2].map(component=>({component,weight:1,center:[(component-1)*.25,(component-1)*.04,0],axes:[.18,.08,.16],rotation:[.1,.3,.2]})),
+    dustKernels:[{weight:1,center:[.1,0,.1],axes:[.15,.07,.16],rotation:[.2,.3,.1],contrast:.7}]});
+  const mesh=createGalacticMediumVolume(d),stars=mesh.children[0],u=mesh.material.uniforms;
+  assert.equal(mesh.material.defines.GALACTIC_SPATIAL_EMISSION,1);
+  assert.equal(stars.material.defines.GALACTIC_SPATIAL_EMISSION,1);
+  assert.equal(u.mediumTable,undefined);assert.equal(u.verticalGeometryTable,undefined);
+  assert.equal(u.stellarVolumeTable.value.format,THREE.RGBAFormat);
+  assert.equal(u.stellarVolumeTable.value.image.data.length,64**3*4);
+  for(const name of ['stellarVolumeTable','dustVolumeTable','oldStellarColor','youngStellarColor','bulgeColor'])assert.equal(stars.material.uniforms[name],u[name]);
+  const source=u.stellarVolumeTable.value.image.data,integrals=[0,0,0];
+  for(let i=0;i<source.length;i+=4)for(let p=0;p<3;p++)integrals[p]+=THREE.DataUtils.fromHalfFloat(source[i+p])*d.medium.sourceVolumePixelVolume;
+  for(let p=0;p<3;p++)assert.ok(Math.abs(integrals[p]/d.medium.sourceComponentIntegrals[p]-1)<.001);
+  const resources=[mesh.geometry,mesh.material,stars.geometry,stars.material,u.stellarVolumeTable.value,u.dustVolumeTable.value,stars.material.uniforms.stellarPsfTable.value];
+  const counts=resources.map(()=>0);resources.forEach((resource,i)=>resource.addEventListener('dispose',()=>counts[i]++));
+  mesh.userData.dispose();mesh.userData.dispose();assert.deepEqual(counts,[1,1,1,1,1,1,1]);
 });
