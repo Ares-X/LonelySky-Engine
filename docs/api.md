@@ -383,8 +383,32 @@ dust and individual families may be zero. There is no target-luminosity or targe
 dust-integral input. `spatialSynthesis.kind` is `compiled-spatial-volumes` and its
 normalizations are one. This does not alter kernel/brick budget metadata.
 
-Task construction synchronously copies both input arrays (12 MiB) and small
-frame/color data, so caller mutation after return cannot affect pending or
+The compiled-volume entry points also accept an optional `sourceBrick`:
+`{component, center, axes, rotation, texels}`. `component` is 0, 1 or 2;
+`center` and positive half-`axes` are body-radius vectors; `rotation` is Euler XYZ
+in radians. `texels` is a non-shared Float32Array of length 32³, x-fastest scalar
+density. `GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION` exports that fixed size.
+All densities must be finite/nonnegative and the entire outer voxel layer zero.
+The entry point copies the brick array and its frame at task creation. Its
+integral and CDF are completed cooperatively, without normalization or gain.
+
+A compiled brick is additive to its component's base volume. The caller must
+remove any light it replaces before import; the engine does not infer a budget
+or subtract a coarse component. `sourceComponentIntegrals`, family luminosities,
+`totalLuminosity` and the private virtual base/brick CDF include the actual brick
+integral exactly once. Base source may be empty when the brick supplies positive
+light. A zero brick is valid when other source light is positive.
+`spatialSynthesis.sourceRawIntegrals` describes the base; an imported brick adds
+`spatialSynthesis.sourceBrick` with `baseComponentIntegrals`, actual `rawIntegral`
+and normalization one. The published brick contains `component`, `resolution`,
+`texels`, `center`, `axes`, row-major local-to-body `rotation`, body-to-normalized-
+local `inverse`, `pixelVolume` and `integral`. CPU queries, point sampling and the
+existing local-source renderer consume this same formally owned object; callers
+must not construct a substitute medium wrapper. Support includes all rotated
+tent corners and Float32 point-position rounding, independently of the base frame.
+
+Task construction synchronously copies both base input arrays (12 MiB), the
+optional brick (128 KiB) and small frame/color data, so caller mutation after return cannot affect pending or
 completed fields. This atomic copy is outside the cooperative `advance` budget.
 Validation, actual integration, support bounds and private CDF construction yield
 by rows. Completed arrays are medium-owned and read-only by contract, just as for

@@ -35,12 +35,7 @@ function frame(center, axes, resolution, name) {
     throw new RangeError(`${name} frame cannot represent finite voxel positions and volume`);
   return {center, axes, resolution, pixelVolume};
 }
-function compileKernel(kernel, bounds, index, dust, seed) {
-  if (!kernel || typeof kernel !== 'object') throw new TypeError('Expected an ellipsoid kernel');
-  const {weight} = kernel;
-  if (!(Number.isFinite(weight) && weight > 0)) throw new RangeError('Kernel weight must be positive and finite');
-  const center = vector(kernel.center, 'kernel center'), axes = vector(kernel.axes, 'kernel axes', true);
-  const rotation = vector(kernel.rotation, 'kernel rotation');
+function orientedFrame(axes, rotation) {
   const cx = Math.cos(rotation[0]), sx = Math.sin(rotation[0]), cy = Math.cos(rotation[1]), sy = Math.sin(rotation[1]), cz = Math.cos(rotation[2]), sz = Math.sin(rotation[2]);
   // Euler XYZ, row-major local-to-body rotation. No rendering dependency.
   const r = [cy * cz, -cy * sz, sy,
@@ -48,6 +43,15 @@ function compileKernel(kernel, bounds, index, dust, seed) {
     sx * sz - cx * cz * sy, sx * cz + cx * sz * sy, cx * cy];
   const inverse = [r[0] / axes[0], r[3] / axes[0], r[6] / axes[0],
     r[1] / axes[1], r[4] / axes[1], r[7] / axes[1], r[2] / axes[2], r[5] / axes[2], r[8] / axes[2]];
+  return {rotation: r, inverse};
+}
+function compileKernel(kernel, bounds, index, dust, seed) {
+  if (!kernel || typeof kernel !== 'object') throw new TypeError('Expected an ellipsoid kernel');
+  const {weight} = kernel;
+  if (!(Number.isFinite(weight) && weight > 0)) throw new RangeError('Kernel weight must be positive and finite');
+  const center = vector(kernel.center, 'kernel center'), axes = vector(kernel.axes, 'kernel axes', true);
+  const rotation = vector(kernel.rotation, 'kernel rotation');
+  const {rotation: r, inverse} = orientedFrame(axes, rotation);
   const lower = [], upper = [];
   for (let i = 0; i < 3; i++) {
     const extent = Math.hypot(r[i * 3] * axes[0], r[i * 3 + 1] * axes[1], r[i * 3 + 2] * axes[2]);
@@ -112,7 +116,7 @@ function compileOptions(options) {
     const inverse = Object.freeze(kernel.inverse.map(v => v * (n - 2) / n));
     const pixelVolume = (2 / n) ** 3 * axes[0] * axes[1] * axes[2];
     if (!(Number.isFinite(pixelVolume) && pixelVolume > 0)) throw new RangeError('Source brick cannot represent a finite voxel volume');
-    sourceBrick = {kernelIndex: b.kernelIndex, profile: b.profile, kernel, center: kernel.center, axes, rotation, inverse,
+    sourceBrick = {kernelIndex: b.kernelIndex, profile: b.profile, kernel, component: kernel.component, center: kernel.center, axes, rotation, inverse,
       resolution: n, pixelVolume, macroSpan, fineSpan, salt: hashSeed(`${options.seed}:galactic-spatial-source-brick-v1:${b.kernelIndex}`)};
   }
   return {seed: options.seed, source, dust, luminosities, totalLuminosity, colors, extinctionColor, dustIntegral, resolvedFraction, sources, dusts, sourceBrick};
@@ -232,13 +236,21 @@ function* bakeSourceBrick(b, target) {
   }
   if (target > 0 && !(rawIntegral > 0 && Number.isFinite(rawIntegral))) throw new RangeError('Source ribbon is unresolved on the local 32-cubed grid');
   const normalization = target === 0 ? 0 : target / rawIntegral;
+  const field = yield* finalizeSourceBrick(b, texels, normalization);
+  if (target > 0 && !(field.published.integral > 0 && Number.isFinite(field.published.integral))) throw new RangeError('Source brick luminosity is outside Float32 range');
+  return {...field, rawIntegral, normalization};
+}
+function* finalizeSourceBrick(b, texels, normalization = null, validate = false) {
+  const n = b.resolution, r = b.rotation;
   yield 'source-brick-cdf-allocation';
   const cdf = new Float64Array(n ** 3); let integral = 0, supportRadius = 0, verticalBound = 0;
   for (let z = 0; z < n; z++) for (let y = 0; y < n; y++) {
     yield 'source-brick-normalize-cdf-row';
     for (let x = 0; x < n; x++) {
-      const i = (z * n + y) * n + x; texels[i] *= normalization;
+      const i = (z * n + y) * n + x; if (normalization !== null) texels[i] *= normalization;
       if (!(Number.isFinite(texels[i]) && texels[i] >= 0)) throw new RangeError('Source brick exceeds Float32 density range');
+      if (validate && texels[i] !== 0 && (x === 0 || y === 0 || z === 0 || x === n - 1 || y === n - 1 || z === n - 1))
+        throw new RangeError('Source brick outer voxel layer must be zero');
       integral += texels[i] * b.pixelVolume; cdf[i] = integral;
       if (texels[i] === 0) continue;
       // Maximum norm on a rotated tent box is attained at one of its corners.
@@ -249,9 +261,9 @@ function* bakeSourceBrick(b, target) {
       }
     }
   }
-  if (target > 0 && !(integral > 0 && Number.isFinite(integral))) throw new RangeError('Source brick luminosity is outside Float32 range');
-  return {published: Object.freeze({component: b.kernel.component, resolution: n, texels, center: b.center, axes: b.axes,
-    inverse: b.inverse, rotation: b.rotation, pixelVolume: b.pixelVolume, integral}), cdf, rawIntegral, normalization, supportRadius, verticalBound};
+  if (!Number.isFinite(integral)) throw new RangeError('Actual source brick integral must be finite');
+  return {published: Object.freeze({component: b.component, resolution: n, texels, center: b.center, axes: b.axes,
+    inverse: b.inverse, rotation: b.rotation, pixelVolume: b.pixelVolume, integral}), cdf, supportRadius, verticalBound};
 }
 function* finalizeSource(sourceTexels, source, scales = null, validate = false) {
   yield 'source-cdf-allocation';
@@ -381,6 +393,24 @@ function publishSpatialMedium(config, sourceTexels, dustTexels, field, brick, sy
   return medium;
 }
 
+function compileVolumeBrick(options) {
+  if (options === undefined || options === null) return null;
+  if (typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Expected a compiled source brick');
+  const component = options.component;
+  if (!Number.isInteger(component) || component < 0 || component > 2) throw new RangeError('Source brick component must be 0, 1 or 2');
+  const n = GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION, bounds = frame(options.center, options.axes, n, 'source brick');
+  const euler = vector(options.rotation, 'source brick rotation'), oriented = orientedFrame(bounds.axes, euler);
+  if (oriented.inverse.some(n => !Number.isFinite(Math.fround(n))))
+    throw new RangeError('Source brick inverse cannot represent finite GPU coordinates');
+  for (let i = 0; i < 3; i++) {
+    const extent = Math.abs(oriented.rotation[i * 3]) * bounds.axes[0] + Math.abs(oriented.rotation[i * 3 + 1]) * bounds.axes[1] + Math.abs(oriented.rotation[i * 3 + 2]) * bounds.axes[2];
+    if (!Number.isFinite(Math.fround(Math.abs(bounds.center[i]) + extent))) throw new RangeError('Source brick frame cannot represent finite rotated positions');
+  }
+  if (!(options.texels instanceof Float32Array) || options.texels.length !== n ** 3) throw new TypeError('Expected a Float32Array 32³ scalar source brick');
+  if (typeof SharedArrayBuffer !== 'undefined' && options.texels.buffer instanceof SharedArrayBuffer) throw new TypeError('Source brick snapshots require non-shared ArrayBuffers');
+  return {...bounds, component, rotation: Object.freeze(oriented.rotation), inverse: Object.freeze(oriented.inverse), texels: options.texels.slice()};
+}
+
 /** Fixed native volume boundary. Copy both arrays synchronously so later caller
  * writes cannot change cooperative validation, integration, CDFs or queries.
  */
@@ -398,26 +428,34 @@ function compileVolumes(options) {
     throw new TypeError('Expected Float32Array source 64³ RGBA and dust 128³ scalar volumes');
   if ((typeof SharedArrayBuffer !== 'undefined') && (sourceTexels.buffer instanceof SharedArrayBuffer || dustTexels.buffer instanceof SharedArrayBuffer))
     throw new TypeError('Spatial volume snapshots require non-shared ArrayBuffers');
-  return {seed: options.seed, source, dust, colors, extinctionColor, resolvedFraction,
+  const sourceBrick = compileVolumeBrick(options.sourceBrick);
+  return {seed: options.seed, source, dust, colors, extinctionColor, resolvedFraction, sourceBrick,
     sourceTexels: sourceTexels.slice(), dustTexels: dustTexels.slice()};
 }
 function* finalizeVolumes(config) {
   const {sourceTexels, dustTexels} = config;
   const sourceField = yield* finalizeSource(sourceTexels, config.source, null, true);
-  const luminosities = sourceField.integrals, totalLuminosity = luminosities[0] + luminosities[1] + luminosities[2];
+  const brick = config.sourceBrick ? yield* finalizeSourceBrick(config.sourceBrick, config.sourceBrick.texels, null, true) : null;
+  const luminosities = brick ? [...sourceField.integrals] : sourceField.integrals;
+  if (brick) luminosities[brick.published.component] += brick.published.integral;
+  const totalLuminosity = luminosities[0] + luminosities[1] + luminosities[2];
   if (!(totalLuminosity > 0 && Number.isFinite(totalLuminosity))) throw new RangeError('Actual source integral must be positive and finite');
   const dustField = yield* finalizeDust(dustTexels, config.dust, null, true);
   if (!Number.isFinite(dustField.dustCloudIntegral)) throw new RangeError('Actual dust integral must be finite');
   const actual = {...config, luminosities, totalLuminosity, dustIntegral: dustField.dustCloudIntegral};
-  const synthesis = Object.freeze({kind: 'compiled-spatial-volumes',
-    sourceRawIntegrals: Object.freeze(luminosities), sourceNormalizations: Object.freeze([1, 1, 1]),
+  const synthesis = {kind: 'compiled-spatial-volumes',
+    sourceRawIntegrals: Object.freeze(sourceField.integrals), sourceNormalizations: Object.freeze([1, 1, 1]),
     dustRawIntegral: dustField.dustCloudIntegral, dustNormalization: 1,
     sourceQuadrature: 'Caller-provided cell values', dustQuadrature: 'Caller-provided cell values',
     reconstruction: 'Trilinear tents; finite-grid approximation, not pointwise analytic-profile equivalence',
     ownership: 'Published typed arrays are owned read-only by this medium; detached from caller arrays',
-    semantics: 'Artist luminosity/extinction density in body-radius coordinates, not matter, fluid, orbit or N-body physics'});
+    semantics: 'Artist luminosity/extinction density in body-radius coordinates, not matter, fluid, orbit or N-body physics'};
+  if (brick) synthesis.sourceBrick = Object.freeze({kind: 'compiled-spatial-brick', baseComponentIntegrals: sourceField.integrals,
+    rawIntegral: brick.published.integral, normalization: 1});
+  Object.freeze(synthesis);
   return publishSpatialMedium(actual, sourceTexels, dustTexels, {...sourceField, ...dustField,
-    supportRadius: Math.max(sourceField.supportRadius, dustField.supportRadius)}, null, synthesis);
+    supportRadius: Math.max(sourceField.supportRadius, dustField.supportRadius, brick ? brick.supportRadius : 0),
+    stellarVerticalBound: Math.max(sourceField.stellarVerticalBound, brick ? brick.verticalBound : 0)}, brick, synthesis);
 }
 /** As-is finite Float32 volumes; no target-budget normalization or gain.
  * The atomic input snapshot precedes the cooperative task's row-sized work.

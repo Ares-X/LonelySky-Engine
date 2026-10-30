@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {setImmediate} from 'node:timers/promises';
 import {createHash} from 'node:crypto';
 import {Euler, Matrix4} from 'three';
+import {createGalacticMediumVolume} from '../src/render/galactic-medium.js';
 import {createSpatialGalacticMedium, createSpatialGalacticMediumTask, createSpatialGalacticMediumFromVolumes, createSpatialGalacticMediumFromVolumesTask, sampleSpatialGalacticMedium, sampleSpatialGalacticStars,
   GALACTIC_SPATIAL_MEDIUM_REVISION, GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION} from '../src/galactic-spatial-medium.js';
 import {GALACTIC_SPATIAL_SOURCE_RESOLUTION, GALACTIC_SPATIAL_DUST_RESOLUTION} from '../src/index.js';
@@ -396,4 +397,101 @@ test('compiled completed, failed and cancelled tasks release detached snapshots 
   for (let i = 0; i < 4; i++) {await setImmediate(); global.gc();}
   assert.ok(refs.every(ref => ref.deref() === undefined)); assert.ok(tasks.every(task => task.result === undefined));
   assert.ok(process.memoryUsage().arrayBuffers <= before + 1024 * 1024, 'retained cancelled/failed tasks must not retain their detached work');
+});
+
+
+const compiledBrickOptions = () => {
+  const o = volumeOptions(), texels = new Float32Array(GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION ** 3);
+  texels[(21 * 32 + 16) * 32 + 11] = 384;
+  o.sourceBrick = {component: 1, center: [.2, .1, -.3], axes: [.125, .0625, .09375], rotation: [.3, -.4, .7], texels};
+  return o;
+};
+
+test('compiled brick preserves both input fields as-is and publishes one actual base-plus-brick luminosity measure', () => {
+  const input = compiledBrickOptions(), base = createSpatialGalacticMediumFromVolumes({...input, sourceBrick: null}), m = createSpatialGalacticMediumFromVolumes(input), b = m.sourceBrick;
+  assert.deepEqual(m.sourceVolumeTexels, base.sourceVolumeTexels); assert.deepEqual(m.dustVolumeTexels, base.dustVolumeTexels);
+  assert.deepEqual(b.texels, input.sourceBrick.texels); assert.notEqual(b.texels.buffer, input.sourceBrick.texels.buffer);
+  assert.equal(b.component, 1); assert.equal(b.resolution, 32); assert.equal(b.integral, 6 * base.sourceVolumePixelVolume);
+  assert.deepEqual(m.sourceComponentIntegrals, [base.oldDiskLuminosity, base.youngDiskLuminosity + b.integral, 0]);
+  assert.equal(m.youngDiskLuminosity, m.sourceComponentIntegrals[1]); assert.equal(m.totalLuminosity, base.totalLuminosity + b.integral);
+  assert.equal(m.spatialSynthesis.sourceBrick.normalization, 1); assert.equal(m.spatialSynthesis.sourceBrick.rawIntegral, b.integral);
+  assert.deepEqual(m.spatialSynthesis.sourceBrick.baseComponentIntegrals, base.sourceComponentIntegrals);
+  assert.ok(Object.isFrozen(b) && Object.isFrozen(b.inverse) && Object.isFrozen(b.rotation));
+  const r = new Matrix4().makeRotationFromEuler(new Euler(...input.sourceBrick.rotation, 'XYZ')).elements;
+  assert.deepEqual(b.rotation, [r[0], r[4], r[8], r[1], r[5], r[9], r[2], r[6], r[10]]);
+  const local = [(11.5 / 16 - 1) * b.axes[0], (16.5 / 16 - 1) * b.axes[1], (21.5 / 16 - 1) * b.axes[2]], q = brickWorld(b, ...local), out = output();
+  assert.ok(brickNormalized(b, q).every((v, a) => Math.abs(v - local[a] / b.axes[a]) < 1e-14));
+  sampleSpatialGalacticMedium(m, q, out);
+  for (let c = 0; c < 3; c++) assert.ok(Math.abs(out.emission[c] / (384 * m.youngStellarColor[c]) - 1) < 1e-12);
+  const halfway = brickWorld(b, local[0] + b.axes[0] / 32, local[1], local[2]); sampleSpatialGalacticMedium(m, halfway, out);
+  for (let c = 0; c < 3; c++) assert.ok(Math.abs(out.emission[c] / (192 * m.youngStellarColor[c]) - 1) < 1e-12);
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+    const corner = brickWorld(b, local[0] + sx * b.axes[0] / 16, local[1] + sy * b.axes[1] / 16, local[2] + sz * b.axes[2] / 16);
+    assert.ok(Math.hypot(...corner) <= m.supportRadius); assert.ok(Math.abs(corner[1]) <= m.stellarVerticalBound);
+  }
+  const mesh = createGalacticMediumVolume({medium: m, seed: 'compiled-render', id: 'compiled-render', radius: 1, orientation: [0, 0, 0]});
+  try {
+    assert.equal(mesh.material.defines.GALACTIC_LOCAL_SOURCE, 1);
+    assert.deepEqual(mesh.material.uniforms.localSourceTable.value.image, {data: mesh.material.uniforms.localSourceTable.value.image.data, width: 32, height: 32, depth: 32});
+    assert.equal(mesh.material.uniforms.localSourceTable.value.image.data.length, b.texels.length);
+    assert.deepEqual(mesh.children[0].geometry.getAttribute('position').array, sampleSpatialGalacticStars(m, 'compiled-render', 4096).positions);
+  } finally {mesh.userData.dispose();}
+});
+
+test('compiled brick/base CDF draws follow their actual shares, keep point prefixes and support brick-only light', () => {
+  const m = createSpatialGalacticMediumFromVolumes(compiledBrickOptions()), b = m.sourceBrick;
+  const count = 20000, stars = sampleSpatialGalacticStars(m, 'compiled-mixture', count), prefix = sampleSpatialGalacticStars(m, 'compiled-mixture', 151), counts = [0, 0, 0];
+  let inBrick = 0; assert.deepEqual(prefix.positions, stars.positions.slice(0, 151 * 3)); assert.deepEqual(prefix.componentIndices, stars.componentIndices.slice(0, 151));
+  for (let i = 0; i < count; i++) {
+    const c = stars.componentIndices[i], point = stars.positions.subarray(i * 3, i * 3 + 3); counts[c]++;
+    assert.ok(Math.hypot(...point) <= m.supportRadius); assert.ok(Math.abs(point[1]) <= m.stellarVerticalBound);
+    const q = brickNormalized(b, point);
+    if (q.every(v => Math.abs(v) < 1)) {inBrick++; assert.equal(c, 1); for (let a = 0; a < 3; a++) assert.ok(Math.abs(q[a] - [11.5 / 16 - 1, 16.5 / 16 - 1, 21.5 / 16 - 1][a]) <= 1 / 16 + 1e-6);}
+  }
+  assert.ok(Math.abs(counts[0] / count - 2 / 14) < .015); assert.equal(counts[2], 0);
+  assert.ok(Math.abs(inBrick / count - 6 / 14) < .015);
+  const only = compiledBrickOptions(); only.sourceVolumeTexels.fill(0); const single = createSpatialGalacticMediumFromVolumes(only);
+  assert.equal(single.totalLuminosity, single.sourceBrick.integral); assert.equal(single.youngDiskLuminosity, single.totalLuminosity);
+  const points = sampleSpatialGalacticStars(single, 'compiled-only', 4096);
+  assert.ok(points.componentIndices.every(c => c === 1));
+  for (let i = 0; i < 4096; i++) assert.ok(brickNormalized(single.sourceBrick, points.positions.subarray(i * 3, i * 3 + 3)).every(v => Math.abs(v) < 1));
+  const empty = compiledBrickOptions(); empty.sourceBrick.texels.fill(0);
+  const zero = createSpatialGalacticMediumFromVolumes(empty), absent = createSpatialGalacticMediumFromVolumes({...empty, sourceBrick: null});
+  assert.equal(zero.sourceBrick.integral, 0); assert.deepEqual(sampleSpatialGalacticStars(zero, 'empty-brick', 4096), sampleSpatialGalacticStars(absent, 'empty-brick', 4096));
+});
+
+test('compiled brick tasks snapshot frames and density, reject invalid layouts/padding and never publish cancelled or failed work', () => {
+  const input = compiledBrickOptions(), expected = createSpatialGalacticMediumFromVolumes(input), task = createSpatialGalacticMediumFromVolumesTask(input);
+  input.sourceBrick.texels.fill(9); input.sourceBrick.center[0] = 9; input.sourceBrick.axes[0] = 9; input.sourceBrick.rotation[0] = 9; input.sourceBrick.component = 2;
+  task.advance(Infinity); assert.deepEqual(task.result, expected);
+  const cancelled = createSpatialGalacticMediumFromVolumesTask(compiledBrickOptions());
+  while (cancelled.stage !== 'source-brick-normalize-cdf-row') cancelled.step();
+  assert.equal(cancelled.result, undefined); assert.equal(cancelled.cancel(), true); assert.equal(cancelled.advance(Infinity), true); assert.equal(cancelled.result, undefined);
+  for (const patch of [{component: 3}, {axes: [1, 0, 1]}, {axes: [1e-40, 1, 1]}, {rotation: [0, NaN, 0]}, {texels: new Float32Array(3)}, {texels: new Float64Array(32 ** 3)}]) {
+    const o = compiledBrickOptions(); Object.assign(o.sourceBrick, patch); assert.throws(() => createSpatialGalacticMediumFromVolumesTask(o));
+  }
+  if (typeof SharedArrayBuffer !== 'undefined') {
+    const o = compiledBrickOptions(); o.sourceBrick.texels = new Float32Array(new SharedArrayBuffer(32 ** 3 * 4));
+    assert.throws(() => createSpatialGalacticMediumFromVolumesTask(o), /non-shared/);
+  }
+  for (const [index, value, pattern] of [[0, 1, /outer voxel/], [32 ** 3 - 1, 1, /outer voxel/], [(21 * 32 + 16) * 32 + 11, -1, /density/], [(21 * 32 + 16) * 32 + 11, NaN, /density/]]) {
+    const o = compiledBrickOptions(); o.sourceBrick.texels[index] = value; const invalid = createSpatialGalacticMediumFromVolumesTask(o);
+    assert.throws(() => invalid.advance(Infinity), pattern); assert.equal(invalid.state, 'failed'); assert.equal(invalid.result, undefined); assert.ok(invalid.error instanceof RangeError);
+  }
+});
+
+test('compiled brick completed, failed and cancelled owners release snapshots and CDFs', {skip: typeof global.gc !== 'function'}, async () => {
+  await setImmediate(); global.gc(); const before = process.memoryUsage().arrayBuffers, refs = [], tasks = [];
+  function failedTask() {
+    const o = compiledBrickOptions(); o.sourceBrick.texels[32 ** 3 - 1] = 1;
+    const task = createSpatialGalacticMediumFromVolumesTask(o); assert.throws(() => task.advance(Infinity)); return task;
+  }
+  for (let i = 0; i < 3; i++) {
+    let m = createSpatialGalacticMediumFromVolumes(compiledBrickOptions()); refs.push(new WeakRef(m)); m = null;
+    const cancelled = createSpatialGalacticMediumFromVolumesTask(compiledBrickOptions()); while (cancelled.stage !== 'source-brick-normalize-cdf-row') cancelled.step(); cancelled.cancel(); tasks.push(cancelled);
+    tasks.push(failedTask()); const unstarted = createSpatialGalacticMediumFromVolumesTask(compiledBrickOptions()); unstarted.cancel(); tasks.push(unstarted);
+  }
+  for (let i = 0; i < 4; i++) {await setImmediate(); global.gc();}
+  assert.ok(refs.every(ref => ref.deref() === undefined)); assert.ok(tasks.every(task => task.result === undefined));
+  assert.ok(process.memoryUsage().arrayBuffers <= before + 1024 * 1024);
 });

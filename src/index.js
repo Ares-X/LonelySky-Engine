@@ -18,4 +18,4 @@ export {createGalacticMedium, createGalacticMediumTask, sampleGalacticMedium, sa
 export {createSpatialGalacticMedium, createSpatialGalacticMediumTask,
   createSpatialGalacticMediumFromVolumes, createSpatialGalacticMediumFromVolumesTask,
   GALACTIC_SPATIAL_MEDIUM_REVISION, GALACTIC_SPATIAL_SOURCE_RESOLUTION,
-  GALACTIC_SPATIAL_DUST_RESOLUTION} from './galactic-spatial-medium.js';
+  GALACTIC_SPATIAL_DUST_RESOLUTION, GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION} from './galactic-spatial-medium.js';
