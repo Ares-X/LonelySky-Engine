@@ -254,6 +254,33 @@ Generation uses artistic placement. Volume and black-hole rendering uses optical
 approximations. Camera depth compression and local gravity do not form a
 physically consistent galaxy-to-planet simulation.
 
+## Bloom composition
+
+`createBloomPass({strength = .35, radius = .65, threshold = 1})` returns the
+existing Three.js `UnrealBloomPass`, initially at 1 by 1 pixels for the composer
+to size. Native `strength`, `radius`, `threshold`, `enabled`, `setSize` and render
+behavior remain available. Both the standalone view and integrating hosts use
+this factory as the owner of discrete bloom normalization.
+
+Each finite separable Gaussian kernel is divided by its actual
+`centerWeight + 2 * sum(gaussianWeights)`, without moving its paired tap offsets.
+The installed Three.js 0.186.1 composite multiplies by 3; its five factors
+`[1, .8, .6, .4, .2]` and their `1.2 - factor` complements each sum to 3.
+Neutral tint coefficients divide that composite gain by 9. Thus a constant,
+neutral HDR field above the high-pass transition receives an added bloom DC
+fraction equal to `strength` for every radius in the existing 0–1 domain,
+subject to upload/render rounding. Radius still controls the spatial mixture;
+threshold and its transition still determine which light enters bloom.
+
+This is a global artistic optical-operator change, including bloom from solid
+bodies, nebulae and black holes. It does not change scene order, depth, PSF,
+source budgets, samples or the near-observer variance of point proxies. It does
+not establish energy conservation for arbitrary finite images, physical light
+transport, GPU performance or visual acceptance. Directly changing the returned
+pass's tint coefficients changes this neutral per-channel DC contract.
+`dispose()` retains native cleanup, also releases the high-pass material omitted
+by Three.js 0.186.1, and is idempotent. No extra targets or render passes are added.
+
 ## Elliptic orbital mechanics (0.3)
 
 `orbitalPeriod({semiMajorAxis, mu})` and `evaluateOrbit(elements, timeSeconds)`
@@ -324,3 +351,130 @@ to physical positions changes navigation and collision semantics.
 The default public seed is `lonelysky`. Applications own their world seed,
 names, save provenance and generation-migration decisions. A generator revision
 is not an instruction to replace an application's universe identity.
+
+## Experimental finite spatial galactic medium
+
+On the development branch, `createSpatialGalacticMedium(options)` and
+`createSpatialGalacticMediumTask(options)` construct revision 3 fields. They do
+not replace the existing revision 2 disk constructor or the stock catalogue.
+This is an unpublished rendering experiment, without visual or performance
+acceptance implied by the API.
+
+Options contain a string `seed`, `sourceCenter/sourceAxes`,
+`dustCenter/dustAxes`, three nonnegative `luminosities`, three linear RGB
+`colors`, `dustIntegral`, `extinctionColor` and `resolvedFraction` in [0,1].
+Coordinates and positive half-axes use the body's radius as their length unit.
+At most 32 `sourceKernels` and 24 `dustKernels` are accepted. Each kernel has a
+positive `weight`, `center`, positive `axes` and Euler XYZ `rotation` in radians.
+A source selects `component` 0, 1 or 2; a dust kernel has `contrast` in [0,1].
+Every positive family and positive dust budget must have a resolvable kernel.
+Rotated support requires one voxel of padding from the supplied frame edges;
+unresolved or clipped positive kernels fail explicitly.
+
+The producer bakes 64³ RGBA source texels (R/G/B are scalar family densities,
+A is zero) and 128³ scalar dust texels. Compact ellipsoid profiles are averaged
+with 2×2×2 cell quadrature, then normalized once per family and once for dust.
+Source colors have unit linear RGB luminance. The published Float32 arrays are
+owned read-only by the medium; its frozen wrapper is not permission to mutate
+their elements. Creation owns three private CDFs through a WeakMap, so dropping
+the medium releases their owner. There is no global growing field cache.
+
+The task supports `step()`, `advance(milliseconds = 2)`, `cancel()` and
+`state/result/error/stage/metrics`. It yields at real density rows and integral,
+normalization and CDF phases; 2ms is a cooperative target rather than a hard
+wall-clock ceiling. Only `complete` exposes the result. Cancellation closes the
+generator and releases its unpublished work buffers; failure retains its cause.
+
+`createSpatialGalacticMediumFromVolumes(options)` and
+`createSpatialGalacticMediumFromVolumesTask(options)` accept already compiled
+fields through the same owner and consumers. Supply `seed`,
+`sourceCenter/sourceAxes`, `dustCenter/dustAxes`, `colors`, `extinctionColor`,
+`resolvedFraction`, a `Float32Array` `sourceVolumeTexels` of length 64³×4 and a
+`Float32Array` `dustVolumeTexels` of length 128³. The exported `GALACTIC_SPATIAL_SOURCE_RESOLUTION` (64) and
+`GALACTIC_SPATIAL_DUST_RESOLUTION` (128) define these fixed sizes. Storage is
+x-fastest, then y, then z. Source R/G/B are the three population scalar densities, not RGB emission;
+A must be zero. Values must be finite and nonnegative. The entire outer voxel
+layer of both grids must be zero so their finite tent supports, integration,
+point CDF and renderer frames agree. Nonzero edges fail rather than being clipped.
+Choose a frame with sufficient padding before compiling. SharedArrayBuffer inputs
+are rejected because concurrent writes cannot produce an atomic snapshot.
+
+These entry points preserve density values as-is, without budget normalization
+or gain. Source colors use the same unit-luminance convention as the kernel
+constructor. Each actual population integral is the sum of its Float32 values
+times voxel volume; `sourceComponentIntegrals`, family luminosities,
+`totalLuminosity`, `diskLuminosity` and the private star CDF derive from that same
+measure. `dustIntegral` and `dustCloudIntegral` both report the actual dust field
+integral. At least one source family must have positive finite total measure;
+dust and individual families may be zero. There is no target-luminosity or target-
+dust-integral input. `spatialSynthesis.kind` is `compiled-spatial-volumes` and its
+normalizations are one. This does not alter kernel/brick budget metadata.
+
+The compiled-volume entry points also accept an optional `sourceBrick`:
+`{component, center, axes, rotation, texels}`. `component` is 0, 1 or 2;
+`center` and positive half-`axes` are body-radius vectors; `rotation` is Euler XYZ
+in radians. `texels` is a non-shared Float32Array of length 32³, x-fastest scalar
+density. `GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION` exports that fixed size.
+All densities must be finite/nonnegative and the entire outer voxel layer zero.
+The entry point copies the brick array and its frame at task creation. Its
+integral and CDF are completed cooperatively, without normalization or gain.
+
+A compiled brick is additive to its component's base volume. The caller must
+remove any light it replaces before import; the engine does not infer a budget
+or subtract a coarse component. `sourceComponentIntegrals`, family luminosities,
+`totalLuminosity` and the private virtual base/brick CDF include the actual brick
+integral exactly once. Base source may be empty when the brick supplies positive
+light. A zero brick is valid when other source light is positive.
+`spatialSynthesis.sourceRawIntegrals` describes the base; an imported brick adds
+`spatialSynthesis.sourceBrick` with `baseComponentIntegrals`, actual `rawIntegral`
+and normalization one. The published brick contains `component`, `resolution`,
+`texels`, `center`, `axes`, row-major local-to-body `rotation`, body-to-normalized-
+local `inverse`, `pixelVolume` and `integral`. CPU queries, point sampling and the
+existing local-source renderer consume this same formally owned object; callers
+must not construct a substitute medium wrapper. Support includes all rotated
+tent corners and Float32 point-position rounding, independently of the base frame.
+
+Task construction synchronously copies both base input arrays (12 MiB), the
+optional brick (128 KiB) and small frame/color data, so caller mutation after return cannot affect pending or
+completed fields. This atomic copy is outside the cooperative `advance` budget.
+Validation, actual integration, support bounds and private CDF construction yield
+by rows. Completed arrays are medium-owned and read-only by contract, just as for
+kernel-created fields. Cancelled or failed tasks publish nothing and release their
+work buffers. Finite-grid reconstruction remains an approximation to any upstream
+continuous field; importing a budget does not imply continuous-field equivalence.
+
+Existing `sampleGalacticMedium(medium, position, output)` consumes either
+revision in place, without stationary-query allocation. Supply reusable
+`output.emission` and `output.extinction` arrays. `sampleGalacticStars` keeps
+its validated 0–16384 count boundary and returns independent snapshots with
+stable prefixes. Component-conditioned CDF draws and per-axis tent offsets
+follow the same actual Float32 source field, up to returned position rounding.
+The Three.js adapter shares these source/dust fields between volume and points;
+revision 3 compiles out the old planar contribution.
+
+`createGalacticMediumVolume(descriptor, options)` accepts optional `starCounts`
+(`{low: 512, auto: 2048, high: 4096}` by default) and `resolvedFraction`
+(the medium's value by default). Counts must be ordered positive integers up to
+16384; the fraction must be finite in 0–1. Creation snapshots these options and
+allocates the high count once. Quality changes retain the attributes and textures,
+select the requested prefix, and normalize its actual summed raw luminosity to
+`resolvedFraction * totalLuminosity`; the continuum receives the remaining budget.
+The source/dust field, medium object, seed, PSF and 32/64/96 integration steps do
+not change. Higher capacity is explicit; default renderers still allocate 4096.
+
+`createCosmos` and `createGalaxyHaze` accept `galacticMediumOptions(descriptor)`.
+The resolver runs once per medium descriptor installation, returns the above
+options (or `undefined` for defaults), and is not called by frame/quality updates.
+It does not affect legacy descriptors. `userData.stats.starBufferBytes` on the
+volume, haze and cosmos reports the live medium point-attribute payload: 28 bytes
+per capacity point (position, color and raw luminosity). This is the retained CPU
+array size and corresponding GPU upload payload size individually, not their sum,
+texture bytes or a measurement of driver-allocated GPU memory. Sampling also
+briefly creates one component-index byte per point; the renderer does not retain
+that auxiliary array. Disposal clears the live payload statistic.
+
+These are artist-defined emission/extinction measures, not mass, an observed
+star catalogue, fluid evolution or N-body physics. Grid quadrature, trilinear
+reconstruction, half-float upload and radiative-transfer integration each have
+finite approximation error. A matching total luminosity does not imply equal
+local density, equal finite star realizations or equal received image flux.
