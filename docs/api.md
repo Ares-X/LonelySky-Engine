@@ -254,6 +254,33 @@ Generation uses artistic placement. Volume and black-hole rendering uses optical
 approximations. Camera depth compression and local gravity do not form a
 physically consistent galaxy-to-planet simulation.
 
+## Bloom composition
+
+`createBloomPass({strength = .35, radius = .65, threshold = 1})` returns the
+existing Three.js `UnrealBloomPass`, initially at 1 by 1 pixels for the composer
+to size. Native `strength`, `radius`, `threshold`, `enabled`, `setSize` and render
+behavior remain available. Both the standalone view and integrating hosts use
+this factory as the owner of discrete bloom normalization.
+
+Each finite separable Gaussian kernel is divided by its actual
+`centerWeight + 2 * sum(gaussianWeights)`, without moving its paired tap offsets.
+The installed Three.js 0.186.1 composite multiplies by 3; its five factors
+`[1, .8, .6, .4, .2]` and their `1.2 - factor` complements each sum to 3.
+Neutral tint coefficients divide that composite gain by 9. Thus a constant,
+neutral HDR field above the high-pass transition receives an added bloom DC
+fraction equal to `strength` for every radius in the existing 0–1 domain,
+subject to upload/render rounding. Radius still controls the spatial mixture;
+threshold and its transition still determine which light enters bloom.
+
+This is a global artistic optical-operator change, including bloom from solid
+bodies, nebulae and black holes. It does not change scene order, depth, PSF,
+source budgets, samples or the near-observer variance of point proxies. It does
+not establish energy conservation for arbitrary finite images, physical light
+transport, GPU performance or visual acceptance. Directly changing the returned
+pass's tint coefficients changes this neutral per-channel DC contract.
+`dispose()` retains native cleanup, also releases the high-pass material omitted
+by Three.js 0.186.1, and is idempotent. No extra targets or render passes are added.
+
 ## Elliptic orbital mechanics (0.3)
 
 `orbitalPeriod({semiMajorAxis, mu})` and `evaluateOrbit(elements, timeSeconds)`

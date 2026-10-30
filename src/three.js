@@ -2,6 +2,7 @@
 export { createUniverseView } from './render/view.js';
 export { createNebula } from './render/nebula.js';
 export { NebulaRenderPass } from './render/nebula-render-pass.js';
+export { createBloomPass } from './render/bloom.js';
 export { createBlackHole } from './render/blackhole.js';
 export { createDeepSky, deepSkyUniforms, setDeepSkyEnvironment } from './render/deep-sky.js';
 export { planetMaterial, atmosphereMaterial, ringMaterial, starMaterial } from './render/materials.js';

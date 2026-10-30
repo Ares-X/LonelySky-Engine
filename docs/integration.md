@@ -56,6 +56,16 @@ target/pass dimensions and renderer canvas floor/viewport rounding. This avoids
 The renderer uses the public `setDrawingBufferSize` API; canvas CSS remains owned
 by the container. No composer private field is modified.
 
+Use `createBloomPass` from `src/three.js` (or `src/render/bloom.js`) in the
+existing `NebulaRenderPass → bloom → OutputPass` chain. It returns the native
+pass, so existing quality/ambience strength changes, composer resizing and
+lifetime ownership continue at their current owners. The factory normalizes the
+finite blur kernels and neutral composite DC gain once during construction;
+it does not add a renderer, target, scene replay or per-frame normalization.
+Strength denotes the added DC fraction for a constant HDR field above the
+high-pass transition, not a bound on arbitrary scene pixels or total energy.
+See the API for the global artistic change and tint/lifecycle boundaries.
+
 ## Procedural scenery appearance
 
 The directional sky shares absorbing dust lanes with the black-hole lens. Galaxy
