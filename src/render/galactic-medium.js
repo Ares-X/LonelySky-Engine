@@ -358,16 +358,23 @@ function fieldTexture(values,resolution,format,signed=false,volume=false){
   return texture;
 }
 
+const DEFAULT_STAR_COUNTS=Object.freeze({low:512,auto:2048,high:4096});
+
 /** One finite emitting/absorbing medium and its resolved 3D stellar proxies.
  * The caller owns world placement and updates localCamera once per frame.
  * The same generated table supplies both paths. No photograph, extra canvas,
  * clock or animation loop is involved. All resources have this mesh's lifetime.
  */
-export function createGalacticMediumVolume(descriptor) {
+export function createGalacticMediumVolume(descriptor,{starCounts=DEFAULT_STAR_COUNTS,resolvedFraction}={}) {
   const medium=descriptor.medium;
   const spatial=medium?.revision===GALACTIC_SPATIAL_MEDIUM_REVISION;
   if(!medium||!spatial&&medium.revision!==GALACTIC_MEDIUM_REVISION)
     throw new TypeError('Galactic volume requires the current medium revision; legacy RGB columns are not population densities');
+  const {low,auto,high}=starCounts;
+  if(!Number.isInteger(low)||!Number.isInteger(auto)||!Number.isInteger(high)||low<1||low>auto||auto>high||high>GALACTIC_MEDIUM_MAX_STARS)
+    throw new RangeError('Galactic star counts must be ordered low/auto/high integers from 1 to 16384');
+  const fraction=resolvedFraction===undefined?medium.resolvedFraction:resolvedFraction;
+  if(!Number.isFinite(fraction)||fraction<0||fraction>1)throw new RangeError('Galactic resolved fraction must be finite from 0 to 1');
   if(!spatial&&(!(medium.texels instanceof Float32Array)||medium.texels.length!==medium.resolution**2*4))
     throw new TypeError('Galactic volume requires compiled population columns');
   if(!spatial&&(!(medium.verticalGeometry instanceof Float32Array)||medium.verticalGeometry.length!==medium.resolution**2*4))
@@ -426,7 +433,7 @@ export function createGalacticMediumVolume(descriptor) {
   const shared={localCamera:{value:new THREE.Vector3()},radius:{value:descriptor.radius},brightness:{value:1},structureVisibility:{value:1}};
   const uniforms={...mediumUniforms,...shared,shapeScale:{value:new THREE.Vector3(1,1,1)},
     heightBound:{value:Math.max(uploadedStellarBound,uploadedDustBound,Math.abs(sourceCenter[1])+sourceAxes[1])+1e-6},
-    continuumWeight:{value:1-medium.resolvedFraction},structureKind:{value:0},uVisibility:{value:1},uDensity:{value:1},steps:{value:64},
+    continuumWeight:{value:1-fraction},structureKind:{value:0},uVisibility:{value:1},uDensity:{value:1},steps:{value:64},
     worldOrientation:{value:new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...descriptor.orientation)))},
     uSceneDepth:{value:null},uHasSceneDepth:{value:0},uDepthResolution:{value:new THREE.Vector2(1,1)},uCameraNearFar:{value:new THREE.Vector2(1,220000)}};
   const defines=spatial?{GALACTIC_SPATIAL_EMISSION:1}:{};
@@ -437,10 +444,10 @@ export function createGalacticMediumVolume(descriptor) {
     blendSrcAlpha:THREE.ZeroFactor,blendDstAlpha:THREE.OneFactor});
   const geometry=hull(supportRadius),mesh=new THREE.Mesh(geometry,material);
   mesh.name=descriptor.id;mesh.rotation.fromArray(descriptor.orientation);mesh.scale.setScalar(descriptor.radius);mesh.frustumCulled=false;
-  const sample=sampleGalacticStars(medium,descriptor.seed,GALACTIC_MEDIUM_MAX_STARS),starGeometry=new THREE.BufferGeometry();
-  starGeometry.setAttribute('position',new THREE.BufferAttribute(sample.positions,3));
-  starGeometry.setAttribute('color',new THREE.BufferAttribute(sample.colors,3));
-  starGeometry.setAttribute('rawLuminosity',new THREE.BufferAttribute(sample.rawLuminosities,1));
+  const {positions,colors,rawLuminosities}=sampleGalacticStars(medium,descriptor.seed,high),starGeometry=new THREE.BufferGeometry();
+  starGeometry.setAttribute('position',new THREE.BufferAttribute(positions,3));
+  starGeometry.setAttribute('color',new THREE.BufferAttribute(colors,3));
+  starGeometry.setAttribute('rawLuminosity',new THREE.BufferAttribute(rawLuminosities,1));
   // Both populations occupy this real, finite parent support. A common sort
   // center keeps the volume before its already-attenuated points at equal
   // depth; it does not change ordering against foreground transparent bodies.
@@ -450,18 +457,18 @@ export function createGalacticMediumVolume(descriptor) {
   const starMaterial=new THREE.ShaderMaterial({uniforms:starUniforms,defines,vertexShader:pointsVertex,fragmentShader:pointsFragment,
     transparent:true,blending:THREE.AdditiveBlending,depthWrite:false,depthTest:true});
   const stars=new THREE.Points(starGeometry,starMaterial);stars.frustumCulled=false;mesh.add(stars);
-  const stats={stars:0,textureBytes:(table?table.image.data.byteLength:0)+(verticalGeometry?verticalGeometry.image.data.byteLength:0)+stellarVolumeTable.image.data.byteLength+dustVolumeTable.image.data.byteLength+(localSourceTable?localSourceTable.image.data.byteLength:0)+psf.texture.image.data.byteLength,drawCalls:2,totalLuminosity:medium.totalLuminosity,resolvedLuminosity:0,unresolvedLuminosity:medium.totalLuminosity};
+  const stats={stars:0,starBufferBytes:positions.byteLength+colors.byteLength+rawLuminosities.byteLength,textureBytes:(table?table.image.data.byteLength:0)+(verticalGeometry?verticalGeometry.image.data.byteLength:0)+stellarVolumeTable.image.data.byteLength+dustVolumeTable.image.data.byteLength+(localSourceTable?localSourceTable.image.data.byteLength:0)+psf.texture.image.data.byteLength,drawCalls:2,totalLuminosity:medium.totalLuminosity,resolvedLuminosity:0,unresolvedLuminosity:medium.totalLuminosity};
   mesh.userData.isGalacticMedium=true;mesh.userData.stats=stats;
   let disposed=false,previousCount=-1;
   mesh.userData.setQuality=(quality,pixelHeight=1,pixelRatio=1)=>{
     if(disposed)return;
-    const count=quality==='low'?512:quality==='high'?4096:2048;
+    const count=quality==='low'?low:quality==='high'?high:auto;
     uniforms.steps.value=quality==='low'?32:quality==='high'?96:64;
     starUniforms.pixelHeight.value=pixelHeight;starUniforms.ratio.value=pixelRatio;psf.setPixelRatio(pixelRatio);
     if(count===previousCount)return;
-    let power=0;for(let i=0;i<count;i++)power+=sample.rawLuminosities[i];
-    const represented=medium.resolvedFraction*medium.totalLuminosity;
-    starUniforms.powerScale.value=represented/power;uniforms.continuumWeight.value=1-medium.resolvedFraction;
+    let power=0;for(let i=0;i<count;i++)power+=rawLuminosities[i];
+    const represented=fraction*medium.totalLuminosity;
+    starUniforms.powerScale.value=represented/power;uniforms.continuumWeight.value=1-fraction;
     starGeometry.setDrawRange(0,count);previousCount=count;stats.stars=count;
     stats.resolvedLuminosity=represented;stats.unresolvedLuminosity=medium.totalLuminosity-represented;
   };
@@ -473,7 +480,7 @@ export function createGalacticMediumVolume(descriptor) {
   };
   mesh.userData.dispose=()=>{
     if(disposed)return;disposed=true;uniforms.uSceneDepth.value=null;uniforms.uHasSceneDepth.value=0;
-    psf.dispose();if(table)table.dispose();if(verticalGeometry)verticalGeometry.dispose();if(localSourceTable)localSourceTable.dispose();stellarVolumeTable.dispose();dustVolumeTable.dispose();geometry.dispose();material.dispose();starGeometry.dispose();starMaterial.dispose();mesh.clear();
+    psf.dispose();if(table)table.dispose();if(verticalGeometry)verticalGeometry.dispose();if(localSourceTable)localSourceTable.dispose();stellarVolumeTable.dispose();dustVolumeTable.dispose();geometry.dispose();material.dispose();starGeometry.dispose();starMaterial.dispose();mesh.clear();stats.starBufferBytes=0;
   };
   return mesh;
 }

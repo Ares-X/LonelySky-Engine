@@ -102,6 +102,12 @@ test('independent midpoint volume integrals recover disk and 3D bulge budgets', 
   assert.ok(Math.abs(bulgeIntegral / bulge.totalLuminosity - 1) < 2e-5, String(bulgeIntegral));
 });
 
+test('explicit larger populations preserve the complete original sampling prefix', () => {
+  const full=sampleGalacticStars(fixture,'expanded-prefix',16384),previous=sampleGalacticStars(fixture,'expanded-prefix',4096);
+  assert.equal(full.rawLuminosities.length,16384);
+  for(const key of Object.keys(previous))assert.deepEqual(full[key].subarray(0,previous[key].length),previous[key]);
+});
+
 test('star qualities have exact prefixes, unit-luminance colors, actual support and budget-weighted components', () => {
   const full = sampleGalacticStars(fixture, 'proxy-stream', 4096), low = sampleGalacticStars(fixture, 'proxy-stream', 137);
   for (const key of Object.keys(full)) assert.deepEqual(low[key], full[key].slice(0, low[key].length));
@@ -145,7 +151,7 @@ test('disk proxies follow bilinear column moments and the compact vertical measu
 
 test('external creation and sampling limits reject unsupported input', () => {
   for (const options of [{ resolution: 1025 }, { resolution: 31 }, { morphology: 'unknown' }, { stellarHeight: .2 }, {youngStellarHeight: 0}, {youngStellarHeight: .04}, { dustHeight: 0 }, { totalLuminosity: NaN }, { arms: 0 }, { bulgeAxes: [1, 1, 1] }, { bulgeAxes: [1e-200, 1e-200, 1e-200] }, { palette: { old: [0, 0, 0], young: [1, 1, 1], dust: [1, 1, 1] } }]) assert.throws(() => createGalacticMedium({ seed: 'limits', ...options }));
-  for (const count of [-1, 4097, 1.5]) assert.throws(() => sampleGalacticStars(fixture, 'limits', count));
+  for (const count of [-1, 16385, 1.5, NaN, Infinity]) assert.throws(() => sampleGalacticStars(fixture, 'limits', count));
   const noDust = createGalacticMedium({ seed: 'no-dust', resolution: 32, dustOpticalDepth: 0 });
   for (let i = 3; i < noDust.texels.length; i += 4) assert.equal(noDust.texels[i], 0);
   assert.ok(createGalacticMedium({ seed: 'max-height', resolution: 32, stellarHeight: .1, dustHeight: .1 }).supportRadius <= 1);

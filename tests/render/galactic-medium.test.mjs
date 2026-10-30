@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import {createGalacticMedium} from '../../src/galactic-medium.js';
+import {createGalacticMedium,sampleGalacticStars} from '../../src/galactic-medium.js';
 import {createSpatialGalacticMedium} from '../../src/galactic-spatial-medium.js';
 import {createGalacticMediumVolume} from '../../src/render/galactic-medium.js';
 import {createCosmos} from '../../src/render/cosmos.js';
@@ -13,6 +13,7 @@ const descriptor=()=>({id:'medium-test',seed:'medium-stars',kind:'galaxy',revisi
 test('all quality prefixes share one finite luminous budget and retain GPU buffers',()=>{
   const d=descriptor(),mesh=createGalacticMediumVolume(d),stars=mesh.children[0];
   const position=stars.geometry.attributes.position,colors=stars.geometry.attributes.color,raw=stars.geometry.attributes.rawLuminosity;
+  assert.equal(position.count,4096);assert.equal(mesh.userData.stats.starBufferBytes,4096*28);
   const psf=stars.material.uniforms.stellarPsfTable.value,psfPixels=psf.image.data,initialPsfVersion=psf.version;
   let tablePower=0;const texture=mesh.material.uniforms.mediumTable.value,texels=texture.image.data;
   for(let i=0;i<texels.length;i+=4)tablePower+=(THREE.DataUtils.fromHalfFloat(texels[i])+THREE.DataUtils.fromHalfFloat(texels[i+1]))*d.medium.pixelArea;
@@ -31,6 +32,73 @@ test('all quality prefixes share one finite luminous budget and retain GPU buffe
     assert.equal(mesh.userData.stats.resolvedLuminosity,d.medium.totalLuminosity*d.medium.resolvedFraction);
   }
   mesh.userData.dispose();
+});
+
+test('explicit 16k representation reuses one source field and normalizes each selected prefix',()=>{
+  const d=descriptor(),fraction=d.medium.resolvedFraction,starCounts={low:512,auto:2048,high:16384};
+  const defaults=createGalacticMediumVolume(d),mesh=createGalacticMediumVolume(d,{starCounts,resolvedFraction:.6}),stars=mesh.children[0];
+  try{
+    const attributes=stars.geometry.attributes,buffers={...attributes},psf=stars.material.uniforms.stellarPsfTable.value;
+    const source=mesh.material.uniforms.stellarVolumeTable.value,dust=mesh.material.uniforms.dustVolumeTable.value;
+    assert.equal(attributes.position.count,16384);assert.equal(mesh.userData.stats.starBufferBytes,16384*28);
+    assert.equal(mesh.userData.stats.textureBytes,defaults.userData.stats.textureBytes);
+    for(const key of ['mediumTable','verticalGeometryTable','stellarVolumeTable','dustVolumeTable'])
+      assert.deepEqual(mesh.material.uniforms[key].value.image.data,defaults.material.uniforms[key].value.image.data);
+    const old=sampleGalacticStars(d.medium,d.seed,4096);
+    for(const [name,key] of [['position','positions'],['color','colors'],['rawLuminosity','rawLuminosities']])
+      assert.deepEqual(attributes[name].array.subarray(0,old[key].length),old[key]);
+    starCounts.high=8192;
+    for(const [quality,count,steps] of [['high',16384,96],['low',512,32],['auto',2048,64],['high',16384,96]]){
+      mesh.userData.setQuality(quality,1080,1);
+      for(const name of Object.keys(buffers))assert.equal(stars.geometry.attributes[name],buffers[name]);
+      assert.equal(stars.geometry.drawRange.count,count);
+      assert.equal(stars.material.uniforms.stellarPsfTable.value,psf);
+      assert.equal(mesh.material.uniforms.stellarVolumeTable.value,source);assert.equal(mesh.material.uniforms.dustVolumeTable.value,dust);
+      assert.equal(mesh.material.uniforms.steps.value,steps);assert.equal(mesh.material.uniforms.continuumWeight.value,.4);
+      let represented=0;for(let i=0;i<count;i++)represented+=attributes.rawLuminosity.getX(i)*stars.material.uniforms.powerScale.value;
+      assert.ok(Math.abs(represented/d.medium.totalLuminosity-.6)<1e-13);
+      assert.ok(Math.abs(represented+mesh.userData.stats.unresolvedLuminosity-d.medium.totalLuminosity)<1e-13);
+    }
+    assert.equal(d.medium.resolvedFraction,fraction);
+    assert.equal(defaults.userData.stats.resolvedLuminosity,fraction*d.medium.totalLuminosity);
+    let releases=0;stars.geometry.addEventListener('dispose',()=>releases++);
+    mesh.userData.dispose();mesh.userData.dispose();assert.equal(releases,1);assert.equal(mesh.userData.stats.starBufferBytes,0);
+  }finally{mesh.userData.dispose();defaults.userData.dispose();}
+});
+
+test('representation options reject unsupported counts and fractions before resource creation',()=>{
+  const d=descriptor();
+  for(const starCounts of [{low:0,auto:2048,high:4096},{low:513,auto:512,high:4096},
+    {low:512,auto:4097,high:4096},{low:512,auto:2048,high:16385},{low:512,auto:2048,high:NaN},
+    {low:1.5,auto:2048,high:4096},{low:512,high:4096}])assert.throws(()=>createGalacticMediumVolume(d,{starCounts}),/star counts/);
+  for(const resolvedFraction of [-.01,1.01,NaN,Infinity,null])assert.throws(()=>createGalacticMediumVolume(d,{resolvedFraction}),/resolved fraction/);
+  for(const resolvedFraction of [0,1]){
+    const mesh=createGalacticMediumVolume(d,{resolvedFraction});
+    try{
+      assert.equal(mesh.userData.stats.resolvedLuminosity,d.medium.totalLuminosity*resolvedFraction);
+      assert.equal(mesh.userData.stats.unresolvedLuminosity,d.medium.totalLuminosity*(1-resolvedFraction));
+      assert.equal(mesh.material.uniforms.continuumWeight.value,1-resolvedFraction);
+    }finally{mesh.userData.dispose();}
+  }
+});
+
+test('cosmos resolves options once per installed medium and leaves other populations at defaults',()=>{
+  const selected=descriptor(),other={...selected,id:'ordinary-medium',seed:'ordinary-stars'},calls=[];
+  const cosmos=createCosmos({descriptorProvider:coordinate=>coordinate.x===0&&coordinate.y===0&&coordinate.z===0?[selected,other]:[],
+    gridCells:4096,structures:true,catalogue:{capacity:4,supportFade:true,immutable:true},
+    galacticMediumOptions:d=>{calls.push(d);return d===selected?{starCounts:{low:512,auto:2048,high:16384},resolvedFraction:.6}:undefined;}});
+  const frame={sectorIndex:encodeCell({x:0,y:0,z:0}),cameraPosition:[0,0,0],quality:'high'};
+  try{
+    cosmos.userData.update(frame);
+    const [expanded,ordinary]=cosmos.children[1].children,position=expanded.children[0].geometry.attributes.position;
+    assert.deepEqual(calls,[selected,other]);assert.equal(expanded.children[0].geometry.drawRange.count,16384);
+    assert.equal(ordinary.children[0].geometry.drawRange.count,4096);assert.equal(cosmos.userData.stats.particles,20480);
+    assert.equal(cosmos.userData.stats.maxParticles,28672);assert.equal(cosmos.userData.stats.starBufferBytes,20480*28);
+    cosmos.userData.update({...frame,quality:'low'});cosmos.userData.update(frame);
+    assert.deepEqual(calls,[selected,other]);assert.equal(expanded.children[0].geometry.attributes.position,position);
+    assert.equal(cosmos.userData.stats.starBufferBytes,20480*28);
+  }finally{cosmos.userData.dispose();}
+  assert.equal(cosmos.userData.stats.starBufferBytes,0);
 });
 
 test('legacy RGB columns are rejected before they can be read as population densities',()=>{
@@ -94,6 +162,17 @@ test('spatial source families share the actual RGBA field and own only their rea
   const source=u.stellarVolumeTable.value.image.data,integrals=[0,0,0];
   for(let i=0;i<source.length;i+=4)for(let p=0;p<3;p++)integrals[p]+=THREE.DataUtils.fromHalfFloat(source[i+p])*d.medium.sourceVolumePixelVolume;
   for(let p=0;p<3;p++)assert.ok(Math.abs(integrals[p]/d.medium.sourceComponentIntegrals[p]-1)<.001);
+  const expanded=createGalacticMediumVolume(d,{starCounts:{low:512,auto:2048,high:16384},resolvedFraction:.6});
+  try{
+    const expandedStars=expanded.children[0];expanded.userData.setQuality('high');
+    assert.equal(expandedStars.geometry.drawRange.count,16384);
+    for(const name of ['position','color','rawLuminosity'])assert.deepEqual(
+      expandedStars.geometry.attributes[name].array.subarray(0,stars.geometry.attributes[name].array.length),stars.geometry.attributes[name].array);
+    let represented=0;for(const value of expandedStars.geometry.attributes.rawLuminosity.array)
+      represented+=value*expandedStars.material.uniforms.powerScale.value;
+    assert.ok(Math.abs(represented/d.medium.totalLuminosity-.6)<1e-13);
+    for(const key of ['stellarVolumeTable','dustVolumeTable'])assert.deepEqual(expanded.material.uniforms[key].value.image.data,u[key].value.image.data);
+  }finally{expanded.userData.dispose();}
   const resources=[mesh.geometry,mesh.material,stars.geometry,stars.material,u.stellarVolumeTable.value,u.dustVolumeTable.value,stars.material.uniforms.stellarPsfTable.value];
   const counts=resources.map(()=>0);resources.forEach((resource,i)=>resource.addEventListener('dispose',()=>counts[i]++));
   mesh.userData.dispose();mesh.userData.dispose();assert.deepEqual(counts,[1,1,1,1,1,1,1]);

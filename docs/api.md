@@ -419,11 +419,32 @@ continuous field; importing a budget does not imply continuous-field equivalence
 Existing `sampleGalacticMedium(medium, position, output)` consumes either
 revision in place, without stationary-query allocation. Supply reusable
 `output.emission` and `output.extinction` arrays. `sampleGalacticStars` keeps
-its validated 0–4096 count boundary and returns independent snapshots with
+its validated 0–16384 count boundary and returns independent snapshots with
 stable prefixes. Component-conditioned CDF draws and per-axis tent offsets
 follow the same actual Float32 source field, up to returned position rounding.
 The Three.js adapter shares these source/dust fields between volume and points;
 revision 3 compiles out the old planar contribution.
+
+`createGalacticMediumVolume(descriptor, options)` accepts optional `starCounts`
+(`{low: 512, auto: 2048, high: 4096}` by default) and `resolvedFraction`
+(the medium's value by default). Counts must be ordered positive integers up to
+16384; the fraction must be finite in 0–1. Creation snapshots these options and
+allocates the high count once. Quality changes retain the attributes and textures,
+select the requested prefix, and normalize its actual summed raw luminosity to
+`resolvedFraction * totalLuminosity`; the continuum receives the remaining budget.
+The source/dust field, medium object, seed, PSF and 32/64/96 integration steps do
+not change. Higher capacity is explicit; default renderers still allocate 4096.
+
+`createCosmos` and `createGalaxyHaze` accept `galacticMediumOptions(descriptor)`.
+The resolver runs once per medium descriptor installation, returns the above
+options (or `undefined` for defaults), and is not called by frame/quality updates.
+It does not affect legacy descriptors. `userData.stats.starBufferBytes` on the
+volume, haze and cosmos reports the live medium point-attribute payload: 28 bytes
+per capacity point (position, color and raw luminosity). This is the retained CPU
+array size and corresponding GPU upload payload size individually, not their sum,
+texture bytes or a measurement of driver-allocated GPU memory. Sampling also
+briefly creates one component-index byte per point; the renderer does not retain
+that auxiliary array. Disposal clears the live payload statistic.
 
 These are artist-defined emission/extinction measures, not mass, an observed
 star catalogue, fluid evolution or N-body physics. Grid quadrature, trilinear

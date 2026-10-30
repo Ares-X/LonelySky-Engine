@@ -176,7 +176,7 @@ export function loadedMacros(sectorIndex, seed = 'lonelysky', { descriptorProvid
  * The budget covers legacy sampling/assembly, not catalogue or haze creation,
  * renderer compilation or GPU upload. Default update remains synchronous.
  */
-export function createCosmos({ seed = 'lonelysky', descriptorProvider = describeMacro, gridCells = MACRO_CELLS, structures = false, catalogue = null, incremental = false, preparationBudgetMs = 2 } = {}) {
+export function createCosmos({ seed = 'lonelysky', descriptorProvider = describeMacro, gridCells = MACRO_CELLS, structures = false, catalogue = null, incremental = false, preparationBudgetMs = 2, galacticMediumOptions } = {}) {
   if (!Number.isInteger(gridCells) || gridCells <= 0 || 32768 % gridCells !== 0 || typeof descriptorProvider !== 'function') throw new TypeError('Invalid cosmos grid or descriptor provider');
   if (typeof incremental !== 'boolean' || !Number.isFinite(preparationBudgetMs) || preparationBudgetMs <= 0) throw new TypeError('Invalid cosmos preparation options');
   const catalogueOptions = { descriptorProvider, gridCells };
@@ -243,7 +243,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
   });
   if (supportFade) material.uniforms.structureWeights = { value: supportVisibility };
   const points = new THREE.Points(geometry, material); points.frustumCulled = false; group.add(points);
-  const haze = createGalaxyHaze({ seed, structures, supportVisibility }); group.add(haze);
+  const haze = createGalaxyHaze({ seed, structures, supportVisibility, galacticMediumOptions }); group.add(haze);
   // Only these producers guarantee that an ID has the same sampling inputs
   // for this instance's fixed seed. Custom providers may change a shape at
   // the same ID; they retain the uncached path and public snapshot contract.
@@ -262,7 +262,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
   const macroFor = cell => `${Math.floor(cell.x / gridCells)},${Math.floor(cell.y / gridCells)},${Math.floor(cell.z / gridCells)}`;
   const cellKey = cell => `${cell.x},${cell.y},${cell.z}`;
   const sampleBytes = sample => sample.positions.byteLength + sample.colors.byteLength + sample.sizes.byteLength;
-  Object.assign(stats, { activeSampleBytes: 0, activeGeometryBytes: 0, pendingSampleBytes: 0, pendingGeometryBytes: 0,
+  Object.assign(stats, { starBufferBytes: 0, activeSampleBytes: 0, activeGeometryBytes: 0, pendingSampleBytes: 0, pendingGeometryBytes: 0,
     preparationStage: 'idle', preparationSlices: 0, preparationWorkMs: 0, maxPreparationSliceMs: 0,
     preparationTotalMs: 0, peakPendingSampleBytes: 0, peakPendingGeometryBytes: 0, requestMs: 0, hazePublishMs: 0, publishMs: 0 });
 
@@ -543,11 +543,12 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     const volumes = haze.userData.update(hazeFrame);
     const activePoints = lastCount ? geometry.attributes.position.count : 0;
     stats.particles=activePoints+haze.userData.stats.stars;
+    stats.starBufferBytes=haze.userData.stats.starBufferBytes;
     stats.maxParticles=(structures?capacity*PARTICLES_PER_GALAXY:MAX_COSMOS_PARTICLES)
       +haze.userData.stats.starCapacity-haze.userData.stats.media*PARTICLES_PER_GALAXY;
     stats.batches = home ? 0 : Number(activePoints > 0) + volumes;
     if (publishedJob) settleJob(publishedJob, null, true);
   };
-  group.userData.dispose = () => { if (disposed) return; disposed = true; cancelPreparation(abortError('Cosmos disposed')); failure = null; geometry.dispose(); for (const name in geometry.attributes) geometry.deleteAttribute(name); material.dispose(); haze.userData.dispose(); if (supportFade) material.uniforms.structureWeights.value = null; supportVisibility = null; group.clear(); samples = []; descriptors = []; centers = []; sampleCache.clear(); stats.sampleCacheBytes = stats.activeSampleBytes = stats.activeGeometryBytes = 0; stats.visible = false; stats.batches = 0; };
+  group.userData.dispose = () => { if (disposed) return; disposed = true; cancelPreparation(abortError('Cosmos disposed')); failure = null; geometry.dispose(); for (const name in geometry.attributes) geometry.deleteAttribute(name); material.dispose(); haze.userData.dispose(); if (supportFade) material.uniforms.structureWeights.value = null; supportVisibility = null; group.clear(); samples = []; descriptors = []; centers = []; sampleCache.clear(); stats.sampleCacheBytes = stats.activeSampleBytes = stats.activeGeometryBytes = stats.starBufferBytes = 0; stats.visible = false; stats.batches = 0; };
   return group;
 }

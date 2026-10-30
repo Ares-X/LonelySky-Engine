@@ -3,7 +3,7 @@ import {GALACTIC_SPATIAL_MEDIUM_REVISION, sampleSpatialGalacticMedium, sampleSpa
 
 export const GALACTIC_MEDIUM_REVISION = 2;
 export const GALACTIC_MEDIUM_MAX_RESOLUTION = 1024;
-export const GALACTIC_MEDIUM_MAX_STARS = 4096;
+export const GALACTIC_MEDIUM_MAX_STARS = 16384;
 const Y = [.2126, .7152, .0722];
 export const GALACTIC_MEDIUM_STELLAR_VOLUME_RESOLUTION = 64;
 export const GALACTIC_MEDIUM_DUST_VOLUME_RESOLUTION = 128;
@@ -717,7 +717,7 @@ function verticalQuantile(probability) {
  */
 export function sampleGalacticStars(medium, seed, count) {
   if (typeof seed !== 'string') throw new TypeError('Galactic stars require a string seed');
-  if (!Number.isInteger(count) || count < 0 || count > GALACTIC_MEDIUM_MAX_STARS) throw new RangeError('Galactic star count must be 0–4096');
+  if (!Number.isInteger(count) || count < 0 || count > GALACTIC_MEDIUM_MAX_STARS) throw new RangeError('Galactic star count must be 0–16384');
   if (medium.revision === GALACTIC_SPATIAL_MEDIUM_REVISION) return sampleSpatialGalacticStars(medium, seed, count);
   const random = randomFromSeed(`${seed}:galactic-stars-v2`), {diskCdf: cdf, bulgeCdf} = fields.get(medium), n = medium.resolution;
   const positions = new Float32Array(count * 3), colors = new Float32Array(count * 3);

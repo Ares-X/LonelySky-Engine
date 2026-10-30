@@ -378,9 +378,10 @@ export function galaxyHazeScale(descriptor) {
   return [1, 1, 1];
 }
 
-export function createGalaxyHaze({ seed = 'lonelysky', structures = false, supportVisibility = null } = {}) {
+export function createGalaxyHaze({ seed = 'lonelysky', structures = false, supportVisibility = null, galacticMediumOptions } = {}) {
+  if(galacticMediumOptions!==undefined&&typeof galacticMediumOptions!=='function')throw new TypeError('Galactic medium options must be a descriptor resolver');
   const group = new THREE.Group(); group.name = 'galaxy-emission-volumes';
-  const stats={stars:0,starCapacity:0,media:0};group.userData.stats=stats;
+  const stats={stars:0,starCapacity:0,starBufferBytes:0,media:0};group.userData.stats=stats;
   const geometry = new THREE.SphereGeometry(1, 40, 24);
   const noiseRandom = randomFromSeed(`${seed}:galaxy-dust-texture-v1`);
   const lattice = Float32Array.from({length: 64 * 64}, () => noiseRandom());
@@ -415,11 +416,11 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       if(mesh.userData.isGalacticMedium)mesh.userData.dispose();
       else mesh.material.dispose();
     }
-    group.clear(); descriptors = next;stats.stars=0;stats.starCapacity=0;stats.media=0;
+    group.clear(); descriptors = next;stats.stars=0;stats.starCapacity=0;stats.starBufferBytes=0;stats.media=0;
     for (const descriptor of descriptors) {
       if(descriptor.medium){
-        const medium=createGalacticMediumVolume(descriptor);group.add(medium);
-        stats.starCapacity+=medium.children[0].geometry.attributes.position.count;stats.media++;continue;
+        const medium=createGalacticMediumVolume(descriptor,galacticMediumOptions?.(descriptor));group.add(medium);
+        stats.starCapacity+=medium.children[0].geometry.attributes.position.count;stats.starBufferBytes+=medium.userData.stats.starBufferBytes;stats.media++;continue;
       }
       const shape = galaxyHazeScale(descriptor);
       const appearance = describeGalaxyAppearance(descriptor);
@@ -535,7 +536,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       else mesh.material.dispose();
     }
     geometry.dispose(); structureNoise.dispose(); group.clear(); descriptors = []; supportVisibility = null;
-    stats.stars=stats.starCapacity=stats.media=0;
+    stats.stars=stats.starCapacity=stats.starBufferBytes=stats.media=0;
   };
   return group;
 }

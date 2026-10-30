@@ -187,6 +187,15 @@ Installing a medium through `createGalaxyHaze` requires shared `supportVisibilit
 `createCosmos` supplies it through its `supportFade` path. Standalone calls without
 that table reject medium descriptors before the legacy distance-admission path.
 
+For a selected medium, the host can pass `galacticMediumOptions: descriptor =>
+selected(descriptor) ? {starCounts: {low: 512, auto: 2048, high: 16384},
+resolvedFraction: .6} : undefined` to `createCosmos` (or `createGalaxyHaze`). This
+changes only the resolved/continuum representation of that same field. The
+resolver runs when descriptors are installed, not every frame; unselected media
+retain their 4096 capacity and original resolved fraction. Capacity is bounded at
+16384, and all quality prefixes retain the same total luminous budget. See the
+API's `starBufferBytes` definition when accounting for the additional point data.
+
 ## Physical cosmic surfaces
 
 The optional Three.js entry exports `createCosmicBodies({surfaceTexture,
