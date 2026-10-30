@@ -358,6 +358,40 @@ normalization and CDF phases; 2ms is a cooperative target rather than a hard
 wall-clock ceiling. Only `complete` exposes the result. Cancellation closes the
 generator and releases its unpublished work buffers; failure retains its cause.
 
+`createSpatialGalacticMediumFromVolumes(options)` and
+`createSpatialGalacticMediumFromVolumesTask(options)` accept already compiled
+fields through the same owner and consumers. Supply `seed`,
+`sourceCenter/sourceAxes`, `dustCenter/dustAxes`, `colors`, `extinctionColor`,
+`resolvedFraction`, a `Float32Array` `sourceVolumeTexels` of length 64³×4 and a
+`Float32Array` `dustVolumeTexels` of length 128³. The exported `GALACTIC_SPATIAL_SOURCE_RESOLUTION` (64) and
+`GALACTIC_SPATIAL_DUST_RESOLUTION` (128) define these fixed sizes. Storage is
+x-fastest, then y, then z. Source R/G/B are the three population scalar densities, not RGB emission;
+A must be zero. Values must be finite and nonnegative. The entire outer voxel
+layer of both grids must be zero so their finite tent supports, integration,
+point CDF and renderer frames agree. Nonzero edges fail rather than being clipped.
+Choose a frame with sufficient padding before compiling. SharedArrayBuffer inputs
+are rejected because concurrent writes cannot produce an atomic snapshot.
+
+These entry points preserve density values as-is, without budget normalization
+or gain. Source colors use the same unit-luminance convention as the kernel
+constructor. Each actual population integral is the sum of its Float32 values
+times voxel volume; `sourceComponentIntegrals`, family luminosities,
+`totalLuminosity`, `diskLuminosity` and the private star CDF derive from that same
+measure. `dustIntegral` and `dustCloudIntegral` both report the actual dust field
+integral. At least one source family must have positive finite total measure;
+dust and individual families may be zero. There is no target-luminosity or target-
+dust-integral input. `spatialSynthesis.kind` is `compiled-spatial-volumes` and its
+normalizations are one. This does not alter kernel/brick budget metadata.
+
+Task construction synchronously copies both input arrays (12 MiB) and small
+frame/color data, so caller mutation after return cannot affect pending or
+completed fields. This atomic copy is outside the cooperative `advance` budget.
+Validation, actual integration, support bounds and private CDF construction yield
+by rows. Completed arrays are medium-owned and read-only by contract, just as for
+kernel-created fields. Cancelled or failed tasks publish nothing and release their
+work buffers. Finite-grid reconstruction remains an approximation to any upstream
+continuous field; importing a budget does not imply continuous-field equivalence.
+
 Existing `sampleGalacticMedium(medium, position, output)` consumes either
 revision in place, without stationary-query allocation. Supply reusable
 `output.emission` and `output.extinction` arrays. `sampleGalacticStars` keeps

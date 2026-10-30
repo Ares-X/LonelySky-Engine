@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {setImmediate} from 'node:timers/promises';
 import {createHash} from 'node:crypto';
 import {Euler, Matrix4} from 'three';
-import {createSpatialGalacticMedium, createSpatialGalacticMediumTask, sampleSpatialGalacticMedium, sampleSpatialGalacticStars,
+import {createSpatialGalacticMedium, createSpatialGalacticMediumTask, createSpatialGalacticMediumFromVolumes, createSpatialGalacticMediumFromVolumesTask, sampleSpatialGalacticMedium, sampleSpatialGalacticStars,
   GALACTIC_SPATIAL_MEDIUM_REVISION, GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION} from '../src/galactic-spatial-medium.js';
+import {GALACTIC_SPATIAL_SOURCE_RESOLUTION, GALACTIC_SPATIAL_DUST_RESOLUTION} from '../src/index.js';
 
 const options = () => ({seed: 'generic-spatial-fixture', sourceCenter: [0, .03, 0], sourceAxes: [.85, .5, .85],
   dustCenter: [-.05, 0, .04], dustAxes: [.8, .45, .8], luminosities: [1.2, .6, .3],
@@ -305,4 +306,94 @@ test('completed and cancelled creation buffers are collectible without global CD
   for (let i = 0; i < 4; i++) {await setImmediate(); global.gc();}
   assert.ok(refs.every(ref => ref.deref() === undefined), 'WeakMap CDFs must not keep completed media alive');
   assert.ok(process.memoryUsage().arrayBuffers <= before + 1024 * 1024, 'cancelled/collected media must release their owned source/dust/CDF buffers');
+});
+
+
+const volumeOptions = () => {
+  const sourceVolumeTexels = new Float32Array(GALACTIC_SPATIAL_SOURCE_RESOLUTION ** 3 * 4), dustVolumeTexels = new Float32Array(GALACTIC_SPATIAL_DUST_RESOLUTION ** 3);
+  sourceVolumeTexels[((18 * 64 + 24) * 64 + 12) * 4] = 2;
+  sourceVolumeTexels[((44 * 64 + 40) * 64 + 48) * 4 + 1] = 6;
+  dustVolumeTexels[(70 * 128 + 63) * 128 + 55] = .25;
+  return {seed: 'compiled-volume-fixture', sourceCenter: [.125, -.0625, .25], sourceAxes: [1, .5, .75],
+    dustCenter: [0, 0, 0], dustAxes: [.75, .5, .75], colors: [[1, .8, .6], [.6, .8, 1], [1, .7, .5]],
+    extinctionColor: [.5, 1, 1.5], resolvedFraction: .2, sourceVolumeTexels, dustVolumeTexels};
+};
+
+test('compiled volumes retain caller densities and derive actual luminosity, dust and star CDF from that field', () => {
+  const input = volumeOptions(), m = createSpatialGalacticMediumFromVolumes(input), pixelVolume = 3 / 64 ** 3;
+  assert.deepEqual(m.sourceVolumeTexels, input.sourceVolumeTexels); assert.deepEqual(m.dustVolumeTexels, input.dustVolumeTexels);
+  assert.notEqual(m.sourceVolumeTexels.buffer, input.sourceVolumeTexels.buffer); assert.notEqual(m.dustVolumeTexels.buffer, input.dustVolumeTexels.buffer);
+  assert.equal(m.sourceBrick, null); assert.equal(m.spatialSynthesis.kind, 'compiled-spatial-volumes');
+  assert.deepEqual(m.sourceComponentIntegrals, [2 * pixelVolume, 6 * pixelVolume, 0]);
+  assert.equal(m.oldDiskLuminosity, 2 * pixelVolume); assert.equal(m.youngDiskLuminosity, 6 * pixelVolume); assert.equal(m.bulgeLuminosity, 0);
+  assert.equal(m.totalLuminosity, 8 * pixelVolume); assert.equal(m.diskLuminosity, m.totalLuminosity);
+  assert.equal(m.dustIntegral, .25 * 2.25 / 128 ** 3); assert.equal(m.dustCloudIntegral, m.dustIntegral);
+  const centers = [[12, 24, 18], [48, 40, 44]].map(cell => cell.map((v, a) => m.sourceVolumeCenter[a] + ((v + .5) / 32 - 1) * m.sourceVolumeAxes[a]));
+  const out = output(); sampleSpatialGalacticMedium(m, centers[0], out);
+  assert.deepEqual(out.emission, m.oldStellarColor.map(v => 2 * v));
+  sampleSpatialGalacticMedium(m, [((55.5 / 64) - 1) * .75, (63.5 / 64 - 1) * .5, (70.5 / 64 - 1) * .75], out);
+  assert.deepEqual(out.extinction, [.125, .25, .375]);
+  const sample = sampleSpatialGalacticStars(m, 'compiled-cdf', 20000), prefix = sampleSpatialGalacticStars(m, 'compiled-cdf', 151), counts = [0, 0, 0];
+  assert.deepEqual(prefix.positions, sample.positions.slice(0, 151 * 3));
+  for (let i = 0; i < sample.componentIndices.length; i++) {
+    const c = sample.componentIndices[i]; counts[c]++; assert.ok(c < 2);
+    const p = sample.positions.subarray(i * 3, i * 3 + 3); assert.ok(Math.hypot(...p) <= m.supportRadius); assert.ok(Math.abs(p[1]) <= m.stellarVerticalBound);
+    for (let a = 0; a < 3; a++) assert.ok(Math.abs(p[a] - centers[c][a]) <= 2 * m.sourceVolumeAxes[a] / 64 + 1e-7);
+    sampleSpatialGalacticMedium(m, p, out); assert.ok(out.emission.some(v => v > 0), 'CDF points must inhabit their source tent');
+  }
+  assert.ok(Math.abs(counts[0] / 20000 - .25) < .015); assert.equal(counts[2], 0);
+  const zeroDust = volumeOptions(); zeroDust.dustVolumeTexels.fill(0);
+  const clear = createSpatialGalacticMediumFromVolumes(zeroDust); assert.equal(clear.dustIntegral, 0); assert.equal(clear.dustVerticalBound, 0);
+});
+
+test('compiled tasks detach inputs before yielding, retain completed buffers and never publish cancelled work', () => {
+  const input = volumeOptions(), expected = createSpatialGalacticMediumFromVolumes(input), task = createSpatialGalacticMediumFromVolumesTask(input);
+  input.sourceVolumeTexels.fill(99); input.dustVolumeTexels.fill(99); input.sourceCenter[0] = 9; input.colors[0][0] = 9;
+  assert.equal(task.result, undefined); assert.equal(task.step(), false); assert.equal(task.stage, 'source-cdf-allocation');
+  while (!task.advance(.1)) assert.equal(task.result, undefined);
+  assert.deepEqual(task.result, expected); const stable = task.result.sourceVolumeTexels;
+  assert.equal(task.advance(1), true); assert.equal(task.result.sourceVolumeTexels, stable); assert.equal(task.cancel(), false);
+  const cancelled = createSpatialGalacticMediumFromVolumesTask(volumeOptions());
+  while (cancelled.stage !== 'dust-normalize-row') cancelled.step();
+  assert.equal(cancelled.cancel(), true); assert.equal(cancelled.state, 'cancelled'); assert.equal(cancelled.result, undefined);
+  assert.equal(cancelled.advance(Infinity), true); assert.equal(cancelled.result, undefined);
+});
+
+test('compiled volume boundary fails explicitly for wrong layouts, nonfinite densities, nonzero padding or alpha and zero source measure', () => {
+  const input = volumeOptions();
+  assert.throws(() => createSpatialGalacticMediumFromVolumesTask({...input, sourceVolumeTexels: new Float64Array(64 ** 3 * 4)}), /Float32Array/);
+  assert.throws(() => createSpatialGalacticMediumFromVolumesTask({...input, dustVolumeTexels: new Float32Array(3)}), /128³/);
+  assert.throws(() => createSpatialGalacticMediumFromVolumesTask({...input, sourceAxes: [1, 0, 1]}), /positive/);
+  assert.throws(() => createSpatialGalacticMediumFromVolumesTask({...input, resolvedFraction: NaN}), /Resolved/);
+  assert.throws(() => createSpatialGalacticMediumFromVolumesTask({...input, colors: [[0, 0, 0], [1, 1, 1], [1, 1, 1]]}), /luminance/);
+  for (const [target, index, value, message] of [
+    ['sourceVolumeTexels', 4 * ((18 * 64 + 24) * 64 + 12), NaN, /Float32 density/],
+    ['sourceVolumeTexels', 4 * ((18 * 64 + 24) * 64 + 12), -1, /Float32 density/],
+    ['sourceVolumeTexels', 0, 1, /outer voxel/], ['sourceVolumeTexels', 3, 1, /alpha/],
+    ['dustVolumeTexels', (70 * 128 + 63) * 128 + 55, Infinity, /Float32 density/],
+    ['dustVolumeTexels', 128 ** 3 - 1, 1, /outer voxel/],
+  ]) {
+    const o = volumeOptions(); o[target][index] = value; const task = createSpatialGalacticMediumFromVolumesTask(o);
+    assert.throws(() => task.advance(Infinity), message); assert.equal(task.state, 'failed'); assert.ok(task.error instanceof RangeError);
+    assert.equal(task.result, undefined); assert.equal(task.cancel(), false);
+  }
+  const empty = volumeOptions(); empty.sourceVolumeTexels.fill(0);
+  assert.throws(() => createSpatialGalacticMediumFromVolumes(empty), /source integral/);
+});
+
+test('compiled completed, failed and cancelled tasks release detached snapshots and private CDFs', {skip: typeof global.gc !== 'function'}, async () => {
+  await setImmediate(); global.gc(); const before = process.memoryUsage().arrayBuffers, refs = [], tasks = [];
+  function failedTask() {
+    const invalid = volumeOptions(); invalid.dustVolumeTexels[128 ** 3 - 1] = -1;
+    const task = createSpatialGalacticMediumFromVolumesTask(invalid); assert.throws(() => task.advance(Infinity)); return task;
+  }
+  for (let i = 0; i < 3; i++) {
+    let m = createSpatialGalacticMediumFromVolumes(volumeOptions()); refs.push(new WeakRef(m)); m = null;
+    const cancelled = createSpatialGalacticMediumFromVolumesTask(volumeOptions()); cancelled.step(); cancelled.step(); cancelled.cancel(); tasks.push(cancelled);
+    tasks.push(failedTask());
+    const unstarted = createSpatialGalacticMediumFromVolumesTask(volumeOptions()); unstarted.cancel(); tasks.push(unstarted);
+  }
+  for (let i = 0; i < 4; i++) {await setImmediate(); global.gc();}
+  assert.ok(refs.every(ref => ref.deref() === undefined)); assert.ok(tasks.every(task => task.result === undefined));
+  assert.ok(process.memoryUsage().arrayBuffers <= before + 1024 * 1024, 'retained cancelled/failed tasks must not retain their detached work');
 });

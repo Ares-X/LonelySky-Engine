@@ -2,7 +2,9 @@ import {hashSeed, randomFromSeed} from './random.js';
 
 export const GALACTIC_SPATIAL_MEDIUM_REVISION = 3;
 export const GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION = 32;
-const SOURCE_RESOLUTION = 64, DUST_RESOLUTION = 128;
+export const GALACTIC_SPATIAL_SOURCE_RESOLUTION = 64;
+export const GALACTIC_SPATIAL_DUST_RESOLUTION = 128;
+const SOURCE_RESOLUTION = GALACTIC_SPATIAL_SOURCE_RESOLUTION, DUST_RESOLUTION = GALACTIC_SPATIAL_DUST_RESOLUTION;
 const MAX_SOURCE_KERNELS = 32, MAX_DUST_KERNELS = 24;
 const Y = [.2126, .7152, .0722];
 const PROFILE_INTEGRAL = 32 * Math.PI / 105;
@@ -251,6 +253,50 @@ function* bakeSourceBrick(b, target) {
   return {published: Object.freeze({component: b.kernel.component, resolution: n, texels, center: b.center, axes: b.axes,
     inverse: b.inverse, rotation: b.rotation, pixelVolume: b.pixelVolume, integral}), cdf, rawIntegral, normalization, supportRadius, verticalBound};
 }
+function* finalizeSource(sourceTexels, source, scales = null, validate = false) {
+  yield 'source-cdf-allocation';
+  const cdfs = [new Float64Array(SOURCE_RESOLUTION ** 3), new Float64Array(SOURCE_RESOLUTION ** 3), new Float64Array(SOURCE_RESOLUTION ** 3)];
+  const integrals = [0, 0, 0]; let supportRadius = 0, stellarVerticalBound = 0;
+  for (let z = 0; z < SOURCE_RESOLUTION; z++) for (let y = 0; y < SOURCE_RESOLUTION; y++) {
+    yield 'source-normalize-cdf-row';
+    for (let x = 0; x < SOURCE_RESOLUTION; x++) {
+      const cell = (z * SOURCE_RESOLUTION + y) * SOURCE_RESOLUTION + x; let positive = false;
+      const edge = x === 0 || y === 0 || z === 0 || x === SOURCE_RESOLUTION - 1 || y === SOURCE_RESOLUTION - 1 || z === SOURCE_RESOLUTION - 1;
+      if (validate && sourceTexels[cell * 4 + 3] !== 0) throw new RangeError('Source alpha channel must be zero');
+      for (let p = 0; p < 3; p++) {
+        const i = cell * 4 + p; if (scales) sourceTexels[i] *= scales[p];
+        if (!(Number.isFinite(sourceTexels[i]) && sourceTexels[i] >= 0)) throw new RangeError('Source normalization exceeds Float32 density range');
+        if (validate && edge && sourceTexels[i] !== 0) throw new RangeError('Source outer voxel layer must be zero');
+        integrals[p] += sourceTexels[i] * source.pixelVolume; cdfs[p][cell] = integrals[p]; positive ||= sourceTexels[i] > 0;
+      }
+      if (positive) {
+        supportRadius = Math.max(supportRadius, hatRadius(source, x, y, z));
+        stellarVerticalBound = Math.max(stellarVerticalBound, Math.abs(source.center[1] + ((y + .5) * 2 / SOURCE_RESOLUTION - 1) * source.axes[1]) + 2 * source.axes[1] / SOURCE_RESOLUTION);
+      }
+    }
+  }
+  return {cdfs, integrals, supportRadius, stellarVerticalBound};
+}
+
+function* finalizeDust(dustTexels, dust, dustScale = null, validate = false) {
+  let dustCloudIntegral = 0, dustVerticalBound = 0, supportRadius = 0;
+  for (let z = 0; z < DUST_RESOLUTION; z++) for (let y = 0; y < DUST_RESOLUTION; y++) {
+    yield 'dust-normalize-row';
+    for (let x = 0; x < DUST_RESOLUTION; x++) {
+      const i = (z * DUST_RESOLUTION + y) * DUST_RESOLUTION + x; if (dustScale !== null) dustTexels[i] *= dustScale;
+      if (!(Number.isFinite(dustTexels[i]) && dustTexels[i] >= 0)) throw new RangeError('Dust normalization exceeds Float32 density range');
+      if (validate && dustTexels[i] !== 0 && (x === 0 || y === 0 || z === 0 || x === DUST_RESOLUTION - 1 || y === DUST_RESOLUTION - 1 || z === DUST_RESOLUTION - 1))
+        throw new RangeError('Dust outer voxel layer must be zero');
+      dustCloudIntegral += dustTexels[i] * dust.pixelVolume;
+      if (dustTexels[i] > 0) {
+        supportRadius = Math.max(supportRadius, hatRadius(dust, x, y, z));
+        dustVerticalBound = Math.max(dustVerticalBound, Math.abs(dust.center[1] + ((y + .5) * 2 / DUST_RESOLUTION - 1) * dust.axes[1]) + 2 * dust.axes[1] / DUST_RESOLUTION);
+      }
+    }
+  }
+  return {dustCloudIntegral, dustVerticalBound, supportRadius};
+}
+
 function* bakeSpatialMedium(config) {
   const {source, dust, luminosities} = config;
   yield 'source-allocation';
@@ -275,24 +321,9 @@ function* bakeSpatialMedium(config) {
     if (baseTargets[p] > 0 && !(v > 0 && Number.isFinite(v))) throw new RangeError('Positive source component is unresolved on the fixed 64-cubed grid');
     return baseTargets[p] === 0 ? 0 : baseTargets[p] / v;
   });
-  yield 'source-cdf-allocation';
-  const cdfs = [new Float64Array(SOURCE_RESOLUTION ** 3), new Float64Array(SOURCE_RESOLUTION ** 3), new Float64Array(SOURCE_RESOLUTION ** 3)];
-  const integrals = [0, 0, 0]; let supportRadius = 0, stellarVerticalBound = 0;
-  for (let z = 0; z < SOURCE_RESOLUTION; z++) for (let y = 0; y < SOURCE_RESOLUTION; y++) {
-    yield 'source-normalize-cdf-row';
-    for (let x = 0; x < SOURCE_RESOLUTION; x++) {
-      const cell = (z * SOURCE_RESOLUTION + y) * SOURCE_RESOLUTION + x; let positive = false;
-      for (let p = 0; p < 3; p++) {
-        const i = cell * 4 + p; sourceTexels[i] *= scales[p];
-        if (!(Number.isFinite(sourceTexels[i]) && sourceTexels[i] >= 0)) throw new RangeError('Source normalization exceeds Float32 density range');
-        integrals[p] += sourceTexels[i] * source.pixelVolume; cdfs[p][cell] = integrals[p]; positive ||= sourceTexels[i] > 0;
-      }
-      if (positive) {
-        supportRadius = Math.max(supportRadius, hatRadius(source, x, y, z));
-        stellarVerticalBound = Math.max(stellarVerticalBound, Math.abs(source.center[1] + ((y + .5) * 2 / SOURCE_RESOLUTION - 1) * source.axes[1]) + 2 * source.axes[1] / SOURCE_RESOLUTION);
-      }
-    }
-  }
+  const sourceField = yield* finalizeSource(sourceTexels, source, scales);
+  const {cdfs, integrals} = sourceField;
+  let {supportRadius, stellarVerticalBound} = sourceField;
   for (let p = 0; p < 3; p++) if (baseTargets[p] > 0 && !(integrals[p] > 0 && Number.isFinite(integrals[p])))
     throw new RangeError('Source luminosity is outside the representable Float32 field range');
   const brick = brickConfig ? yield* bakeSourceBrick(brickConfig, brickTarget) : null;
@@ -307,21 +338,28 @@ function* bakeSpatialMedium(config) {
   }
   if (config.dustIntegral > 0 && !(rawDustIntegral > 0 && Number.isFinite(rawDustIntegral))) throw new RangeError('Positive dust is unresolved on the fixed 128-cubed grid');
   const dustScale = config.dustIntegral === 0 ? 0 : config.dustIntegral / rawDustIntegral;
-  let dustCloudIntegral = 0, dustVerticalBound = 0;
-  for (let z = 0; z < DUST_RESOLUTION; z++) for (let y = 0; y < DUST_RESOLUTION; y++) {
-    yield 'dust-normalize-row';
-    for (let x = 0; x < DUST_RESOLUTION; x++) {
-      const i = (z * DUST_RESOLUTION + y) * DUST_RESOLUTION + x; dustTexels[i] *= dustScale;
-      if (!(Number.isFinite(dustTexels[i]) && dustTexels[i] >= 0)) throw new RangeError('Dust normalization exceeds Float32 density range');
-      dustCloudIntegral += dustTexels[i] * dust.pixelVolume;
-      if (dustTexels[i] > 0) {
-        supportRadius = Math.max(supportRadius, hatRadius(dust, x, y, z));
-        dustVerticalBound = Math.max(dustVerticalBound, Math.abs(dust.center[1] + ((y + .5) * 2 / DUST_RESOLUTION - 1) * dust.axes[1]) + 2 * dust.axes[1] / DUST_RESOLUTION);
-      }
-    }
-  }
+  const dustField = yield* finalizeDust(dustTexels, dust, dustScale);
+  const {dustCloudIntegral, dustVerticalBound} = dustField;
+  supportRadius = Math.max(supportRadius, dustField.supportRadius);
   if (config.dustIntegral > 0 && !(dustCloudIntegral > 0 && Number.isFinite(dustCloudIntegral)))
     throw new RangeError('Dust integral is outside the representable Float32 field range');
+  const baseIntegrals = Object.freeze(integrals);
+  const synthesis = Object.freeze({kind: 'finite-artistic-ellipsoid-mixture', sourceKernelCount: config.sources.length, dustKernelCount: config.dusts.length,
+      sourceBrick: brick ? Object.freeze({kernelIndex: brickConfig.kernelIndex, profile: brickConfig.profile, macroSpan: brickConfig.macroSpan, fineSpan: brickConfig.fineSpan,
+        coarseIsolatedIntegral: removedCoarseIntegral, remainingRawIntegral: rawIntegrals[brick.published.component], assignedLuminosity: brickTarget,
+        baseComponentIntegrals: baseIntegrals, rawIntegral: brick.rawIntegral, normalization: brick.normalization,
+        semantics: 'Seeded artistic ribbon replaces one coarse kernel; J(x), point positions and CDF change'}) : null,
+      sourceRawIntegrals: Object.freeze(rawIntegrals), sourceNormalizations: Object.freeze(scales), dustRawIntegral: rawDustIntegral, dustNormalization: dustScale,
+      sourceQuadrature: '2x2x2 midpoint cell-volume average', dustQuadrature: '2x2x2 midpoint cell-volume average',
+      reconstruction: 'Trilinear tents; finite-grid approximation, not pointwise analytic-profile equivalence',
+      ownership: 'Published typed arrays are owned read-only by this medium; no caller mutation',
+      semantics: 'Artist luminosity/extinction density in body-radius coordinates, not matter, fluid, orbit or N-body physics'});
+  return publishSpatialMedium(config, sourceTexels, dustTexels, {cdfs, integrals, supportRadius, stellarVerticalBound, dustCloudIntegral, dustVerticalBound}, brick, synthesis);
+}
+
+function publishSpatialMedium(config, sourceTexels, dustTexels, field, brick, synthesis) {
+  const {source, dust, luminosities} = config;
+  const {cdfs, integrals, supportRadius, stellarVerticalBound, dustCloudIntegral, dustVerticalBound} = field;
   const baseIntegrals = Object.freeze(integrals);
   const combinedIntegrals = brick ? [...baseIntegrals] : integrals;
   if (brick) combinedIntegrals[brick.published.component] += brick.published.integral;
@@ -338,18 +376,57 @@ function* bakeSpatialMedium(config) {
     totalLuminosity: config.totalLuminosity, diskLuminosity: luminosities[0] + luminosities[1],
     oldDiskLuminosity: luminosities[0], youngDiskLuminosity: luminosities[1], bulgeLuminosity: luminosities[2],
     oldStellarColor: config.colors[0], youngStellarColor: config.colors[1], bulgeColor: config.colors[2], extinctionColor: config.extinctionColor, resolvedFraction: config.resolvedFraction,
-    spatialSynthesis: Object.freeze({kind: 'finite-artistic-ellipsoid-mixture', sourceKernelCount: config.sources.length, dustKernelCount: config.dusts.length,
-      sourceBrick: brick ? Object.freeze({kernelIndex: brickConfig.kernelIndex, profile: brickConfig.profile, macroSpan: brickConfig.macroSpan, fineSpan: brickConfig.fineSpan,
-        coarseIsolatedIntegral: removedCoarseIntegral, remainingRawIntegral: rawIntegrals[brick.published.component], assignedLuminosity: brickTarget,
-        baseComponentIntegrals: baseIntegrals, rawIntegral: brick.rawIntegral, normalization: brick.normalization,
-        semantics: 'Seeded artistic ribbon replaces one coarse kernel; J(x), point positions and CDF change'}) : null,
-      sourceRawIntegrals: Object.freeze(rawIntegrals), sourceNormalizations: Object.freeze(scales), dustRawIntegral: rawDustIntegral, dustNormalization: dustScale,
-      sourceQuadrature: '2x2x2 midpoint cell-volume average', dustQuadrature: '2x2x2 midpoint cell-volume average',
-      reconstruction: 'Trilinear tents; finite-grid approximation, not pointwise analytic-profile equivalence',
-      ownership: 'Published typed arrays are owned read-only by this medium; no caller mutation',
-      semantics: 'Artist luminosity/extinction density in body-radius coordinates, not matter, fluid, orbit or N-body physics'})});
+    spatialSynthesis: synthesis});
   fields.set(medium, {cdfs, baseIntegrals, brickCdf: brick ? brick.cdf : null, integrals: componentIntegrals, total: componentIntegrals[0] + componentIntegrals[1] + componentIntegrals[2]});
   return medium;
+}
+
+/** Fixed native volume boundary. Copy both arrays synchronously so later caller
+ * writes cannot change cooperative validation, integration, CDFs or queries.
+ */
+function compileVolumes(options) {
+  if (!options || typeof options !== 'object' || typeof options.seed !== 'string') throw new TypeError('Spatial medium requires a string seed');
+  const source = frame(options.sourceCenter, options.sourceAxes, SOURCE_RESOLUTION, 'source');
+  const dust = frame(options.dustCenter, options.dustAxes, DUST_RESOLUTION, 'dust');
+  if (!Array.isArray(options.colors) || options.colors.length !== 3) throw new TypeError('Expected three source colors');
+  const colors = Object.freeze(options.colors.map((c, i) => color(c, `source color ${i}`, true)));
+  const extinctionColor = color(options.extinctionColor, 'extinction color', false), resolvedFraction = options.resolvedFraction;
+  if (!(Number.isFinite(resolvedFraction) && resolvedFraction >= 0 && resolvedFraction <= 1)) throw new RangeError('Resolved fraction must be within 0–1');
+  const sourceTexels = options.sourceVolumeTexels, dustTexels = options.dustVolumeTexels;
+  if (!(sourceTexels instanceof Float32Array) || sourceTexels.length !== SOURCE_RESOLUTION ** 3 * 4
+    || !(dustTexels instanceof Float32Array) || dustTexels.length !== DUST_RESOLUTION ** 3)
+    throw new TypeError('Expected Float32Array source 64³ RGBA and dust 128³ scalar volumes');
+  if ((typeof SharedArrayBuffer !== 'undefined') && (sourceTexels.buffer instanceof SharedArrayBuffer || dustTexels.buffer instanceof SharedArrayBuffer))
+    throw new TypeError('Spatial volume snapshots require non-shared ArrayBuffers');
+  return {seed: options.seed, source, dust, colors, extinctionColor, resolvedFraction,
+    sourceTexels: sourceTexels.slice(), dustTexels: dustTexels.slice()};
+}
+function* finalizeVolumes(config) {
+  const {sourceTexels, dustTexels} = config;
+  const sourceField = yield* finalizeSource(sourceTexels, config.source, null, true);
+  const luminosities = sourceField.integrals, totalLuminosity = luminosities[0] + luminosities[1] + luminosities[2];
+  if (!(totalLuminosity > 0 && Number.isFinite(totalLuminosity))) throw new RangeError('Actual source integral must be positive and finite');
+  const dustField = yield* finalizeDust(dustTexels, config.dust, null, true);
+  if (!Number.isFinite(dustField.dustCloudIntegral)) throw new RangeError('Actual dust integral must be finite');
+  const actual = {...config, luminosities, totalLuminosity, dustIntegral: dustField.dustCloudIntegral};
+  const synthesis = Object.freeze({kind: 'compiled-spatial-volumes',
+    sourceRawIntegrals: Object.freeze(luminosities), sourceNormalizations: Object.freeze([1, 1, 1]),
+    dustRawIntegral: dustField.dustCloudIntegral, dustNormalization: 1,
+    sourceQuadrature: 'Caller-provided cell values', dustQuadrature: 'Caller-provided cell values',
+    reconstruction: 'Trilinear tents; finite-grid approximation, not pointwise analytic-profile equivalence',
+    ownership: 'Published typed arrays are owned read-only by this medium; detached from caller arrays',
+    semantics: 'Artist luminosity/extinction density in body-radius coordinates, not matter, fluid, orbit or N-body physics'});
+  return publishSpatialMedium(actual, sourceTexels, dustTexels, {...sourceField, ...dustField,
+    supportRadius: Math.max(sourceField.supportRadius, dustField.supportRadius)}, null, synthesis);
+}
+/** As-is finite Float32 volumes; no target-budget normalization or gain.
+ * The atomic input snapshot precedes the cooperative task's row-sized work.
+ */
+export function createSpatialGalacticMediumFromVolumesTask(options) {
+  return createMediumTask(finalizeVolumes(compileVolumes(options)));
+}
+export function createSpatialGalacticMediumFromVolumes(options) {
+  const task = createSpatialGalacticMediumFromVolumesTask(options); task.advance(Infinity); return task.result;
 }
 
 /** Constructor-boundary validation and detached input snapshot happen once.
@@ -357,7 +434,10 @@ function* bakeSpatialMedium(config) {
  * published until complete; cancellation releases the generator's WIP arrays.
  */
 export function createSpatialGalacticMediumTask(options) {
-  let iterator = bakeSpatialMedium(compileOptions(options)), state = 'pending', result, error, stage = 'pending';
+  return createMediumTask(bakeSpatialMedium(compileOptions(options)));
+}
+function createMediumTask(iterator) {
+  let state = 'pending', result, error, stage = 'pending';
   const metrics = {steps: 0, maximumChunkMs: 0};
   function step() {
     if (state !== 'pending') return true;
@@ -367,7 +447,12 @@ export function createSpatialGalacticMediumTask(options) {
       if (next.done) {result = next.value; iterator = null; state = stage = 'complete';}
       else stage = next.value;
       return state !== 'pending';
-    } catch (cause) {error = cause; iterator = null; state = stage = 'failed'; throw cause;}
+    } catch (cause) {
+      // V8's lazy stack frames can retain the failed generator's volume arrays.
+      // Materialize the original diagnostic before releasing that task owner.
+      if (cause instanceof Error) void cause.stack;
+      error = cause; iterator = null; state = stage = 'failed'; throw cause;
+    }
   }
   return Object.freeze({
     step,
