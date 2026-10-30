@@ -482,7 +482,8 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       const distance = mesh.position.distanceTo(camera);
       mesh.visible = !home && (supportVisibility ? supportVisibility[i] > 0 : distance - descriptors[i].radius < (structures ? COSMIC_VIEW_FAR : 520000));
       if (mesh.visible && cullToView) {
-        // All proxy vertices lie in the unit sphere. Transform its support
+        // Legacy proxies use unit support; media own a finite physical hull.
+        // Transform that support
         // into the same world space as the planes, including parent scale,
         // rotation and shear, without allocating a per-frame bounding object.
         mesh.updateWorldMatrix(false, false);
@@ -491,7 +492,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
         // Only the four viewport sides apply; true-space near/far planes do not.
         for (let side = 0; side < 4; side++) {
           const plane = viewFrustum.planes[side], n = plane.normal;
-          const supportRadius = Math.hypot(n.x * e[0] + n.y * e[1] + n.z * e[2],
+          const supportRadius = (mesh.userData.isGalacticMedium ? mesh.geometry.boundingSphere.radius : 1) * Math.hypot(n.x * e[0] + n.y * e[1] + n.z * e[2],
             n.x * e[4] + n.y * e[5] + n.z * e[6], n.x * e[8] + n.y * e[9] + n.z * e[10]);
           const centerDistance = n.x * e[12] + n.y * e[13] + n.z * e[14] + plane.constant;
           const tolerance = 64 * Number.EPSILON * (Math.abs(e[12]) + Math.abs(e[13])

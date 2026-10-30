@@ -527,7 +527,8 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
       for (let i = 0; i < descriptors.length; i++) {
         const center = centers[i];
         const distance = Math.hypot(center[0] - cameraPosition[0], center[1] - cameraPosition[1], center[2] - cameraPosition[2]);
-        supportVisibility[i] = 1 - smoothstep(COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, Math.max(0, distance - descriptors[i].radius));
+        const supportRadius = descriptors[i].radius * (descriptors[i].medium?.supportRadius ?? 1);
+        supportVisibility[i] = 1 - smoothstep(COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, Math.max(0, distance - supportRadius));
       }
     }
     material.uniforms.cameraLocal.value.fromArray(cameraPosition);

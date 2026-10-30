@@ -179,6 +179,14 @@ rows, cancellation releases work in progress, and quality changes reuse fields.
 This bounded storage and finite integration do not establish GPU performance or
 visual acceptance on a host device.
 
+Spatial fields may extend beyond one body-radius unit. Shared distance fading
+uses their published finite `supportRadius`; viewport admission uses the medium
+mesh's enclosing hull transformed into world space. Legacy descriptors retain
+their existing unit support and distance-fade boundary.
+Installing a medium through `createGalaxyHaze` requires shared `supportVisibility`;
+`createCosmos` supplies it through its `supportFade` path. Standalone calls without
+that table reject medium descriptors before the legacy distance-admission path.
+
 ## Physical cosmic surfaces
 
 The optional Three.js entry exports `createCosmicBodies({surfaceTexture,
