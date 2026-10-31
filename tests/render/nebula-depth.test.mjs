@@ -17,7 +17,7 @@ function fixture(options) {
   let currentTarget = null;
   const clearColor = new THREE.Color(0x123456);
   let clearAlpha = .75;
-  const draws = [], copies = [];
+  const draws = [], copies = [], stages = [];
   const renderer = {
     autoClear: true, autoClearColor: true, autoClearDepth: true, autoClearStencil: true,
     getRenderTarget: () => currentTarget,
@@ -32,6 +32,7 @@ function fixture(options) {
       assert.notEqual(source, destination);
       assert.notEqual(destination, currentTarget.depthTexture);
       copies.push([source, destination]);
+      stages.push({stage: 'depth snapshot', resolveDepth: currentTarget.resolveDepthBuffer, storeDepth: currentTarget.storeMultisampledDepthBuffer});
     },
     render(world, activeCamera) {
       // Mirror WebGLRenderer's matrix/hook ordering without simulating a GPU.
@@ -55,7 +56,8 @@ function fixture(options) {
       draws.push({ visible, worldPositions, matrixWorldAutoUpdate: world.matrixWorldAutoUpdate,
         hasDepth: volumeMaterial.uniforms?.uHasSceneDepth.value,
         depth: volumeMaterial.uniforms?.uSceneDepth.value, background: world.background,
-        resolveDepth: currentTarget.resolveDepthBuffer });
+        resolveDepth: currentTarget.resolveDepthBuffer, storeDepth: currentTarget.storeMultisampledDepthBuffer });
+      stages.push({stage: 'scene draw', resolveDepth: currentTarget.resolveDepthBuffer, storeDepth: currentTarget.storeMultisampledDepthBuffer});
       world.onAfterRender(this, world, activeCamera);
     },
   };
@@ -64,7 +66,7 @@ function fixture(options) {
     mesh.name = name; mesh.renderOrder = renderOrder; scene.add(mesh);
     return mesh;
   };
-  return { scene, camera, nebula, target, pass, renderer, draws, copies, add,
+  return { scene, camera, nebula, target, pass, renderer, draws, copies, stages, add,
     dispose() { pass.dispose(); nebula.userData.dispose(); target.dispose(); scene.traverse(o => {
       if (o === nebula.children[0]) return;
       o.geometry?.dispose();
@@ -87,7 +89,11 @@ test('depth composition shades surfaces and sorted transparencies once and sampl
     assert.deepEqual(f.draws[0].visible.sort(), ['body', 'mixed', 'sky']);
     assert.deepEqual(f.draws[1].visible.sort(), ['', 'glow', 'mixed']);
     assert.equal(f.draws[1].hasDepth, true);
-    assert.ok(f.draws.every(draw => draw.resolveDepth), 'surface depth resolves while a volume consumes its snapshot');
+    assert.deepEqual(f.stages, [
+      {stage: 'scene draw', resolveDepth: true, storeDepth: true},
+      {stage: 'depth snapshot', resolveDepth: true, storeDepth: true},
+      {stage: 'scene draw', resolveDepth: false, storeDepth: true},
+    ], 'resolve surface depth once, copy it before translucency, then resolve colour while retaining MSAA depth for depthTest');
     assert.equal(f.target.resolveDepthBuffer, false, 'postprocessing returns to colour-only resolves');
     assert.equal(f.draws[1].depth, f.copies[0][1]);
     assert.equal(f.draws[1].background, null);
@@ -181,11 +187,15 @@ for (const original of [true, false]) {
     const halo = f.add('halo', new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
     const material = halo.material;
     f.scene.matrixWorldAutoUpdate = original;
+    f.target.resolveDepthBuffer = original;
+    f.target.storeMultisampledDepthBuffer = !original;
     const render = f.renderer.render;
     let draws = 0;
     f.renderer.render = function (...args) {
       if (++draws === 2) {
         assert.equal(f.scene.matrixWorldAutoUpdate, false);
+        assert.equal(f.target.resolveDepthBuffer, false);
+        assert.equal(f.target.storeMultisampledDepthBuffer, true);
         throw new Error('second draw failed');
       }
       return render.apply(this, args);
@@ -193,6 +203,8 @@ for (const original of [true, false]) {
     try {
       assert.throws(() => f.pass.render(f.renderer, null, f.target), /second draw failed/);
       assert.equal(f.scene.matrixWorldAutoUpdate, original);
+      assert.equal(f.target.resolveDepthBuffer, original);
+      assert.equal(f.target.storeMultisampledDepthBuffer, !original);
       assert.equal(halo.material, material);
       assert.equal(f.nebula.children[0].material.uniforms.uSceneDepth.value, null);
       assert.equal(f.renderer.getRenderTarget(), null);

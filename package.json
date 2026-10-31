@@ -1,6 +1,6 @@
 {
   "name": "lonelysky-engine",
-  "version": "0.10.5",
+  "version": "0.10.6",
   "private": true,
   "type": "module",
   "description": "A seeded procedural universe generator with an optional Three.js renderer, streaming, gravity and continuous collision.",

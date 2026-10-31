@@ -21,6 +21,9 @@ stops at the sampled surface instead of blending dust behind a solid over it.
 The depth snapshot is separate from the active render target. With no visible
 in-view nebula the pass follows the ordinary single-render path. Dispose the
 pass before its composer; it owns only depth textures it attached itself.
+For multisampled targets, surface depth resolves before the snapshot. The
+translucent draw retains that live depth for testing and resolves colour only;
+it does not repeat the unchanged depth resolve.
 
 `new NebulaRenderPass(scene, camera, { reuseWorldMatrices: true })` can reuse the
 first draw's world matrices for the second draw. This defaults to `false` so
