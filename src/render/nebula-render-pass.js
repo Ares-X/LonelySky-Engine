@@ -109,6 +109,9 @@ export class NebulaRenderPass extends RenderPass {
       for (const volume of volumes) volume.userData.setSceneDepth(
         this._depthTarget.depthTexture, readBuffer.width, readBuffer.height, this.camera);
       this._filterMaterials(false);
+      // The surface snapshot is complete. Translucency only changes colour;
+      // retain MSAA depth for testing without resolving it a second time.
+      readBuffer.resolveDepthBuffer = false;
       renderer.autoClear = false;
       this.scene.background = null;
       const matrixWorldAutoUpdate = this.scene.matrixWorldAutoUpdate;
