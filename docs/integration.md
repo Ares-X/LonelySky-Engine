@@ -56,6 +56,16 @@ target/pass dimensions and renderer canvas floor/viewport rounding. This avoids
 The renderer uses the public `setDrawingBufferSize` API; canvas CSS remains owned
 by the container. No composer private field is modified.
 
+Use `createBloomPass` from `src/three.js` (or `src/render/bloom.js`) in the
+existing `NebulaRenderPass → bloom → OutputPass` chain. It returns the native
+pass, so existing quality/ambience strength changes, composer resizing and
+lifetime ownership continue at their current owners. The factory normalizes the
+finite blur kernels and neutral composite DC gain once during construction;
+it does not add a renderer, target, scene replay or per-frame normalization.
+Strength denotes the added DC fraction for a constant HDR field above the
+high-pass transition, not a bound on arbitrary scene pixels or total energy.
+See the API for the global artistic change and tint/lifecycle boundaries.
+
 ## Procedural scenery appearance
 
 The directional sky shares absorbing dust lanes with the black-hole lens. Galaxy
@@ -153,6 +163,48 @@ active projection so its first reversed draw does not consume a stale cached
 matrix. Frustum consumers must pass the camera coordinate system and reversed
 flag to `setFromProjectionMatrix`. This preserves ordinary-depth compatibility;
 it does not fix the ordinary path's far-distance precision on unsupported GPUs.
+
+## Finite local source detail
+
+`createSpatialGalacticMedium` optionally accepts one `sourceBrick`:
+`{kernelIndex, profile: 'coherent-ribbon-v1', macroSpan: [x,y,z],
+fineSpan: [x,y,z]}`. Spans are positive lengths in body-radius coordinates.
+The fixed 32-cubed scalar brick follows that source kernel's center and rotation;
+the 64-cubed source base and 128-cubed dust grid retain their resolutions.
+This is a seeded artistic ribbon, not a physical stellar or gas simulation.
+
+The selected kernel is excluded before baking the base. Its original isolated
+coarse integral and the remaining family's actual coarse integral divide that
+family's luminosity between base and brick. CPU queries, point CDF/tent draws and
+the renderer consume their nonnegative sum. Changing this representation changes
+point positions; omitting the option retains the previous field and prefixes.
+The published `sourceBrick` owns its read-only Float32 texels, frame and integral;
+`sourceComponentIntegrals` includes both base and brick.
+
+The renderer owns one additional R16F texture (64 KiB of pixel data), disposed
+with the mesh. Half-float upload is a measured approximation to the CPU field.
+Local grid faces join the existing ordered ray traversal, including segments
+with no dust; the source is not a second light pass. Creation yields at actual
+rows, cancellation releases work in progress, and quality changes reuse fields.
+This bounded storage and finite integration do not establish GPU performance or
+visual acceptance on a host device.
+
+Spatial fields may extend beyond one body-radius unit. Shared distance fading
+uses their published finite `supportRadius`; viewport admission uses the medium
+mesh's enclosing hull transformed into world space. Legacy descriptors retain
+their existing unit support and distance-fade boundary.
+Installing a medium through `createGalaxyHaze` requires shared `supportVisibility`;
+`createCosmos` supplies it through its `supportFade` path. Standalone calls without
+that table reject medium descriptors before the legacy distance-admission path.
+
+For a selected medium, the host can pass `galacticMediumOptions: descriptor =>
+selected(descriptor) ? {starCounts: {low: 512, auto: 2048, high: 16384},
+resolvedFraction: .6} : undefined` to `createCosmos` (or `createGalaxyHaze`). This
+changes only the resolved/continuum representation of that same field. The
+resolver runs when descriptors are installed, not every frame; unselected media
+retain their 4096 capacity and original resolved fraction. Capacity is bounded at
+16384, and all quality prefixes retain the same total luminous budget. See the
+API's `starBufferBytes` definition when accounting for the additional point data.
 
 ## Physical cosmic surfaces
 

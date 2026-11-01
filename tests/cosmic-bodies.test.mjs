@@ -47,7 +47,7 @@ test('physical queries retain near surfaces with remote centres at cell and worl
 
 test('ring collision sections share conservative dimensions and an actually empty centre',()=>{
   const body=describeCosmicBody(fixtures[2][0],seed);
-  assert.equal(body.shape.parts.length,6);
+  assert.ok(body.shape.parts.length>6,'physical structure extends the original six core sections');
   for(const part of body.shape.parts){
     assert.ok(Math.hypot(part.outerRadius,Math.max(Math.abs(part.minY),Math.abs(part.maxY)))<=body.boundsRadius);
     assert.ok(Object.isFrozen(part));

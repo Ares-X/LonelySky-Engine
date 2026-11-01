@@ -4,8 +4,9 @@ import * as THREE from 'three';
 import { createGalaxyHaze } from '../../src/render/galaxy-haze.js';
 import { createCosmos } from '../../src/render/cosmos.js';
 import { NebulaRenderPass } from '../../src/render/nebula-render-pass.js';
-import { describeCosmicStructures, cosmicStructureRelativeCenter, COSMIC_GRID_CELLS } from '../../src/cosmic-structures.js';
+import { describeCosmicStructures, cosmicStructureRelativeCenter, COSMIC_GRID_CELLS, COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR } from '../../src/cosmic-structures.js';
 import { CELL_SIZE, encodeCell } from '../../src/coordinates.js';
+import {createSpatialGalacticMedium} from '../../src/galactic-spatial-medium.js';
 
 const descriptor = {
   id: 'culling', seed: 'culling', kind: 'galaxy', morphology: 'irregular', radius: 1,
@@ -18,6 +19,58 @@ function fixture(options = { structures: true }, shape = descriptor) {
   const frame = { centers: [[0, 0, -10]], cameraPosition: [0, 0, 0], camera, quality: 'high', brightness: .7, home: false };
   return { haze, camera, frame, mesh: haze.children[0], update() { return haze.userData.update(frame); } };
 }
+
+test('extended medium support drives viewport culling, transformed hulls and shared distance fade', () => {
+  const medium = createSpatialGalacticMedium({seed: 'extended-cull', sourceCenter: [0, 0, 0], sourceAxes: [4, 1, 1],
+    dustCenter: [0, 0, 0], dustAxes: [1, 1, 1], luminosities: [.01, 0, 0], colors: [[1, 1, 1], [1, 1, 1], [1, 1, 1]],
+    dustIntegral: 0, extinctionColor: [1, 1, 1], resolvedFraction: .005,
+    sourceKernels: [{component: 0, weight: 1, center: [-2, 0, 0], axes: [.6, .4, .4], rotation: [0, 0, 0]}], dustKernels: []});
+  const f = fixture({structures: true, supportVisibility: new Float32Array([1])}, {...descriptor, medium});
+  const parent = new THREE.Group(); parent.add(f.haze);
+  const point = new THREE.Vector3();
+  try {
+    assert.ok(medium.supportRadius > 2);
+    f.frame.centers[0] = [12, 0, -10];
+    point.set(10, 0, -10).project(f.camera);
+    assert.ok(Math.abs(point.x) <= 1 + 1e-14, 'the actual source center reaches the viewport edge');
+    assert.equal(f.update(), 2, 'an offscreen actor center cannot hide its onscreen extended source');
+    for (const [center, visible] of [[[0, 0, -10], 2], [[20, 0, -10], 0], [[0, 0, 10], 0]]) {
+      f.frame.centers[0] = center; assert.equal(f.update(), visible);
+    }
+    parent.rotation.set(.3, .8, .2); parent.scale.set(3, .6, 1.7); f.haze.rotation.set(-.2, .7, .3);
+    const positions = f.mesh.geometry.attributes.position;
+    let contributing = 0, rejected = 0;
+    for (let x = -20; x <= 20; x += 4) for (let y = -16; y <= 16; y += 4) {
+      f.frame.centers[0] = [x, y, -10]; f.update();
+      let onScreen = false;
+      for (let i = 0; i < positions.count; i++) {
+        point.fromBufferAttribute(positions, i).applyMatrix4(f.mesh.matrixWorld).project(f.camera);
+        if (Math.abs(point.x) < 1 && Math.abs(point.y) < 1 && point.z > -1 && point.z < 1) onScreen = true;
+      }
+      if (onScreen) {contributing++; assert.equal(f.mesh.visible, true, `extended hull at ${x},${y}`);}
+      if (!f.mesh.visible) rejected++;
+    }
+    assert.ok(contributing > 0 && rejected > 0);
+  } finally {f.haze.userData.dispose(); parent.clear();}
+
+  for (const field of [medium, null]) {
+    const shape = {...descriptor, medium: field, radius: 10000000, gridCells: 1, macroCell: {x: 0, y: 0, z: 0}, offset: [0, 0, 0]};
+    const provider = coordinate => coordinate.x === 0 && coordinate.y === 0 && coordinate.z === 0 ? [shape] : [];
+    const cosmos = createCosmos({descriptorProvider: provider, gridCells: 1, structures: true, catalogue: {capacity: 4, supportFade: true}});
+    const frame = {sectorIndex: encodeCell({x: 0, y: 0, z: 0}), cameraPosition: [0, 0, 0], quality: 'low'};
+    try {
+      cosmos.userData.update(frame);
+      const volume = cosmos.children[1].children[0], support = shape.radius * (field ? field.supportRadius : 1);
+      frame.cameraPosition = [COSMIC_VIEW_FAR + shape.radius * 1.2, 0, 0]; cosmos.userData.update(frame);
+      assert.equal(volume.visible, Boolean(field), 'extended source remains supported after the legacy unit body fades out');
+      frame.cameraPosition[0] = COSMIC_VIEW_FADE_START + support - 1; cosmos.userData.update(frame);
+      assert.equal(volume.material.uniforms.structureVisibility.value, 1);
+      frame.cameraPosition[0] = COSMIC_VIEW_FAR + support + 1; cosmos.userData.update(frame);
+      assert.equal(volume.visible, false, 'the whole support has left the far visibility limit');
+      assert.equal(volume.material.uniforms.structureVisibility.value, 0);
+    } finally {cosmos.userData.dispose();}
+  }
+});
 
 test('physical haze support retains inside, tangent, partial edges and distances beyond the raster far plane', () => {
   const f = fixture();

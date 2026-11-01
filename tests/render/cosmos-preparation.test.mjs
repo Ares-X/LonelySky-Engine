@@ -13,7 +13,7 @@ function provider(coordinate) {
     macroCell: coordinate, offset: [123, -456, 789], orientation: [.81, 1.21, -.37],
     morphology: 'spiral', radius: 71000, thickness: .07, arms: 3, pitch: .29, bar: true, asymmetry: .63};
 }
-const options = {seed: 'preparation-test', descriptorProvider: provider};
+const options = {seed: 'preparation-test', descriptorProvider: provider, catalogue: {capacity: 12, immutable: true}};
 const make = () => createCosmos({...options, incremental: true, preparationBudgetMs: tinyBudget});
 const bytes = cosmos => Object.fromEntries(Object.entries(cosmos.children[0].geometry.attributes).map(([name, attribute]) => [name, Buffer.from(attribute.array.buffer).toString('hex')]));
 function drain(cosmos, target, limit = 5000) {

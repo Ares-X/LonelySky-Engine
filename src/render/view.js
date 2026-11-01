@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { NebulaRenderPass } from './nebula-render-pass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { createBloomPass } from './bloom.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { createUniverse } from '../generator.js';
 import { decodeCell } from '../coordinates.js';
@@ -298,7 +298,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     composer = own(new EffectComposer(renderer));
     // Keep DPR at the renderer boundary and resize postprocessing only once.
     composer.setPixelRatio(1);
-    const renderPass = own(new NebulaRenderPass(scene, camera)); bloom = own(new UnrealBloomPass(new THREE.Vector2(1, 1), .32, .65, 1));
+    const renderPass = own(new NebulaRenderPass(scene, camera)); bloom = own(createBloomPass({strength: .32}));
     const output = own(new OutputPass()); composer.addPass(renderPass); composer.addPass(bloom); composer.addPass(output);
     renderer.domElement.addEventListener('webglcontextlost', handleLost);
     renderer.domElement.addEventListener('webglcontextrestored', handleRestored);

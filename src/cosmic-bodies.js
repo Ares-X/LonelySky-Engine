@@ -27,7 +27,7 @@ export const COSMIC_BODY_THEME_WEIGHTS=freeze({
 export function cosmicRingParts({radius,halfWidth,thickness,phase,broken}){
   if(![radius,halfWidth,thickness,phase].every(Number.isFinite)||radius<=0||halfWidth<=0||halfWidth>=1||thickness<=0||thickness>=1/1.45||typeof broken!=='boolean')throw new RangeError('Invalid ring cross section');
   const w=halfWidth*radius,t=thickness*radius;
-  return freeze(Array.from({length:6},(_,section)=>{
+  const parts=Array.from({length:6},(_,section)=>{
     let innerRadius,outerRadius,minY,maxY;
     if(section<3){const low=-.9+section*.6;innerRadius=radius-t;outerRadius=radius+t;minY=low*w;maxY=(low+.6)*w;}
     else if(section===3){innerRadius=radius-t*1.45;outerRadius=radius+t*1.35;minY=.88*w;maxY=w;}
@@ -35,7 +35,44 @@ export function cosmicRingParts({radius,halfWidth,thickness,phase,broken}){
     else {innerRadius=radius+t*.95;outerRadius=radius+t*2.2;minY=-w*.28;maxY=w*.28;}
     return {type:'annular-sector-slab',innerRadius,outerRadius,minY,maxY,
       gapCenter:phase,gapHalfAngle:broken ? .326+Math.sin(section*13.47+phase*2)*.0425 : 0};
-  }));
+  });
+  // Exterior structure is physical, rather than a normal-map silhouette. The
+  // published interior and the original six cross sections remain unchanged.
+  // World-sized ledges and buttresses stay readable beside the immense core;
+  // the small-radius caps keep this public constructor valid for model tests.
+  const structuralGap=broken?Math.max(...parts.map(part=>part.gapHalfAngle)):0;
+  const railHalfHeight=Math.min(180,w*.06);
+  for(const row of [-.94,-.58,.58,.94])parts.push({type:'annular-sector-slab',
+    innerRadius:radius+t*.92,outerRadius:radius+t*3.6,
+    minY:row*w-railHalfHeight,maxY:row*w+railHalfHeight,
+    gapCenter:phase,gapHalfAngle:structuralGap});
+  const count=24,pitch=Math.PI*2/count;
+  for(let index=0;index<count;index++){
+    const center=phase+(index+.5)*pitch;
+    const arcWidth=9000+3000*Math.sin(index*1.618+phase);
+    const halfAngle=Math.min(arcWidth/(2*radius),pitch*.25);
+    const reach=7+1.5*Math.sin(index*2.399+phase*1.7);
+    const fromBreak=Math.abs(Math.atan2(Math.sin(center-phase),Math.cos(center-phase)));
+    if(broken&&fromBreak<=structuralGap+halfAngle)continue;
+    parts.push({type:'annular-sector-slab',innerRadius:radius+t*.8,outerRadius:radius+t*reach,
+      minY:-w*1.015,maxY:w*1.015,gapCenter:center+Math.PI,gapHalfAngle:Math.PI-halfAngle});
+  }
+  // A smaller raised cabinet on each admitted support supplies close-range
+  // edges and occlusion without replacing its geometry with painted panels.
+  const supportEnd=parts.length;
+  const cabinetHalfHeight=Math.min(500,w*.2),cabinetDepth=Math.min(60,radius*.001);
+  for(let index=10;index<supportEnd;index++){
+    const support=parts[index],cabinetHalfAngle=Math.min(210/radius,(Math.PI-support.gapHalfAngle)*.4);
+    parts.push({type:'annular-sector-slab',innerRadius:support.outerRadius-t*.05,
+      outerRadius:support.outerRadius+cabinetDepth,
+      minY:-w*.5-cabinetHalfHeight,maxY:-w*.5+cabinetHalfHeight,
+      gapCenter:support.gapCenter,gapHalfAngle:Math.PI-cabinetHalfAngle});
+  }
+  // The main spine projects beyond the secondary rails; wider supports bridge
+  // its ends and leave recessed exterior faces visible between them.
+  parts.push({type:'annular-sector-slab',innerRadius:radius+t*2.1,outerRadius:radius+t*6,
+    minY:-w*.16,maxY:w*.16,gapCenter:phase,gapHalfAngle:structuralGap});
+  return freeze(parts);
 }
 
 /** Fixed independent candidates: no observer, render quality or visitation RNG. */

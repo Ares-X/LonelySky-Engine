@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import {STELLAR_PSF_GLSL, STELLAR_PSF_HALO_SIGMA_CSS} from './stellar-psf.js';
+import {STELLAR_PSF_HALO_SIGMA_CSS} from './stellar-psf.js';
+import {createStellarPsfTexture, STELLAR_PSF_TEXTURE_GLSL} from './stellar-psf-texture.js';
 
 /** Unresolved directional sources, with caller-owned positions and appearance.
  * Population is a spatial selection; magnitude visibility is an independent
@@ -16,8 +17,9 @@ export function createDirectionalStars({positions, colors, flux, magnitudes, ran
   geometry.setAttribute('stellarFlux', new THREE.BufferAttribute(flux, 1));
   geometry.setAttribute('magnitude', new THREE.BufferAttribute(magnitudes, 1));
   geometry.setAttribute('rank', new THREE.BufferAttribute(ranks, 1));
+  const psf = createStellarPsfTexture();
   const material = new THREE.ShaderMaterial({
-    uniforms: {ratio: {value: 1}, brightness: {value: 1}, density: {value: .2},
+    uniforms: {...psf.uniforms, ratio: {value: 1}, brightness: {value: 1}, density: {value: .2},
       populationTint: {value: new THREE.Color(1, 1, 1)}, bandNormal: {value: new THREE.Vector3(0, 1, 0)}, bandStrength: {value: 0},
       limitingMagnitude: {value: limitingMagnitude}},
     vertexShader: /* glsl */`
@@ -40,11 +42,11 @@ export function createDirectionalStars({positions, colors, flux, magnitudes, ran
         #endif
       }`,
     fragmentShader: /* glsl */`
-      ${STELLAR_PSF_GLSL}
+      ${STELLAR_PSF_TEXTURE_GLSL}
       varying vec3 stellarColor;varying float linearFlux;varying float visibility;varying float spritePixels;
       uniform float ratio;uniform float brightness;
       void main(){
-        float energy=stellarPixelEnergy((gl_PointCoord-.5)*spritePixels,ratio);
+        float energy=stellarPixelEnergy((gl_PointCoord-.5)*spritePixels);
         gl_FragColor=vec4(stellarColor*linearFlux*brightness*energy,visibility);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -55,6 +57,7 @@ export function createDirectionalStars({positions, colors, flux, magnitudes, ran
   const stats = Object.freeze({revision: 1, candidates: count, integratedHaloFraction: .03, photometry: 'relative-magnitude', pixelIntegral: true});
   points.userData.stats = stats;
   let disposed = false;
-  points.userData.dispose = () => {if (disposed) return; disposed = true; geometry.dispose(); material.dispose();};
+  points.onBeforeRender = () => {if (!disposed) psf.setPixelRatio(material.uniforms.ratio.value);};
+  points.userData.dispose = () => {if (disposed) return; disposed = true; psf.dispose(); geometry.dispose(); material.dispose();};
   return points;
 }

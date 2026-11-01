@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { createCosmicBodies } from '../../src/render/cosmic-bodies.js';
+import {cosmicRingParts} from '../../src/cosmic-bodies.js';
 
 const frame = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 function fixture(kind = 'ring') {
@@ -144,4 +145,27 @@ test('dispose releases each owned GPU resource once and retains borrowed texture
   group.userData.update({ body: {}, camera: null });
   assert.equal(group.visible, false, 'late updates cannot revive a disposed surface');
   texture.dispose();
+});
+
+test('raised structures upload every slab and conservative ray supports enclose the curved sidewalls', () => {
+  const {group,body,update}=fixture();
+  body.shape.parts=cosmicRingParts({radius:body.radius,halfWidth:body.halfWidth,thickness:body.thickness,phase:body.phase,broken:false});
+  try {
+    update();
+    const u=group.children[0].material.uniforms;
+    assert.equal(u.uSectionCount.value,body.shape.parts.length);
+    assert.ok(u.uSections.value.length>=body.shape.parts.length);
+    for(let i=0;i<body.shape.parts.length;i++){
+      const p=body.shape.parts[i],support=u.uSectionSupports.value[i];
+      assert.deepEqual(u.uSections.value[i].toArray(),[p.innerRadius,p.outerRadius,p.minY,p.maxY].map(n=>n/body.radius));
+      const center=p.gapCenter+Math.PI,half=Math.PI-p.gapHalfAngle;
+      for(const radius of [p.innerRadius,p.outerRadius])for(const y of [p.minY,p.maxY])for(let j=0;j<=32;j++){
+        const angle=center-half+half*2*j/32;
+        const distance=Math.hypot(radius*Math.cos(angle)/body.radius-support.x,y/body.radius-support.y,radius*Math.sin(angle)/body.radius-support.z);
+        assert.ok(distance<=support.w+1e-12,`part ${i} physical surface must not be culled`);
+      }
+    }
+    const sections=u.uSections.value,supports=u.uSectionSupports.value;
+    update();assert.equal(u.uSections.value,sections);assert.equal(u.uSectionSupports.value,supports);
+  }finally{group.userData.dispose();}
 });

@@ -19,7 +19,7 @@ function erfcPositive(x) {
 }
 
 // Q(z) = erfc(z/sqrt(2))/2; https://dlmf.nist.gov/7.1
-function gaussianPixelAxis(center, sigma) {
+export function gaussianPixelAxis(center, sigma) {
   const near = (Math.abs(center) - .5) / (Math.SQRT2 * sigma);
   const far = (Math.abs(center) + .5) / (Math.SQRT2 * sigma);
   if (near >= 0) return .5 * (erfcPositive(near) - erfcPositive(far));
@@ -36,23 +36,3 @@ export function stellarPixelEnergy(x, y, pixelRatio = 1) {
   return (1 - STELLAR_PSF_HALO_ENERGY) * gaussianPixelAxis(x, coreSigma) * gaussianPixelAxis(y, coreSigma)
     + STELLAR_PSF_HALO_ENERGY * gaussianPixelAxis(x, haloSigma) * gaussianPixelAxis(y, haloSigma);
 }
-
-/** Same pixel-box integration as the CPU reference; highp fragment precision. */
-export const STELLAR_PSF_GLSL = /* glsl */`
-float stellarErfcPositive(float x){
-  float t=1./(1.+.3275911*x);
-  return t*(.254829592+t*(-.284496736+t*(1.421413741+t*(-1.453152027+t*1.061405429))))*exp(-x*x);
-}
-float stellarGaussianPixelAxis(float center,float sigma){
-  float nearEdge=(abs(center)-.5)/(1.4142135623730951*sigma);
-  float farEdge=(abs(center)+.5)/(1.4142135623730951*sigma);
-  if(nearEdge>=0.)return .5*(stellarErfcPositive(nearEdge)-stellarErfcPositive(farEdge));
-  return 1.-.5*(stellarErfcPositive(-nearEdge)+stellarErfcPositive(farEdge));
-}
-float stellarPixelEnergy(vec2 pixelCenter,float pixelRatio){
-  float coreSigma=.65*pixelRatio;
-  float haloSigma=2.2*pixelRatio;
-  return .97*stellarGaussianPixelAxis(pixelCenter.x,coreSigma)*stellarGaussianPixelAxis(pixelCenter.y,coreSigma)
-    +.03*stellarGaussianPixelAxis(pixelCenter.x,haloSigma)*stellarGaussianPixelAxis(pixelCenter.y,haloSigma);
-}
-`;

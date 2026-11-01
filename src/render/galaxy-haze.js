@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { randomFromSeed } from '../random.js';
 import { describeGalaxyAppearance } from './galaxy-appearance.js';
+import {createGalacticMediumVolume} from './galactic-medium.js';
+import {COSMIC_SCENE_DEPTH_GLSL} from './cosmic-scene-depth.js';
 import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_DEPTH_GLSL } from '../cosmic-structures.js';
 
 // A bounded emission integral through a real ellipsoid, not a camera-facing
@@ -47,25 +49,7 @@ const fragmentShader = /* glsl */`
   uniform float bridgeStrength;uniform float knotScale;uniform float youngStrength;uniform float emissionStrength;
   uniform sampler2D structureNoise;uniform vec2 noiseOffset;
   #ifdef COSMIC_STRUCTURES
-    uniform sampler2D uSceneDepth;uniform vec2 uDepthResolution;uniform vec2 uCameraNearFar;
-    uniform float uHasSceneDepth;uniform float continuumWeight;uniform float structureKind;uniform mat3 worldOrientation;
-    float scenePhysicalLimit(vec3 direction){
-      if(uHasSceneDepth<.5) return 1.e15;
-      float depth=texture2D(uSceneDepth,gl_FragCoord.xy/uDepthResolution).r;
-      float near=uCameraNearFar.x,far=uCameraNearFar.y;
-      #ifdef USE_REVERSED_DEPTH_BUFFER
-        if(depth<=0.) return 1.e15;
-        float forward=near*far/(near+depth*(far-near));
-      #else
-        if(depth>=1.) return 1.e15;
-        float forward=near*far/(far-depth*(far-near));
-      #endif
-      vec3 worldDirection=normalize(worldOrientation*(direction*shapeScale));
-      float cosine=-(viewMatrix*vec4(worldDirection,0.)).z;
-      float drawDistance=forward/max(cosine,.000001);
-      if(drawDistance>=200000.) return 1.e15;
-      return cosmicTrueDistance(drawDistance);
-    }
+    ${COSMIC_SCENE_DEPTH_GLSL}
   #endif
   #ifdef COSMIC_SUPPORT_FADE
     uniform float structureVisibility;
@@ -388,13 +372,16 @@ const fragmentShader = /* glsl */`
 
 /** Shape scales remain inside the existing galaxy support radius. */
 export function galaxyHazeScale(descriptor) {
+  if (descriptor.medium) return [1, 1, 1];
   if (descriptor.morphology === 'spiral') return [1, Math.min(.28, descriptor.thickness * 3.2), 1];
   if (descriptor.morphology === 'elliptical') return [1, descriptor.thickness, .8];
   return [1, 1, 1];
 }
 
-export function createGalaxyHaze({ seed = 'lonelysky', structures = false, supportVisibility = null } = {}) {
+export function createGalaxyHaze({ seed = 'lonelysky', structures = false, supportVisibility = null, galacticMediumOptions } = {}) {
+  if(galacticMediumOptions!==undefined&&typeof galacticMediumOptions!=='function')throw new TypeError('Galactic medium options must be a descriptor resolver');
   const group = new THREE.Group(); group.name = 'galaxy-emission-volumes';
+  const stats={stars:0,starCapacity:0,starBufferBytes:0,media:0};group.userData.stats=stats;
   const geometry = new THREE.SphereGeometry(1, 40, 24);
   const noiseRandom = randomFromSeed(`${seed}:galaxy-dust-texture-v1`);
   const lattice = Float32Array.from({length: 64 * 64}, () => noiseRandom());
@@ -424,9 +411,17 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
   let descriptors = [], disposed = false;
   group.userData.setDescriptors = (next) => {
     if (disposed) return;
-    for (const mesh of group.children) mesh.material.dispose();
-    group.clear(); descriptors = next;
+    if (!supportVisibility && next.some(descriptor => descriptor.medium)) throw new TypeError('Galactic media require shared support visibility');
+    for (const mesh of group.children) {
+      if(mesh.userData.isGalacticMedium)mesh.userData.dispose();
+      else mesh.material.dispose();
+    }
+    group.clear(); descriptors = next;stats.stars=0;stats.starCapacity=0;stats.starBufferBytes=0;stats.media=0;
     for (const descriptor of descriptors) {
+      if(descriptor.medium){
+        const medium=createGalacticMediumVolume(descriptor,galacticMediumOptions?.(descriptor));group.add(medium);
+        stats.starCapacity+=medium.children[0].geometry.attributes.position.count;stats.starBufferBytes+=medium.userData.stats.starBufferBytes;stats.media++;continue;
+      }
       const shape = galaxyHazeScale(descriptor);
       const appearance = describeGalaxyAppearance(descriptor);
       const detail = randomFromSeed(`${descriptor.seed}:dust-offset-v1`);
@@ -472,9 +467,9 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       mesh.frustumCulled = false; group.add(mesh);
     }
   };
-  group.userData.update = ({ centers, cameraPosition, camera: viewCamera, quality, brightness, home }) => {
+  group.userData.update = ({ centers, cameraPosition, camera: viewCamera, quality, brightness, home, viewportHeight = 1, pixelRatio = 1 }) => {
     if (disposed) return 0;
-    camera.fromArray(cameraPosition); let visible = 0;
+    camera.fromArray(cameraPosition); let visible = 0;stats.stars=0;
     const cullToView = structures && viewCamera?.isPerspectiveCamera === true;
     if (cullToView) {
       viewCamera.updateWorldMatrix(true, false);
@@ -488,7 +483,8 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       const distance = mesh.position.distanceTo(camera);
       mesh.visible = !home && (supportVisibility ? supportVisibility[i] > 0 : distance - descriptors[i].radius < (structures ? COSMIC_VIEW_FAR : 520000));
       if (mesh.visible && cullToView) {
-        // All proxy vertices lie in the unit sphere. Transform its support
+        // Legacy proxies use unit support; media own a finite physical hull.
+        // Transform that support
         // into the same world space as the planes, including parent scale,
         // rotation and shear, without allocating a per-frame bounding object.
         mesh.updateWorldMatrix(false, false);
@@ -497,7 +493,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
         // Only the four viewport sides apply; true-space near/far planes do not.
         for (let side = 0; side < 4; side++) {
           const plane = viewFrustum.planes[side], n = plane.normal;
-          const supportRadius = Math.hypot(n.x * e[0] + n.y * e[1] + n.z * e[2],
+          const supportRadius = (mesh.userData.isGalacticMedium ? mesh.geometry.boundingSphere.radius : 1) * Math.hypot(n.x * e[0] + n.y * e[1] + n.z * e[2],
             n.x * e[4] + n.y * e[5] + n.z * e[6], n.x * e[8] + n.y * e[9] + n.z * e[10]);
           const centerDistance = n.x * e[12] + n.y * e[13] + n.z * e[14] + plane.constant;
           const tolerance = 64 * Number.EPSILON * (Math.abs(e[12]) + Math.abs(e[13])
@@ -514,11 +510,16 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
         // A statistical stellar continuum is appropriate at exterior scales.
         // Resolve it into the unchanged 3D tracers on entry, retaining only
         // low-density nearby dust instead of a screen-filling luminous fog.
-        mesh.material.uniforms.continuumWeight.value = .004 + .996 * THREE.MathUtils.smoothstep(distance / descriptors[i].radius, .6, 1.8);
+        if(!mesh.userData.isGalacticMedium)mesh.material.uniforms.continuumWeight.value = .004 + .996 * THREE.MathUtils.smoothstep(distance / descriptors[i].radius, .6, 1.8);
       }
-      if (!mesh.visible) continue;
+      if (!mesh.visible) {if(mesh.userData.isGalacticMedium)stats.stars+=mesh.userData.stats.stars;continue;}
       inverse.copy(mesh.quaternion).invert();
       mesh.material.uniforms.localCamera.value.copy(camera).sub(mesh.position).applyQuaternion(inverse).divide(mesh.scale);
+      if(mesh.userData.isGalacticMedium){
+        mesh.userData.setQuality(quality,Math.max(1,viewportHeight*pixelRatio),pixelRatio);
+        stats.stars+=mesh.userData.stats.stars;
+        mesh.material.uniforms.brightness.value=brightness;visible+=2;continue;
+      }
       const steps = quality === 'low' ? 16 : quality === 'high' ? 48 : 32;
       mesh.material.uniforms.steps.value = steps;
       mesh.material.uniforms.quadrature.value = integrationRules[steps];
@@ -530,8 +531,12 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
   };
   group.userData.dispose = () => {
     if (disposed) return; disposed = true;
-    for (const mesh of group.children) mesh.material.dispose();
+    for (const mesh of group.children) {
+      if(mesh.userData.isGalacticMedium)mesh.userData.dispose();
+      else mesh.material.dispose();
+    }
     geometry.dispose(); structureNoise.dispose(); group.clear(); descriptors = []; supportVisibility = null;
+    stats.stars=stats.starCapacity=stats.starBufferBytes=stats.media=0;
   };
   return group;
 }

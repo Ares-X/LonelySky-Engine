@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import {COSMIC_SPHERE_SURFACE_GLSL} from './cosmic-sphere-surface.js';
+
+const RING_SECTION_CAPACITY = 64;
 
 const BODY_KINDS = Object.freeze({ ring: 1, 'gas-giant': 2, 'dark-world': 3, 'stellar-giant': 4, moon: 5 });
 
@@ -9,8 +12,9 @@ uniform int uBodyKind,uSectionCount;
 uniform float uBodyRadius,uSphereRadius,uPhase,uRayMinimum,uVisibility;
 uniform vec3 uBodyCenter,uLight,uTint;
 uniform mat3 uBodyFrame;
-uniform vec4 uSections[6];
-uniform vec2 uGaps[6];
+uniform vec4 uSections[${RING_SECTION_CAPACITY}];
+uniform vec2 uGaps[${RING_SECTION_CAPACITY}];
+uniform vec4 uSectionSupports[${RING_SECTION_CAPACITY}];
 uniform bool uRinged;
 uniform vec3 uPlasmaAxes[3];
 uniform vec2 uPlasmaRadii[3];
@@ -56,8 +60,16 @@ bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,float minimum,out vec
 }
 bool ringCast(vec3 origin,vec3 ray,float minimum,out vec3 point,out vec3 normal,out float nearest){
   nearest=1.e25;point=vec3(0.);normal=vec3(0.);
-  for(int part=0;part<6;part++){
+  for(int part=0;part<${RING_SECTION_CAPACITY};part++){
     if(part>=uSectionCount)break;
+    // A short buttress occupies a small part of the full ring. Its catalogue
+    // support sphere rejects rays before the analytic slab intersections;
+    // it never substitutes for the actual curved solid or writes depth.
+    vec4 support=uSectionSupports[part];
+    vec3 relative=origin-support.xyz;
+    float along=dot(relative,ray),perp2=dot(cross(relative,ray),cross(relative,ray));
+    float disc=support.w*support.w-perp2;
+    if(disc<0.||-along+sqrt(max(disc,0.))<=minimum)continue;
     vec3 p,n;float t;
     if(sectionCast(origin,ray,uSections[part],uGaps[part],minimum,p,n,t)&&t<nearest){nearest=t;point=p;normal=n;}
   }
@@ -267,64 +279,47 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
   float radialFace=abs(dot(geometricNormal,radial));
   if(abs(geometricNormal.y)>.5)metres.y=(radius-1.)*uBodyRadius;
   else if(radialFace<.5)metres.x=(radius-1.)*uBodyRadius;
-  vec2 plate=metres/vec2(640.,280.);
-  float seams=max(plateSeam(plate.x,pixelMetres/640.),plateSeam(plate.y,pixelMetres/280.));
+  // Large fabrication bays establish a scale hierarchy before the smaller
+  // plates become resolvable. The terraces and buttresses casting their
+  // shadows are actual catalogue solids, rather than these material seams.
+  vec2 bay=metres/vec2(18000.,4600.);
+  vec2 bayCell=floor(bay);
+  float bayShade=mix(bodyHash(vec3(bayCell,uPhase)),.5,smoothstep(.3,1.1,terrainFootprint/4600.));
+  float row=floor(metres.y/1800.);
+  float panelWidth=1200.*(1.+floor(bodyHash(vec3(row,uPhase,19.))*3.));
+  vec2 plate=vec2(metres.x/panelWidth+bodyHash(vec3(row,uPhase,31.))*2.,metres.y/1800.);
+  float seams=max(plateSeam(plate.x,terrainFootprint/panelWidth),plateSeam(plate.y,terrainFootprint/1800.));
   float coarse=filteredBodyNoise(vec3(metres*.00038,uPhase),pixelMetres*.00038);
   float grain=filteredBodyNoise(point*uBodyRadius*.23,pixelMetres*.23);
-  vec3 steel=mix(vec3(.085,.11,.125),uTint*.25,.32)*(.82+coarse*.28)*(1.-seams*.65);
+  float baySeams=max(plateSeam(bay.x,pixelMetres/18000.),plateSeam(bay.y,pixelMetres/4600.));
+  float panelShade=filteredBodyNoise(vec3(floor(plate),uPhase+11.),terrainFootprint/1200.);
+  vec3 steel=mix(vec3(.075,.093,.112),vec3(.24,.218,.172),bayShade*.72);
+  steel*=(.62+coarse*.26+panelShade*.36)*(1.-seams*.26)*(1.-baySeams*.34);
+  float subPanels=max(plateSeam(metres.x/96.,terrainFootprint/96.),plateSeam(metres.y/64.,terrainFootprint/64.));
+  steel*=1.-subPanels*.09;
+  float film=filteredBodyNoise(vec3(metres/vec2(37.,170.),uPhase+7.),terrainFootprint/37.);
+  steel*=.84+grain*.22+film*.12;
   vec3 normal=geometricNormal;
   float resolved=1.-smoothstep(.5,2.,pixelMetres*.23);
   normal=normalize(normal+(tangent*(grain-.5)+vec3(0.,filteredBodyNoise(point*uBodyRadius*.19+31.,pixelMetres*.19)-.5,0.))*resolved*.055);
   float diffuse=ringDirectLight(point,geometricNormal,normal);
-  vec3 color=steel*(.045+diffuse*1.2);
+  vec3 color=steel*(.065+diffuse*1.2);
   float gloss=halfSquared>1.e-12?pow(max(dot(normal,halfVector*inversesqrt(halfSquared)),0.),mix(54.,120.,1.-grain)):0.;
   color+=steel*.9*gloss*diffuse*.5;
+  // Sparse service lights belong to fixed fabrication bays. Their emission
+  // is filtered to an area average, so approaching reveals stable lamps
+  // rather than respawning points or adding a glowing outline to every seam.
+  vec2 service=vec2(metres.x/1600.,metres.y/4600.);
+  vec2 serviceCell=floor(service),localService=fract(service);
+  float populated=mix(step(.70,bodyHash(vec3(serviceCell,uPhase+71.))),.3,smoothstep(.3,1.1,terrainFootprint/1600.));
+  float lamp=1.-smoothstep(.006,.006+max(terrainFootprint/4600.,.001),abs(localService.y-.08));
+  float windows=step(.16,localService.x)*(1.-step(.64,localService.x));
+  float serviceResolved=1.-smoothstep(.08,.45,terrainFootprint/1600.);
+  float emission=mix(.0023,lamp*windows,serviceResolved)*populated;
+  color+=vec3(1.,.47,.15)*emission*.9;
   return color;
 }
-vec3 sphereSurface(vec3 point,vec3 normal,vec3 ray,float distance){
-  float facing=clamp(dot(normal,-ray),0.,1.),ndl=dot(normal,uLight),pixel=distance*uPixelAngle;
-  vec3 seed=sin(vec3(17.17,31.7,47.1)*uPhase)*31.;
-  float broad=filteredBodyNoise(normal*5.+seed,pixel*5.);
-  if(uBodyKind==5){
-    vec4 basin=ringWorldField(normal*uBodyRadius+seed*170.,1700.,pixel*uBodyRadius,true);
-    vec4 rock=ringWorldField(normal*uBodyRadius+seed*13.,130.,pixel*uBodyRadius,true);
-    vec4 grain=ringWorldField(normal*uBodyRadius+seed,3.,pixel*uBodyRadius,false);
-    vec3 gradient=basin.yzw*130.+rock.yzw*11.+grain.yzw*.09;
-    vec3 materialNormal=normalize(normal-(gradient-normal*dot(normal,gradient)));
-    vec3 albedo=uTint*(.65+basin.x*.22+rock.x*.2+grain.x*.13);
-    return albedo*(.018+max(dot(materialNormal,uLight),0.)*1.05);
-  }
-  if(uBodyKind==4){
-    float granule=filteredBodyNoise(normal*340.+seed,pixel*340.);
-    float fine=filteredBodyNoise(normal*920.+seed,pixel*920.);
-    float activeRegion=smoothstep(.74,.88,filteredBodyNoise(normal*13.+seed,pixel*13.));
-    float textureDetail=1.;
-    if(uHasStellar){
-      // Chromospheric source supplies restrained luminance only. Its false
-      // colour never becomes the visible photosphere's red/yellow marbling.
-      vec3 observed=bodyMap(uStellar,bodyUV(normal));
-      textureDetail=.94+dot(observed,vec3(.2126,.7152,.0722))*.12;
-    }
-    float hot=step(uTint.r,uTint.b);
-    vec3 white=mix(vec3(1.03,.86,.64),vec3(.72,.86,1.06),hot);
-    return white*(.88+granule*.16+fine*.045-activeRegion*.19)*textureDetail*(.27+.73*pow(facing,.43));
-  }
-  if(uBodyKind==2){
-    float shear=filteredBodyNoise(normal*vec3(8.,16.,8.)+seed,pixel*16.);
-    float cloud=filteredBodyNoise(normal*vec3(29.,72.,29.)+seed+shear,pixel*72.);
-    float belt=normal.y*64.+(shear-.5)*3.2+(cloud-.5)*1.5;
-    float stripe=.5+.5*sin(belt)*(1.-smoothstep(.4,1.5,pixel*64.));
-    vec3 albedo=mix(uTint*vec3(.29,.26,.23),mix(uTint*.63,vec3(.47,.44,.38),.4),stripe*.64+cloud*.36);
-    albedo*=.84+cloud*.25;
-    if(uHasClouds){vec3 observed=bodyMap(uClouds,bodyUV(normal)+vec2(shear-.5,cloud-.5)*.012);albedo=mix(albedo,observed*.48,.54);}
-    float shadow=0.;
-    if(uRinged){vec3 hit;float t;shadow=gasRingCast(point+normal*.000001,uLight,hit,t);}
-    return albedo*(.014+pow(max(ndl,0.),.9)*1.12)*(1.-shadow*.8)+uTint*pow(1.-facing,5.)*max(ndl,0.)*.025;
-  }
-  float relief=filteredBodyNoise(normal*19.+seed,pixel*19.)*.7+filteredBodyNoise(normal*83.+seed,pixel*83.)*.3;
-  vec3 albedo=uTint*(.17+relief*.12+broad*.04);
-  return albedo*(.018+max(ndl,0.)*.7)+uTint*pow(1.-facing,7.)*smoothstep(-.1,.25,ndl)*.035;
-}
+${COSMIC_SPHERE_SURFACE_GLSL}
 `;
 
 export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null, stellarTexture = null } = {}) {
@@ -332,7 +327,8 @@ export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null,
     uBodyKind: { value: 0 }, uBodyRadius: { value: 1 }, uSphereRadius: { value: 1 }, uPhase: { value: 0 }, uRayMinimum: { value: 0 }, uVisibility: { value: 1 },
     uBodyCenter: { value: new THREE.Vector3() }, uBodyFrame: { value: new THREE.Matrix3() },
     uLight: { value: new THREE.Vector3() }, uTint: { value: new THREE.Color() }, uRinged: { value: false },
-    uSectionCount: { value: 0 }, uSections: { value: Array.from({ length: 6 }, () => new THREE.Vector4()) }, uGaps: { value: Array.from({ length: 6 }, () => new THREE.Vector2()) },
+    uSectionCount: { value: 0 }, uSections: { value: Array.from({ length: RING_SECTION_CAPACITY }, () => new THREE.Vector4()) }, uGaps: { value: Array.from({ length: RING_SECTION_CAPACITY }, () => new THREE.Vector2()) },
+    uSectionSupports: { value: Array.from({ length: RING_SECTION_CAPACITY }, () => new THREE.Vector4()) },
     uPlasmaAxes: { value: Array.from({ length: 3 }, () => new THREE.Vector3()) }, uPlasmaRadii: { value: Array.from({ length: 3 }, () => new THREE.Vector2(1, 1)) },
     uSurface: { value: surfaceTexture }, uHasSurface: { value: Boolean(surfaceTexture) },
     uClouds: { value: cloudTexture }, uHasClouds: { value: Boolean(cloudTexture) },
@@ -357,6 +353,18 @@ export function setCosmicBody(uniforms, body) {
     const part = body.shape.parts[i];
     uniforms.uSections.value[i].set(part.innerRadius / radius, part.outerRadius / radius, part.minY / radius, part.maxY / radius);
     uniforms.uGaps.value[i].set(part.gapCenter, part.gapHalfAngle);
+    const middleY = (part.minY + part.maxY) * .5;
+    if (part.gapHalfAngle > Math.PI * .5) {
+      const angle = part.gapCenter + Math.PI, halfAngle = Math.PI - part.gapHalfAngle;
+      const middleRadius = (part.innerRadius + part.outerRadius) * .5;
+      const radialReach = (part.outerRadius - part.innerRadius) * .5 + part.outerRadius * (1 - Math.cos(halfAngle));
+      const tangentReach = part.outerRadius * Math.sin(halfAngle);
+      uniforms.uSectionSupports.value[i].set(Math.cos(angle) * middleRadius / radius, middleY / radius,
+        Math.sin(angle) * middleRadius / radius, Math.hypot(radialReach, tangentReach, (part.maxY - part.minY) * .5) / radius);
+    } else {
+      uniforms.uSectionSupports.value[i].set(0, middleY / radius, 0,
+        Math.hypot(part.outerRadius, (part.maxY - part.minY) * .5) / radius);
+    }
   }
   for (let i = 0; i < 3; i++) {
     const prominence = body.prominences?.[i];
