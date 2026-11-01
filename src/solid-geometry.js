@@ -187,6 +187,21 @@ function circleRoots(w, x, y, z, dx, dy, dz, radius, shipRadius) {
 }
 function slabRoots(w, part, p, d, radius) {
   const x = p[0], y = p[1], z = p[2], dx = d[0], dy = d[1], dz = d[2];
+  // Exterior structural sectors can be hundreds of thousands of units away
+  // from this sweep. Reject only by conservative geometric supports, before
+  // computing boundary-feature roots. Rounded ship edges remain in the exact
+  // slab solver below; neither culling test enlarges the actual solid.
+  if (Math.min(y, y + dy) > part.maxY + radius || Math.max(y, y + dy) < part.minY - radius) return;
+  if (part.gapHalfAngle > Math.PI * .5) {
+    const angle = part.gapCenter + Math.PI, halfAngle = Math.PI - part.gapHalfAngle;
+    const middleRadius = (part.innerRadius + part.outerRadius) * .5;
+    const cx = Math.cos(angle) * middleRadius, cy = (part.minY + part.maxY) * .5, cz = Math.sin(angle) * middleRadius;
+    const radialReach = (part.outerRadius - part.innerRadius) * .5 + part.outerRadius * (1 - Math.cos(halfAngle));
+    const support = Math.hypot(radialReach, part.outerRadius * Math.sin(halfAngle), (part.maxY - part.minY) * .5) + radius;
+    const lengthSquared = dx * dx + dy * dy + dz * dz;
+    const t = lengthSquared ? Math.max(0, Math.min(1, ((cx - x) * dx + (cy - y) * dy + (cz - z) * dz) / lengthSquared)) : 0;
+    if (Math.hypot(x + dx * t - cx, y + dy * t - cy, z + dz * t - cz) > support) return;
+  }
   // Faces, radial cylinders, and their circular cap edges.
   for (let side = 0; side < 2; side++) {
     const yy = side ? part.maxY : part.minY;
