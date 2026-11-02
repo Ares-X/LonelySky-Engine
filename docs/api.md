@@ -279,6 +279,16 @@ velocity/acceleration/bound. Orbital descriptors preserve the relative orbital
 fields. Applications must use this same sampled state for their moving visuals;
 the stock `createUniverseView` does not animate custom orbital providers.
 
+`createBodyStateSampler(body)` snapshots a validated descriptor and prepares its
+orbital coefficients. Its `sample(timeSeconds, out?)` reuses caller-owned
+position/velocity/acceleration arrays when `out` is supplied, or returns a detached
+snapshot otherwise. Recreate the sampler when the descriptor changes. Each
+orbital sampler retains one private relative state at its last exact time;
+repeated requests copy that state into the output rather than solve Kepler again.
+Caller translations, velocity scaling or output edits never modify the retained
+state. Times are not rounded, samplers share no mutable state, and a failed
+evaluation invalidates the retained time before it can be reused.
+
 Gravity `sample(index, position, timeSeconds = 0)` samples current orbital poses.
 Since 0.3.1, a non-null `source` includes detached `position` and `velocity`
 vectors evaluated at the requested time. Both use the sampled sector's local

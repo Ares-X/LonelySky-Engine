@@ -35,6 +35,50 @@ test('prepared body samples keep independent outputs and invariant orbital energ
   assert.throws(() => createBodyStateSampler({ position: [0, 0, 0], orbit: {} }), /semiMajorAxis/);
 });
 
+test('same-time orbital samples isolate caller translations, time scaling and metadata edits', () => {
+  const body = moving(), otherBody = moving();
+  otherBody.position[0] += 500; otherBody.orbit.meanAnomalyAtEpoch = .7;
+  const sample = createBodyStateSampler(body), otherSample = createBodyStateSampler(otherBody);
+  const time = orbitalPeriod(body.orbit) * .37, expected = evaluateBodyState(body, time);
+  const out = state(), vectors = [out.position, out.velocity, out.acceleration];
+  assert.equal(sample(time, out), out);
+  for (let axis = 0; axis < 3; axis++) {
+    out.position[axis] += 20_000;
+    out.velocity[axis] *= .25;
+    out.acceleration[axis] *= .25 ** 2;
+  }
+  for (const key of Object.keys(out)) if (!Array.isArray(out[key])) out[key] = -999;
+  const snapshot = sample(time), anotherOut = state();
+  assert.deepEqual(snapshot, expected);
+  assert.equal(sample(time, anotherOut), anotherOut);
+  assert.deepEqual(anotherOut, expected);
+  snapshot.position.fill(999); snapshot.velocity.fill(999); snapshot.acceleration.fill(999);
+  anotherOut.radius = 999;
+  const otherSnapshot = otherSample(time);
+  assert.deepEqual(otherSnapshot, evaluateBodyState(otherBody, time));
+  assert.equal(sample(time, out), out);
+  assert.deepEqual(out, expected);
+  assert.equal(out.position, vectors[0]); assert.equal(out.velocity, vectors[1]); assert.equal(out.acceleration, vectors[2]);
+  assert.notEqual(out.position, anotherOut.position);
+  assert.notEqual(out.velocity, snapshot.velocity);
+  assert.deepEqual(otherSample(time), otherSnapshot);
+  for (const invalid of [NaN, Infinity, undefined]) assert.throws(() => sample(invalid, out), /timeSeconds/);
+  assert.deepEqual(sample(time), expected);
+});
+
+test('failed orbital evaluation cannot expose its partial writes at a previously sampled time', () => {
+  // Periapsis is representable, while the much weaker apoapsis acceleration
+  // underflows to zero after sampleOrbit has already written its vectors.
+  const body = { position: [0, 0, 0], orbit: { semiMajorAxis: 1e100, mu: 5e-124, eccentricity: .9 } };
+  const sample = createBodyStateSampler(body), expected = sample(0), out = state();
+  const failingTime = orbitalPeriod(body.orbit) / 2;
+  assert.throws(() => sample(failingTime, out), /orbital state is outside the representable numeric range/);
+  assert.deepEqual(sample(0, out), expected);
+  assert.deepEqual(sample(-0), evaluateBodyState(body, -0));
+  assert.throws(() => sample(failingTime), /orbital state is outside the representable numeric range/);
+  assert.deepEqual(sample(0), expected);
+});
+
 test('gravity workspaces isolate simultaneous consumers and replace sources after revisions', () => {
   const body = moving();
   const world = { revision: 0, sector: index => index === 0 ? [body] : [] };

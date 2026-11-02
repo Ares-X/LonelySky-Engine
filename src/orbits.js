@@ -184,10 +184,29 @@ export function createBodyStateSampler(body) {
     throw new TypeError('body.position must be a finite three-number array');
   }
   const anchor = [...body.position], orbit = body.orbit == null ? null : prepareOrbit(body.orbit);
+  const orbitalState = orbit ? newState() : null;
+  let sampledTime;
   return function sample(timeSeconds, out = newState()) {
     finite(timeSeconds, 'timeSeconds');
     if (orbit) {
-      sampleOrbit(orbit, timeSeconds, out);
+      if (!Object.is(sampledTime, timeSeconds)) {
+        // A failed evaluation may partially write the private state. Invalidate
+        // the previous time before sampling so it cannot reuse those writes.
+        sampledTime = undefined;
+        sampleOrbit(orbit, timeSeconds, orbitalState);
+        sampledTime = timeSeconds;
+      }
+      // Consumers may translate or rescale their outputs; retain only the
+      // relative orbital result, never a caller-owned state or vector.
+      for (let i = 0; i < 3; i++) {
+        out.position[i] = orbitalState.position[i];
+        out.velocity[i] = orbitalState.velocity[i];
+        out.acceleration[i] = orbitalState.acceleration[i];
+      }
+      out.radius = orbitalState.radius; out.meanAnomaly = orbitalState.meanAnomaly;
+      out.eccentricAnomaly = orbitalState.eccentricAnomaly; out.trueAnomaly = orbitalState.trueAnomaly;
+      out.meanMotion = orbitalState.meanMotion; out.periodSeconds = orbitalState.periodSeconds;
+      out.accelerationBound = orbitalState.accelerationBound;
       for (let i = 0; i < 3; i++) {
         out.position[i] += anchor[i];
         if (!Number.isFinite(out.position[i])) {
