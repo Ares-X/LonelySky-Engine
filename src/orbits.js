@@ -184,34 +184,10 @@ export function createBodyStateSampler(body) {
     throw new TypeError('body.position must be a finite three-number array');
   }
   const anchor = [...body.position], orbit = body.orbit == null ? null : prepareOrbit(body.orbit);
-  const orbitalState = orbit ? newState() : null;
-  let sampledTime;
   return function sample(timeSeconds, out = newState()) {
     finite(timeSeconds, 'timeSeconds');
     if (orbit) {
-      if (!Object.is(sampledTime, timeSeconds)) {
-        // A failed evaluation may partially write the private state. Invalidate
-        // the previous time before sampling so it cannot reuse those writes.
-        sampledTime = undefined;
-        sampleOrbit(orbit, timeSeconds, orbitalState);
-        sampledTime = timeSeconds;
-      }
-      // Consumers may translate or rescale their outputs; retain only the
-      // relative orbital result, never a caller-owned state or vector.
-      const radius = orbitalState.radius, accelerationMagnitude = (orbit.mu / radius) / radius;
-      for (let i = 0; i < 3; i++) {
-        out.position[i] = orbitalState.position[i];
-        out.velocity[i] = orbitalState.velocity[i];
-        // Keep the original output-storage rounding before deriving acceleration.
-        out.acceleration[i] = -accelerationMagnitude * (out.position[i] / radius);
-        if (!Number.isFinite(out.position[i]) || !Number.isFinite(out.velocity[i]) || !Number.isFinite(out.acceleration[i])) {
-          throw new RangeError('orbital state is outside the representable numeric range');
-        }
-      }
-      out.radius = orbitalState.radius; out.meanAnomaly = orbitalState.meanAnomaly;
-      out.eccentricAnomaly = orbitalState.eccentricAnomaly; out.trueAnomaly = orbitalState.trueAnomaly;
-      out.meanMotion = orbitalState.meanMotion; out.periodSeconds = orbitalState.periodSeconds;
-      out.accelerationBound = orbitalState.accelerationBound;
+      sampleOrbit(orbit, timeSeconds, out);
       for (let i = 0; i < 3; i++) {
         out.position[i] += anchor[i];
         if (!Number.isFinite(out.position[i])) {

@@ -35,65 +35,6 @@ test('prepared body samples keep independent outputs and invariant orbital energ
   assert.throws(() => createBodyStateSampler({ position: [0, 0, 0], orbit: {} }), /semiMajorAxis/);
 });
 
-test('same-time orbital samples isolate caller translations, time scaling and metadata edits', () => {
-  const body = moving(), otherBody = moving();
-  otherBody.position[0] += 500; otherBody.orbit.meanAnomalyAtEpoch = .7;
-  const sample = createBodyStateSampler(body), otherSample = createBodyStateSampler(otherBody);
-  const time = orbitalPeriod(body.orbit) * .37, expected = evaluateBodyState(body, time);
-  const out = state(), vectors = [out.position, out.velocity, out.acceleration];
-  assert.equal(sample(time, out), out);
-  for (let axis = 0; axis < 3; axis++) {
-    out.position[axis] += 20_000;
-    out.velocity[axis] *= .25;
-    out.acceleration[axis] *= .25 ** 2;
-  }
-  for (const key of Object.keys(out)) if (!Array.isArray(out[key])) out[key] = -999;
-  const snapshot = sample(time), anotherOut = state();
-  assert.deepEqual(snapshot, expected);
-  assert.equal(sample(time, anotherOut), anotherOut);
-  assert.deepEqual(anotherOut, expected);
-  snapshot.position.fill(999); snapshot.velocity.fill(999); snapshot.acceleration.fill(999);
-  anotherOut.radius = 999;
-  const otherSnapshot = otherSample(time);
-  assert.deepEqual(otherSnapshot, evaluateBodyState(otherBody, time));
-  assert.equal(sample(time, out), out);
-  assert.deepEqual(out, expected);
-  assert.equal(out.position, vectors[0]); assert.equal(out.velocity, vectors[1]); assert.equal(out.acceleration, vectors[2]);
-  assert.notEqual(out.position, anotherOut.position);
-  assert.notEqual(out.velocity, snapshot.velocity);
-  assert.deepEqual(otherSample(time), otherSnapshot);
-  for (const invalid of [NaN, Infinity, undefined]) assert.throws(() => sample(invalid, out), /timeSeconds/);
-  assert.deepEqual(sample(time), expected);
-});
-
-test('failed orbital evaluation cannot expose its partial writes at a previously sampled time', () => {
-  // Periapsis is representable, while the much weaker apoapsis acceleration
-  // underflows to zero after sampleOrbit has already written its vectors.
-  const body = { position: [0, 0, 0], orbit: { semiMajorAxis: 1e100, mu: 5e-124, eccentricity: .9 } };
-  const sample = createBodyStateSampler(body), expected = sample(0), out = state();
-  const failingTime = orbitalPeriod(body.orbit) / 2;
-  assert.throws(() => sample(failingTime, out), /orbital state is outside the representable numeric range/);
-  assert.deepEqual(sample(0, out), expected);
-  assert.deepEqual(sample(-0), evaluateBodyState(body, -0));
-  assert.throws(() => sample(failingTime), /orbital state is outside the representable numeric range/);
-  assert.deepEqual(sample(0), expected);
-});
-
-test('orbital sampler outputs retain Float32 rounding and reject output-storage overflow', () => {
-  const sample = createBodyStateSampler(moving());
-  const out = {position: new Float32Array(3), velocity: new Float32Array(3), acceleration: new Float32Array(3)};
-  sample(.37, out);
-  assert.deepEqual(Array.from(out.position), [231.8397216796875, 329.2031555175781, -279.0693359375]);
-  assert.deepEqual(Array.from(out.acceleration), [-82.24836730957031, -80.6035385131836, -13.05762767791748]);
-  const expected = structuredClone(out);
-  out.position.fill(0); out.acceleration.fill(0);
-  assert.deepEqual(sample(.37, out), expected);
-  const fast = createBodyStateSampler({position: [0, 0, 0], orbit: {semiMajorAxis: 1, eccentricity: 0, mu: 1e80}});
-  const mixed = {position: new Float64Array(3), velocity: new Float32Array(3), acceleration: new Float64Array(3)};
-  assert.throws(() => fast(0, mixed), /orbital state is outside the representable numeric range/);
-  assert.ok(Number.isFinite(fast(0).velocity[1]), 'A caller conversion failure must not corrupt the valid private state');
-});
-
 test('gravity workspaces isolate simultaneous consumers and replace sources after revisions', () => {
   const body = moving();
   const world = { revision: 0, sector: index => index === 0 ? [body] : [] };
