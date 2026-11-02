@@ -72,9 +72,9 @@ test('profiles share bounded volumes, shader, texture and quadrature without ext
     assert.ok(haze.children.every(mesh=>mesh.material.uniforms.steps.value===count));
   }
   haze.userData.setDescriptors(descriptors);
-  assert.equal(materialReleases,6);assert.equal(geometryReleases,0);assert.equal(noiseReleases,0);
+  assert.equal(materialReleases,0);assert.equal(geometryReleases,0);assert.equal(noiseReleases,0);
   haze.userData.dispose();haze.userData.dispose();
-  assert.equal(geometryReleases,1);assert.equal(noiseReleases,1);
+  assert.equal(materialReleases,6);assert.equal(geometryReleases,1);assert.equal(noiseReleases,1);
 });
 
 test('actual dust column stays finite, agrees with numerical integration and darkens the plane', () => {

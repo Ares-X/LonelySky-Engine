@@ -127,7 +127,7 @@ test('cosmos streaming bounds allocations, avoids stationary rebuilds and releas
   } finally { cosmos.userData.dispose(); }
 });
 
-test('haze replacement releases old materials and retains noise until final disposal', () => {
+test('haze replacement retains current materials and noise until final disposal', () => {
   const haze = createGalaxyHaze({ seed: 'haze-fixture' });
   const descriptor = loadedMacros(0, 'haze-fixture')[0];
   assert.ok(descriptor);
@@ -137,12 +137,14 @@ test('haze replacement releases old materials and retains noise until final disp
     const noise = original.material.uniforms.structureNoise.value, noiseReleased = disposalCount(noise);
     const geometryReleased = disposalCount(original.geometry);
     haze.userData.setDescriptors([descriptor]);
-    assert.equal(materialReleased(), 1);
+    assert.equal(haze.children[0], original);
+    assert.equal(materialReleased(), 0);
     assert.equal(haze.children[0].material.uniforms.structureNoise.value, noise);
     assert.equal(noiseReleased(), 0);
     assert.equal(geometryReleased(), 0);
     const finalMaterialReleased = disposalCount(haze.children[0].material);
     haze.userData.dispose(); haze.userData.dispose();
+    assert.equal(materialReleased(), 1);
     assert.equal(finalMaterialReleased(), 1);
     assert.equal(geometryReleased(), 1);
     assert.equal(noiseReleased(), 1);
