@@ -246,6 +246,16 @@ other grid sizes and legacy calls retain their existing per-sample fading and
 are not subject to a new 108-descriptor limit. Direct
 `createGalaxyHaze({structures: true})` calls also retain their previous path.
 
+`createGalaxyHaze().userData.setDescriptors(next)` retains the currently needed
+mesh, material and uniform slots instead of destroying all shader owners at
+every catalogue handoff. Slots follow catalogue order, not persistent descriptor
+IDs; all descriptor inputs and initial draw state are reapplied, including for
+custom providers changing an existing ID. Call `update` with the new centres
+before drawing. Shrinking immediately disposes removed materials; no spare pool
+is retained. Final `dispose()` releases the remaining materials and shared
+geometry/texture once. This avoids needless program retirement for retained
+slots; it does not precompile new materials or guarantee a frame-time budget.
+
 Galaxy emission uses 16/32/48 bounded disk samples for low/auto/high quality.
 The smooth core is integrated separately with samples concentrated around the
 closest point of the ray. Dust uses mip filtering; analytic spiral arms are

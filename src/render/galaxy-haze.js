@@ -420,57 +420,89 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
   structureNoise.wrapS = structureNoise.wrapT = THREE.RepeatWrapping;
   structureNoise.generateMipmaps = true; structureNoise.needsUpdate = true;
   const camera = new THREE.Vector3(), inverse = new THREE.Quaternion();
-  const viewProjection = new THREE.Matrix4(), viewFrustum = new THREE.Frustum();
+  const viewProjection = new THREE.Matrix4(), viewFrustum = new THREE.Frustum(), orientationMatrix = new THREE.Matrix4();
   let descriptors = [], disposed = false;
+  function createVolume() {
+    // Descriptor values are installed before this slot enters the scene.
+    const material = new THREE.ShaderMaterial({
+      uniforms: { localCamera: { value: new THREE.Vector3() }, shapeScale: { value: new THREE.Vector3() },
+        tint: { value: new THREE.Color() }, structureNoise: { value: structureNoise }, noiseOffset: { value: new THREE.Vector2() },
+        radius: { value: 0 }, thickness: { value: 0 }, arms: { value: 0 }, pitch: { value: 0 }, morphology: { value: 0 },
+        asymmetry: { value: 0 }, bar: { value: 0 }, brightness: { value: 1 }, steps: { value: 32 },
+        quadrature: { value: integrationRules[32] }, coreQuadrature: { value: integrationRules[16] } },
+      defines: { FADE_START: structures ? `${COSMIC_VIEW_FADE_START}.` : '420000.', FADE_FAR: structures ? `${COSMIC_VIEW_FAR}.` : '520000.', ...(structures ? { COSMIC_STRUCTURES: 1 } : {}), ...(supportVisibility ? { COSMIC_SUPPORT_FADE: 1 } : {}) },
+      vertexShader, fragmentShader, side: THREE.BackSide, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, depthTest: !structures,
+    });
+    if (supportVisibility) material.uniforms.structureVisibility = { value: 1 };
+    if (structures) {
+      material.uniforms.continuumWeight = { value: 1 };
+      material.uniforms.structureKind = { value: 0 };
+      material.uniforms.uVisibility = { value: 1 }; material.uniforms.uDensity = { value: 1 };
+      material.uniforms.uSceneDepth = { value: null }; material.uniforms.uHasSceneDepth = { value: 0 };
+      material.uniforms.uDepthResolution = { value: new THREE.Vector2(1, 1) };
+      material.uniforms.uCameraNearFar = { value: new THREE.Vector2(1, 220000) };
+      material.uniforms.worldOrientation = { value: new THREE.Matrix3() };
+    }
+    for (const name of ['armStrength', 'coreStrength', 'dustStrength', 'haloStrength', 'bridgeStrength', 'knotScale', 'youngStrength', 'emissionStrength']) material.uniforms[name] = { value: 0 };
+    const mesh = new THREE.Mesh(geometry, material);
+    if (structures) {
+      mesh.userData.setSceneDepth = (texture, width, height, viewCamera) => {
+        material.uniforms.uSceneDepth.value = texture;
+        material.uniforms.uHasSceneDepth.value = texture ? 1 : 0;
+        if (texture) {
+          material.uniforms.uDepthResolution.value.set(width, height);
+          material.uniforms.uCameraNearFar.value.set(viewCamera.near, viewCamera.far);
+        }
+      };
+    }
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+  function configureVolume(mesh, descriptor) {
+    const uniforms = mesh.material.uniforms, shape = galaxyHazeScale(descriptor);
+    const appearance = describeGalaxyAppearance(descriptor), detail = randomFromSeed(`${descriptor.seed}:dust-offset-v1`);
+    uniforms.localCamera.value.set(0, 0, 0); uniforms.shapeScale.value.fromArray(shape);
+    uniforms.tint.value.setHex(structures && descriptor.theme === 'old-gold' ? 0xc0ac8e
+      : structures && descriptor.theme === 'blue-nursery' ? 0x9aaeba
+      : descriptor.morphology === 'elliptical' ? 0xc7bba5 : 0xc4c2b9);
+    uniforms.noiseOffset.value.set(detail(), detail());
+    uniforms.radius.value = descriptor.radius; uniforms.thickness.value = descriptor.thickness;
+    uniforms.arms.value = descriptor.arms; uniforms.pitch.value = descriptor.pitch;
+    uniforms.morphology.value = descriptor.morphology === 'spiral' ? 0 : descriptor.morphology === 'elliptical' ? 1 : 2;
+    uniforms.asymmetry.value = descriptor.asymmetry; uniforms.bar.value = Number(descriptor.bar);
+    uniforms.brightness.value = 1; uniforms.steps.value = 32;
+    uniforms.quadrature.value = integrationRules[32]; uniforms.coreQuadrature.value = integrationRules[16];
+    if (supportVisibility) uniforms.structureVisibility.value = 1;
+    mesh.name = descriptor.id; mesh.position.set(0, 0, 0); mesh.visible = true;
+    mesh.rotation.order = 'XYZ'; mesh.rotation.fromArray(descriptor.orientation);
+    mesh.scale.copy(uniforms.shapeScale.value).multiplyScalar(descriptor.radius);
+    if (structures) {
+      uniforms.continuumWeight.value = 1;
+      uniforms.structureKind.value = descriptor.kind === 'nebula' ? 2 : descriptor.kind === 'cluster' ? 1 : 0;
+      uniforms.uVisibility.value = uniforms.uDensity.value = 1;
+      mesh.userData.setSceneDepth(null);
+      uniforms.uDepthResolution.value.set(1, 1); uniforms.uCameraNearFar.value.set(1, 220000);
+      uniforms.worldOrientation.value.setFromMatrix4(orientationMatrix.makeRotationFromEuler(mesh.rotation));
+    }
+    for (const name of ['armStrength', 'coreStrength', 'dustStrength', 'haloStrength', 'bridgeStrength', 'knotScale', 'youngStrength', 'emissionStrength']) uniforms[name].value = appearance[name];
+    mesh.userData.appearance = appearance;
+  }
   group.userData.setDescriptors = (next) => {
     if (disposed) return;
-    for (const mesh of group.children) mesh.material.dispose();
-    group.clear(); descriptors = next;
-    for (const descriptor of descriptors) {
-      const shape = galaxyHazeScale(descriptor);
-      const appearance = describeGalaxyAppearance(descriptor);
-      const detail = randomFromSeed(`${descriptor.seed}:dust-offset-v1`);
-      const material = new THREE.ShaderMaterial({
-        uniforms: { localCamera: { value: new THREE.Vector3() }, shapeScale: { value: new THREE.Vector3(...shape) },
-          tint: { value: new THREE.Color(descriptor.morphology === 'elliptical' ? 0xc7bba5 : 0xc4c2b9) },
-          structureNoise: { value: structureNoise }, noiseOffset: { value: new THREE.Vector2(detail(), detail()) },
-          radius: { value: descriptor.radius }, thickness: { value: descriptor.thickness },
-          arms: { value: descriptor.arms }, pitch: { value: descriptor.pitch },
-          morphology: { value: descriptor.morphology === 'spiral' ? 0 : descriptor.morphology === 'elliptical' ? 1 : 2 },
-          asymmetry: { value: descriptor.asymmetry }, bar: { value: Number(descriptor.bar) }, brightness: { value: 1 }, steps: { value: 32 }, quadrature: { value: integrationRules[32] }, coreQuadrature: { value: integrationRules[16] } },
-        defines: { FADE_START: structures ? `${COSMIC_VIEW_FADE_START}.` : '420000.', FADE_FAR: structures ? `${COSMIC_VIEW_FAR}.` : '520000.', ...(structures ? { COSMIC_STRUCTURES: 1 } : {}), ...(supportVisibility ? { COSMIC_SUPPORT_FADE: 1 } : {}) },
-        vertexShader, fragmentShader, side: THREE.BackSide, transparent: true,
-        blending: THREE.AdditiveBlending, depthWrite: false, depthTest: !structures,
-      });
-      if (supportVisibility) material.uniforms.structureVisibility = { value: 1 };
-      if (structures) {
-        material.uniforms.continuumWeight = { value: 1 };
-        material.uniforms.structureKind = { value: descriptor.kind === 'nebula' ? 2 : descriptor.kind === 'cluster' ? 1 : 0 };
-        material.uniforms.uVisibility = { value: 1 }; material.uniforms.uDensity = { value: 1 };
-        material.uniforms.uSceneDepth = { value: null }; material.uniforms.uHasSceneDepth = { value: 0 };
-        material.uniforms.uDepthResolution = { value: new THREE.Vector2(1, 1) };
-        material.uniforms.uCameraNearFar = { value: new THREE.Vector2(1, 220000) };
-        material.uniforms.worldOrientation = { value: new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...descriptor.orientation))) };
-      }
-      for (const name of ['armStrength', 'coreStrength', 'dustStrength', 'haloStrength', 'bridgeStrength', 'knotScale', 'youngStrength', 'emissionStrength']) material.uniforms[name] = { value: appearance[name] };
-      const mesh = new THREE.Mesh(geometry, material); mesh.name = descriptor.id;
-      if (structures && descriptor.theme === 'old-gold') material.uniforms.tint.value.setHex(0xc0ac8e);
-      if (structures && descriptor.theme === 'blue-nursery') material.uniforms.tint.value.setHex(0x9aaeba);
-      mesh.userData.appearance = appearance;
-      if (structures) {
-        mesh.userData.setSceneDepth = (texture, width, height, viewCamera) => {
-          material.uniforms.uSceneDepth.value = texture;
-          material.uniforms.uHasSceneDepth.value = texture ? 1 : 0;
-          if (texture) {
-            material.uniforms.uDepthResolution.value.set(width, height);
-            material.uniforms.uCameraNearFar.value.set(viewCamera.near, viewCamera.far);
-          }
-        };
-      }
-      mesh.rotation.fromArray(descriptor.orientation);
-      mesh.scale.fromArray(shape).multiplyScalar(descriptor.radius);
-      mesh.frustumCulled = false; group.add(mesh);
+    // Keep current material/program owners across a catalogue handoff. Slots
+    // follow catalogue order, not identity; custom providers may change an ID.
+    // There is no spare pool: removed slots release their materials immediately.
+    while (group.children.length > next.length) {
+      const mesh = group.children[group.children.length - 1];
+      mesh.removeFromParent(); mesh.material.dispose();
     }
+    for (let i = 0; i < next.length; i++) {
+      const mesh = group.children[i] ?? createVolume();
+      configureVolume(mesh, next[i]);
+      if (mesh.parent !== group) group.add(mesh);
+    }
+    descriptors = next;
   };
   group.userData.update = ({ centers, cameraPosition, camera: viewCamera, quality, brightness, home }) => {
     if (disposed) return 0;
