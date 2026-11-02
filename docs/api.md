@@ -288,6 +288,8 @@ repeated requests copy that state into the output rather than solve Kepler again
 Caller translations, velocity scaling or output edits never modify the retained
 state. Times are not rounded, samplers share no mutable state, and a failed
 evaluation invalidates the retained time before it can be reused.
+Reduced-precision output arrays retain their original rounding and overflow
+checks; acceleration is derived from the position stored in the caller's array.
 
 Gravity `sample(index, position, timeSeconds = 0)` samples current orbital poses.
 Since 0.3.1, a non-null `source` includes detached `position` and `velocity`

@@ -79,6 +79,21 @@ test('failed orbital evaluation cannot expose its partial writes at a previously
   assert.deepEqual(sample(0), expected);
 });
 
+test('orbital sampler outputs retain Float32 rounding and reject output-storage overflow', () => {
+  const sample = createBodyStateSampler(moving());
+  const out = {position: new Float32Array(3), velocity: new Float32Array(3), acceleration: new Float32Array(3)};
+  sample(.37, out);
+  assert.deepEqual(Array.from(out.position), [231.8397216796875, 329.2031555175781, -279.0693359375]);
+  assert.deepEqual(Array.from(out.acceleration), [-82.24836730957031, -80.6035385131836, -13.05762767791748]);
+  const expected = structuredClone(out);
+  out.position.fill(0); out.acceleration.fill(0);
+  assert.deepEqual(sample(.37, out), expected);
+  const fast = createBodyStateSampler({position: [0, 0, 0], orbit: {semiMajorAxis: 1, eccentricity: 0, mu: 1e80}});
+  const mixed = {position: new Float64Array(3), velocity: new Float32Array(3), acceleration: new Float64Array(3)};
+  assert.throws(() => fast(0, mixed), /orbital state is outside the representable numeric range/);
+  assert.ok(Number.isFinite(fast(0).velocity[1]), 'A caller conversion failure must not corrupt the valid private state');
+});
+
 test('gravity workspaces isolate simultaneous consumers and replace sources after revisions', () => {
   const body = moving();
   const world = { revision: 0, sector: index => index === 0 ? [body] : [] };

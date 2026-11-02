@@ -198,10 +198,15 @@ export function createBodyStateSampler(body) {
       }
       // Consumers may translate or rescale their outputs; retain only the
       // relative orbital result, never a caller-owned state or vector.
+      const radius = orbitalState.radius, accelerationMagnitude = (orbit.mu / radius) / radius;
       for (let i = 0; i < 3; i++) {
         out.position[i] = orbitalState.position[i];
         out.velocity[i] = orbitalState.velocity[i];
-        out.acceleration[i] = orbitalState.acceleration[i];
+        // Keep the original output-storage rounding before deriving acceleration.
+        out.acceleration[i] = -accelerationMagnitude * (out.position[i] / radius);
+        if (!Number.isFinite(out.position[i]) || !Number.isFinite(out.velocity[i]) || !Number.isFinite(out.acceleration[i])) {
+          throw new RangeError('orbital state is outside the representable numeric range');
+        }
       }
       out.radius = orbitalState.radius; out.meanAnomaly = orbitalState.meanAnomaly;
       out.eccentricAnomaly = orbitalState.eccentricAnomaly; out.trueAnomaly = orbitalState.trueAnomaly;
