@@ -37,19 +37,46 @@ vec3 sphereSurface(vec3 point,vec3 normal,vec3 ray,float distance){
     return white*(.88+granule*.16+fine*.045+micro*.045+flecks*.012-activeRegion*.19)*textureDetail*(.27+.73*pow(facing,.43));
   }
   if(uBodyKind==2){
+    // Jets are anchored to the body, not to the camera. Cross-scale shear
+    // breaks the identical-latitude stripe template without scrolling textures.
     float shear=filteredBodyNoise(normal*vec3(8.,16.,8.)+seed,pixel*16.);
     float cloud=filteredBodyNoise(normal*vec3(29.,72.,29.)+seed+shear,pixel*72.);
-    float belt=normal.y*64.+(shear-.5)*3.2+(cloud-.5)*1.5;
-    float stripe=.5+.5*sin(belt)*(1.-smoothstep(.4,1.5,pixel*64.));
-    vec3 albedo=mix(uTint*vec3(.29,.26,.23),mix(uTint*.63,vec3(.47,.44,.38),.4),stripe*.64+cloud*.36);
-    float filaments=ringWorldField(world+seed*31.,130.,footprint,true).x-.55;
+    float beltPhase=normal.y*70.+(shear-.5)*7.8+(cloud-.5)*2.4;
+    float broad=.5+.5*sin(beltPhase*.43);
+    float fine=.5+.5*sin(beltPhase*1.65+cloud);
+    // Both frequency bands fade to their mean before crossing pixel Nyquist.
+    float broadResolved=1.-smoothstep(.3,1.5,fwidth(beltPhase*.43));
+    float fineResolved=1.-smoothstep(.3,1.5,fwidth(beltPhase*1.65+cloud));
+    float jets=mix(.5,broad,broadResolved),filaments=mix(.5,fine,fineResolved);
+    vec3 darkBand=uTint*vec3(.30,.34,.41),lightBand=uTint*vec3(1.04,.96,.82);
+    vec3 ochre=uTint*vec3(.92,.57,.35);
+    vec3 albedo=mix(darkBand,lightBand,clamp(.17+jets*.56+cloud*.23,0.,1.));
+    albedo=mix(albedo,ochre,(1.-filaments)*(.16+.16*shear));
     float wisps=ringWorldField(world+seed,8.,footprint,false).x-.5;
-    albedo*=.84+cloud*.25;
-    if(uHasClouds){vec3 observed=bodyMap(uClouds,bodyUV(normal)+vec2(shear-.5,cloud-.5)*.012);albedo=mix(albedo,observed*.48,.54);}
-    albedo*=1.+filaments*.08+wisps*.025;
+    albedo*=.84+cloud*.25+wisps*.035;
+    // The existing astronomical texture supplies subordinate grain, not a
+    // uniform photograph that erases the new light/dark jet structure.
+    if(uHasClouds){
+      vec3 observed=bodyMap(uClouds,bodyUV(normal)+vec2(shear-.5,cloud-.5)*.012);
+      albedo*=.78+.38*dot(observed,vec3(.2126,.7152,.0722));
+    }
+    // A single deterministic elliptical vortex per giant. Its orientation
+    // uses a 3D tangent basis, remaining continuous across the UV meridian.
+    float longitude=uPhase*4.73,latitude=-.19+.16*sin(uPhase*2.1);
+    vec3 stormCenter=vec3(cos(longitude)*cos(latitude),sin(latitude),sin(longitude)*cos(latitude));
+    vec3 east=vec3(-sin(longitude),0.,cos(longitude)),north=cross(stormCenter,east);
+    vec3 delta=normal-stormCenter;
+    float ellipse=length(vec2(dot(delta,east)*.72,dot(delta,north)*1.75));
+    float edge=max(fwidth(ellipse),.00001);
+    float storm=1.-smoothstep(.08-edge,.18+edge,ellipse);
+    float eye=1.-smoothstep(.025-edge,.065+edge,ellipse);
+    vec3 stormColor=mix(uTint*vec3(.85,.43,.25),uTint*vec3(1.02,.81,.61),eye);
+    albedo=mix(albedo,stormColor,storm*.75);
     float shadow=0.;
     if(uRinged){vec3 hit;float t;shadow=gasRingCast(point+normal*.000001,uLight,hit,t);}
-    return albedo*(.014+pow(max(ndl,0.),.9)*1.12)*(1.-shadow*.8)+uTint*pow(1.-facing,5.)*max(ndl,0.)*.025;
+    float sunlight=pow(max(ndl,0.),.9);
+    float limb=pow(1.-facing,5.)*smoothstep(-.02,.2,ndl);
+    return albedo*(.012+sunlight*1.12)*(1.-shadow*.8)+uTint*limb*.06;
   }
   vec4 surfaceRock=ringRockRidge(world+seed*13.,130.,footprint);
   vec4 surfaceGrain=ringWorldField(world+seed,1.2,footprint,false);
