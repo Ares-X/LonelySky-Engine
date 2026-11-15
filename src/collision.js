@@ -54,7 +54,7 @@ function removeInward(vector, normal) {
 }
 
 function constrained(vector, normals) {
-  const normal = normals.at(-1);
+  const normal = normals[normals.length - 1];
   let result = removeInward(vector, normal);
   for (let i = 0; i < normals.length - 1; i += 1) {
     const other = normals[i];
