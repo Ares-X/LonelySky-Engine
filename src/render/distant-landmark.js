@@ -116,6 +116,10 @@ export const COSMIC_BODY_SURFACE_GLSL = /* glsl */`
 uniform sampler2D uSurface,uClouds,uStellar;
 uniform bool uHasSurface,uHasClouds,uHasStellar;
 uniform float uPixelAngle;
+uniform bool uHasHabitatPort;
+uniform vec2 uHabitatPort,uHabitatPortAxes,uHabitatSize;
+uniform sampler2D uHabitatMap;
+uniform bool uHasHabitatMap;
 float bodyHash(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
 float bodyNoise(vec3 p){
   vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
@@ -187,6 +191,24 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
   float terrainFootprint=max(pixelMetres,max(length(dFdx(point)),length(dFdy(point)))*uBodyRadius);
   vec3 halfVector=uLight-ray;float halfSquared=dot(halfVector,halfVector);
   if(inner>.5){
+    float habitatAngle=atan(sin(angle-uPhase-3.14159265359),cos(angle-uPhase-3.14159265359));
+    vec2 habitatPoint=vec2(habitatAngle*uBodyRadius,point.y*uBodyRadius);
+    float portLandscape=uHasHabitatPort?1.-smoothstep(15000.,25000.,length(habitatPoint-uHabitatPort)):0.;
+    vec4 portPicture=vec4(0.);
+    if(uHasHabitatPort&&uHasHabitatMap){
+      mat2 mapFrame=mat2(uHabitatPortAxes.x,-uHabitatPortAxes.y,uHabitatPortAxes.y,uHabitatPortAxes.x);
+      vec2 h=mapFrame*(habitatPoint-uHabitatPort);
+      vec2 uv=.5+vec2(h.x,-h.y)/uHabitatSize;
+      vec2 dx=dFdx(uv),dy=dFdy(uv);
+      vec2 edge=min(uv,1.-uv);
+      float feather=smoothstep(0.,.075,min(edge.x,edge.y));
+      if(feather>0.){
+        portPicture=textureGrad(uHabitatMap,uv,dx,dy);
+        portPicture.a*=feather;
+        // Opaque features have baked surface lighting.
+        if(portPicture.a>=1.)return portPicture.rgb;
+      }
+    }
     // The circular embedding is continuous at longitude +/-pi. Every scale is
     // in world units, with no camera-relative terrain translation or UV zoom.
     vec3 world=vec3(radial.x,point.y,radial.z)*uBodyRadius+uPhase*vec3(19013.,7301.,11027.);
@@ -194,6 +216,7 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
     vec4 region=ringWorldField(world+vec3(17000.,31000.,11000.),23000.,terrainFootprint,false);
     vec4 coastDetail=ringWorldField(world+vec3(4700.,1300.,3100.),7100.,terrainFootprint,false);
     vec4 coast=continent*.61+region*.27+coastDetail*.12;
+    vec4 broadCoast=coast;
     vec4 ridge=ringRockRidge(world+vec3(9000.,13000.,7000.),3100.,terrainFootprint);
     vec4 crag=ringRockRidge(world+vec3(1300.,3700.,2300.),850.,terrainFootprint);
     vec4 ledge=ringRockRidge(world+vec3(700.,1700.,3100.),170.,terrainFootprint);
@@ -214,20 +237,26 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
       +mountain*(ridge.yzw*480.+crag.yzw*80.+ledge.yzw*12.)+mountainGradient*ridgeHeight
       +stone.yzw*1.9+grit.yzw*.075;
     vec2 slope=vec2(dot(heightGradient,tangent)/radius,heightGradient.y);
+    // The inhabited coast has softer material relief. This does not displace
+    // the shared sea-level field or change the analytic collision surface.
+    slope*=mix(1.,.18,portLandscape);
     vec3 landNormal=normalize(geometricNormal-tangent*slope.x-vec3(0.,slope.y,0.));
     float steep=length(slope),rock=smoothstep(.1,.55,steep)*(.25+mountain*.75);
     // Muted fertile lowlands, dry uplands, then exposed stone. Bright mineral
     // faces are sparse and acquire their shape from the height-field normal.
     vec3 soil=mix(vec3(.035,.064,.029),vec3(.14,.126,.077),smoothstep(.32,.72,region.x)*(.45+mountain*.55));
+    vec3 coastalForest=mix(vec3(.021,.046,.034),vec3(.048,.063,.045),mountain*.55);
+    soil=mix(soil,coastalForest,portLandscape*.9);
     float weathering=.67+stone.x*.38+grit.x*.28-pow(1.-grit.x,4.)*.2;
     soil*=(.88+coastDetail.x*.18)*weathering;
     vec3 bedrock=mix(vec3(.105,.108,.098),vec3(.19,.175,.142),region.x);
+    bedrock=mix(bedrock,vec3(.09,.103,.102),portLandscape*.8);
     // Thin mineral bedding follows the same height field. Unlike biome paint,
     // its colour changes are small, resolved and subordinate to face lighting.
     float visualHeight=max(0.,elevation-seaLevel)*2600.+mountain*ridgeHeight;
     float bedding=(.5+.5*sin(visualHeight*.095+region.x*3.))
       *(1.-smoothstep(.4,1.6,terrainFootprint*steep*.095));
-    bedrock*=weathering*(.86+bedding*.17);
+    bedrock*=weathering*(.86+bedding*.17*(1.-portLandscape));
     soil=mix(soil,bedrock,rock);
     float beachWidth=max(shoreAA,coastSlope*24.);
     float beach=1.-smoothstep(shoreAA,shoreAA+beachWidth,abs(elevation-seaLevel));
@@ -237,13 +266,21 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
       float geological=dot(bodyMap(uSurface,uv),vec3(.2126,.7152,.0722));
       soil*=1.+(geological-.35)*.2;
     }
-    float shallow=smoothstep(seaLevel-max(.004,coastSlope*1800.),seaLevel,elevation);
-    vec3 sea=mix(vec3(.004,.016,.024),vec3(.014,.055,.063),shallow);
+    // Shoreline notches must not make kilometre-wide bathymetric colour bands
+    // flicker with their much finer derivatives. Keep the actual coast above,
+    // and use its original broad field for the inhabited bay's water depth cue.
+    vec2 broadCoastGradient=vec2(dot(broadCoast.yzw,tangent)/radius,broadCoast.z);
+    float waterSlope=mix(coastSlope,length(broadCoastGradient),portLandscape);
+    float waterElevation=mix(elevation,broadCoast.x,portLandscape);
+    float shallow=smoothstep(seaLevel-max(.004,waterSlope*1800.),seaLevel,waterElevation);
+    vec3 deepSea=mix(vec3(.004,.016,.024),vec3(.008,.025,.038),portLandscape);
+    vec3 shallowSea=mix(vec3(.014,.055,.063),vec3(.025,.13,.12),portLandscape);
+    vec3 sea=mix(deepSea,shallowSea,shallow);
     // Decimetre-height optical ripples are fixed in object/world coordinates.
     // They supply a sea material normal, not a moving or collidable sea mesh.
     vec3 waveA=vec3(.18,.12,.09),waveB=vec3(.57,-.31,.38);
-    vec3 waterGradient=waveA*cos(dot(world,waveA))*.3*(1.-smoothstep(.4,1.6,terrainFootprint*length(waveA)))
-      +waveB*cos(dot(world,waveB))*.05*(1.-smoothstep(.4,1.6,terrainFootprint*length(waveB)));
+    vec3 waterGradient=waveA*cos(dot(world,waveA))*mix(.3,.025,portLandscape)*(1.-smoothstep(.4,1.6,terrainFootprint*length(waveA)))
+      +waveB*cos(dot(world,waveB))*mix(.05,.006,portLandscape)*(1.-smoothstep(.4,1.6,terrainFootprint*length(waveB)));
     vec3 waterNormal=normalize(geometricNormal-tangent*dot(waterGradient,tangent)/radius-vec3(0.,waterGradient.y,0.));
     vec3 normal=normalize(mix(waterNormal,landNormal,land));
     float diffuse=ringDirectLight(point,geometricNormal,normal);
@@ -259,7 +296,9 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
     }
     vec3 color=mix(seaColor,landColor,land);
     float air=(1.-exp(-distance*.6))*.18;
-    return mix(color,vec3(.063,.095,.12)*(.35+diffuse*.65),air);
+    air=max(air,portLandscape*(1.-exp(-distance*uBodyRadius/42000.))*.09);
+    color=mix(color,vec3(.063,.095,.12)*(.35+diffuse*.65),air);
+    return mix(color,portPicture.rgb,portPicture.a);
   }
   // Steel plate dimensions are world lengths. Close seams and roughness fade
   // to their area average as their spacing becomes smaller than a pixel.
@@ -327,7 +366,7 @@ vec3 sphereSurface(vec3 point,vec3 normal,vec3 ray,float distance){
 }
 `;
 
-export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null, stellarTexture = null } = {}) {
+export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null, stellarTexture = null, habitatTexture = null } = {}) {
   return {
     uBodyKind: { value: 0 }, uBodyRadius: { value: 1 }, uSphereRadius: { value: 1 }, uPhase: { value: 0 }, uRayMinimum: { value: 0 }, uVisibility: { value: 1 },
     uBodyCenter: { value: new THREE.Vector3() }, uBodyFrame: { value: new THREE.Matrix3() },
@@ -337,10 +376,21 @@ export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null,
     uSurface: { value: surfaceTexture }, uHasSurface: { value: Boolean(surfaceTexture) },
     uClouds: { value: cloudTexture }, uHasClouds: { value: Boolean(cloudTexture) },
     uStellar: { value: stellarTexture }, uHasStellar: { value: Boolean(stellarTexture) },
+    uHasHabitatPort: { value: false }, uHabitatPort: { value: new THREE.Vector2() }, uHabitatPortAxes: { value: new THREE.Vector2(1, 0) },
+    uHabitatSize: { value: new THREE.Vector2() }, uHabitatMap: { value: habitatTexture }, uHasHabitatMap: { value: false },
   };
 }
 
 export function setCosmicBody(uniforms, body) {
+  const habitatImage = uniforms.uHabitatMap.value?.image;
+  uniforms.uHasHabitatMap.value = Boolean(habitatImage && habitatImage.width > 0 && habitatImage.height > 0);
+  uniforms.uHasHabitatPort.value = Boolean(body.habitatPort);
+  if (body.habitatPort) {
+    uniforms.uHabitatPort.value.set(body.habitatPort.along, body.habitatPort.across);
+    uniforms.uHabitatSize.value.fromArray(body.habitatPort.size);
+    const angle = body.habitatPort.angle ?? 0;
+    uniforms.uHabitatPortAxes.value.set(Math.cos(angle), Math.sin(angle));
+  }
   const radius = body.radius;
   uniforms.uBodyKind.value = BODY_KINDS[body.kind];
   uniforms.uBodyRadius.value = radius;
