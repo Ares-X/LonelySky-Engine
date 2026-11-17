@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { createCosmicBodies } from '../../src/render/cosmic-bodies.js';
 
 const frame = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-function fixture(kind = 'ring') {
+function fixture(kind = 'ring', options = {}) {
   const body = { id: 'physical-fixture', kind, radius: 1000000, halfWidth: .02, thickness: .0005, phase: .3,
     center: [2000000, 30000, -4000000], frame, light: [.5, .4, -.8], tint: [.5, .58, .64],
     shape: kind === 'ring' ? { type: 'compound', parts: [
@@ -13,7 +13,7 @@ function fixture(kind = 'ring') {
     ] } : { type: 'sphere', radius: 1000000 } };
   const camera = new THREE.PerspectiveCamera(55, 1.7, .5, 220000);
   camera.position.set(1300, -100, 12000);camera.lookAt(1200000, 80000, -1000000);camera.updateMatrixWorld();
-  const group = createCosmicBodies();
+  const group = createCosmicBodies(options);
   return { group, body, camera, update: () => group.userData.update({ body, camera, viewportHeight: 720, pixelRatio: 1.25 }) };
 }
 
@@ -34,6 +34,55 @@ test('physical solids carry the catalogue bounds and every independent breach in
     assert.equal(u.uSections.value[0].z, -.04);
     assert.equal(group.children[1].visible, false);
   } finally { group.userData.dispose(); }
+});
+
+test('optional surface ports follow their current body without leaking across reused slots', () => {
+  const {group,body,camera}=fixture();
+  const port={along:-12000,across:3400,angle:Math.PI/3,size:[3000,1200]};
+  body.habitatPort=port;
+  try {
+    group.userData.update({body,camera,viewportHeight:720});
+    const material=group.children[0].material,u=material.uniforms;
+    const portUniform=u.uHabitatPort.value;
+    assert.equal(u.uHasHabitatPort.value,true);
+    assert.deepEqual(u.uHabitatSize.value.toArray(),[3000,1200]);
+    assert.deepEqual(portUniform.toArray(),[-12000,3400]);
+    assert.ok(u.uHabitatPortAxes.value.distanceTo(new THREE.Vector2(.5,Math.sqrt(3)/2))<1e-12);
+    const sections=u.uSections.value.map(section=>section.toArray());
+    const replacement={...body,habitatPort:undefined};
+    group.userData.update({body:replacement,camera,viewportHeight:720});
+    assert.equal(u.uHasHabitatPort.value,false,'the previous port is not assigned to the next body');
+    assert.equal(u.uHabitatPort.value,portUniform);
+    assert.deepEqual(u.uSections.value.map(section=>section.toArray()),sections,'surface art never changes the authoritative solid');
+    group.userData.update({body,camera,viewportHeight:720});
+    assert.equal(group.children[0].material,material);
+    assert.equal(u.uHabitatPort.value,portUniform);
+    const unrotated={...body,habitatPort:{along:0,across:0,size:[400,200]}};
+    group.userData.update({body:unrotated,camera,viewportHeight:720});
+    assert.deepEqual(u.uHabitatPortAxes.value.toArray(),[1,0],'omitted angle restores the default port axes');
+    assert.deepEqual(body.habitatPort,port);
+  } finally {group.userData.dispose();}
+});
+
+test('an optional borrowed port image activates after image readiness and remains caller-owned', () => {
+  const habitatTexture=new THREE.Texture();
+  let disposals=0;
+  habitatTexture.addEventListener('dispose',()=>disposals++);
+  const {group,body,update}=fixture('ring',{habitatTexture});
+  body.habitatPort={along:0,across:0,size:[400,200]};
+  try {
+    update();
+    const uniforms=group.children[0].material.uniforms;
+    assert.equal(uniforms.uHabitatMap.value,habitatTexture);
+    assert.equal(uniforms.uHasHabitatMap.value,false,'a loader placeholder does not replace the native material');
+    habitatTexture.image={width:0,height:0};update();
+    assert.equal(uniforms.uHasHabitatMap.value,false);
+    habitatTexture.image={width:512,height:256};update();
+    assert.equal(uniforms.uHasHabitatMap.value,true,'the same texture can complete asynchronously');
+    group.userData.dispose();
+    assert.equal(disposals,0,'the renderer never disposes the caller image');
+  } finally {group.userData.dispose();habitatTexture.dispose();}
+  assert.equal(disposals,1);
 });
 
 test('the physical ray remains correct after camera rotation, floating-origin movement and viewport changes', () => {

@@ -1,5 +1,7 @@
 # Generation and rendering API
 
+0.12.0 supports a caller-owned RGBA port image on ring habitats.
+
 0.11.0 adds optional galaxy portraits and child nebula appearance, closed triangle
 solid queries, query workspace disposal and an opt-in normalized bloom helper.
 Generation addresses and default providers retain their published contracts.
@@ -289,6 +291,21 @@ Subpixel detail may differ by quality; the spatial layout remains the same.
 Generation uses artistic placement. Volume and black-hole rendering uses optical
 approximations. Camera depth compression and local gravity do not form a
 physically consistent galaxy-to-planet simulation.
+
+### Optional ring surface image
+
+`createCosmicBodies({habitatTexture})` borrows a caller-owned sRGB texture.
+An image with positive dimensions activates on the next update. For a body with
+`habitatPort: {along, across, size, angle}`, `size` is a pair of positive
+world lengths [width, height] measured along and across the rotated image.
+`along` is arc length from `phase + pi`, `across` is local Y, and `angle`
+(radians, default zero) orients its shoreline. Local +Y points toward the bottom of the image with normal texture `flipY: true`.
+RGBA alpha selects the urban features; transparent areas and missing images
+retain the native surface. Use transparent image borders for an irregular
+transition. Sampling uses explicit derivatives and mip filtering, with a small
+outer feather. The image owns its baked surface lighting. No extra geometry,
+collision shapes, traffic, clocks or population state are created. The caller
+owns loading, asset errors and texture disposal.
 
 ## Elliptic orbital mechanics (0.3)
 
