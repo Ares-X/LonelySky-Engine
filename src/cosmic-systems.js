@@ -65,7 +65,7 @@ export function describeCosmicSystem(body, seed = 'lonelysky') {
     // implausibly close low-density moons; it is not a disruption simulation.
     const rocheLimit=2.44*body.radius*Math.cbrt(1/densityRatio);
     if(periapsis<=rocheLimit)continue;
-    const previous = satellites.at(-1);
+    const previous = satellites[satellites.length - 1];
     if (previous) {
       const hill = (a + previous.orbit.semiMajorAxis) * .5 * Math.cbrt((moonMu + previous.mu) / (3 * mu));
       if (a - previous.orbit.semiMajorAxis < 3.5 * hill
