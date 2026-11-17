@@ -226,7 +226,10 @@ the same interval or teleporting through the contacts.
 `createCollisionWorld({ world, sector, solidProvider, shipRadius: 8,
 solidSweepBudget: 32768 })` optionally includes a synchronous
 `solidProvider(sectorIndex, { min: [x,y,z], max: [x,y,z] })`. With a `world`, this
-defaults to `world.solidsInBounds`. Bounds include the swept ship radius. The
+prefers `world.collisionSolidsInBounds`, otherwise `world.solidsInBounds`.
+An optional world-owned query workspace is passed as the third argument; see
+[query ownership](api.md#closed-triangle-solids-and-query-ownership).
+Bounds include the swept ship radius. The
 provider returns every overlapping static solid in the **caller's sector frame**,
 including solids centered outside the ordinary 27-cell neighborhood and across
 world seams. It must query the authoritative world, independently of rendering

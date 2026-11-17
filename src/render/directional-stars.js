@@ -19,16 +19,38 @@ export function createDirectionalStars({positions, colors, flux, magnitudes, ran
   const material = new THREE.ShaderMaterial({
     uniforms: {ratio: {value: 1}, brightness: {value: 1}, density: {value: .2},
       populationTint: {value: new THREE.Color(1, 1, 1)}, bandNormal: {value: new THREE.Vector3(0, 1, 0)}, bandStrength: {value: 0},
-      limitingMagnitude: {value: limitingMagnitude}},
+      limitingMagnitude: {value: limitingMagnitude}, hostStrength: {value: 0}, hostPhase: {value: 0},
+      hostCenter: {value: new THREE.Vector3()}, hostNormal: {value: new THREE.Vector3(0,1,0)}, hostFlattening: {value: 0},
+      associationCenter: {value: new THREE.Vector3()}, associationAxis: {value: new THREE.Vector3(1,0,0)},
+      associationWidth: {value: 1}, associationStretch: {value: 0}},
     vertexShader: /* glsl */`
       attribute vec3 color;attribute float stellarFlux;attribute float magnitude;attribute float rank;
       uniform float ratio;uniform float density;uniform vec3 populationTint;uniform vec3 bandNormal;uniform float bandStrength;uniform float limitingMagnitude;
       varying vec3 stellarColor;varying float linearFlux;varying float visibility;varying float spritePixels;
+      uniform vec3 hostCenter,hostNormal,associationCenter,associationAxis;
+      uniform float hostStrength,hostPhase,hostFlattening,associationWidth,associationStretch;
+      // Length ahead of the observer inside a finite stellar envelope. Both center
+      // and minor radius are in host radii. Stretch only its symmetry axis.
+      float stellarColumn(vec3 ray,vec3 center,vec3 axis,float stretch,float radius){
+        vec3 c=center+axis*(dot(center,axis)*stretch), d=ray+axis*(dot(ray,axis)*stretch);
+        float norm2=dot(d,d), along=dot(c,d)/norm2;
+        vec3 miss=c-d*along;
+        float halfChord=sqrt(max(0.,radius*radius-dot(miss,miss))/norm2);
+        return max(0.,along+halfChord-max(0.,along-halfChord));
+      }
       void main(){
-        float latitude=dot(normalize(position),bandNormal);
+        vec3 ray=normalize(position);
+        float latitude=dot(ray,bandNormal);
         float population=clamp(density+exp(-latitude*latitude*70.)*bandStrength*.3,0.,1.);
-        visibility=(1.-smoothstep(max(0.,population-.035),population+.035,rank))
-          *(1.-smoothstep(limitingMagnitude-.3,limitingMagnitude+.3,magnitude));
+        float selected=1.-smoothstep(max(0.,population-.035),population+.035,rank);
+        if(hostStrength>0.){
+          float depth=stellarColumn(ray,hostCenter,hostNormal,hostFlattening,1.);
+          float cluster=stellarColumn(ray,associationCenter,associationAxis,associationStretch,associationWidth);
+          float localDensity=clamp(.13+.70*depth+.35*cluster/associationWidth,0.,1.);
+          float localRank=fract(rank+hostPhase);
+          selected=mix(selected,1.-smoothstep(localDensity-.035,localDensity+.035,localRank),hostStrength);
+        }
+        visibility=selected*(1.-smoothstep(limitingMagnitude-.3,limitingMagnitude+.3,magnitude));
         if(visibility==0.){gl_Position=vec4(0.,0.,2.,1.);gl_PointSize=1.;return;}
         stellarColor=color*populationTint;linearFlux=stellarFlux;
         spritePixels=ceil(${8 * STELLAR_PSF_HALO_SIGMA_CSS}*ratio);gl_PointSize=spritePixels;

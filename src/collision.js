@@ -1,6 +1,6 @@
 import { CELL_SIZE, decodeCell, encodeCell, wrapCell as wrap } from './coordinates.js';
 import { createBodyStateSampler } from './orbits.js';
-import { createSolidWorkspace, solidDistance, sweepSolid } from './solid-geometry.js';
+import { createSolidWorkspace, solidDistance, sweepSolid, SolidQueryFailure } from './solid-geometry.js';
 
 export const COLLISION_CACHE_LIMIT = 128;
 const SKIN = 1e-5;
@@ -54,7 +54,7 @@ function removeInward(vector, normal) {
 }
 
 function constrained(vector, normals) {
-  const normal = normals[normals.length - 1];
+  const normal = normals[normals.length-1];
   let result = removeInward(vector, normal);
   for (let i = 0; i < normals.length - 1; i += 1) {
     const other = normals[i];
@@ -110,7 +110,8 @@ function constrainedSurfaces(motion, contacts, scale, surfaceFor) {
 
 /** Continuous point sweeps against static or orbiting sphere envelopes. */
 export function createCollisionWorld({ world, sector = world && (index => world.sector(index)),
-  solidProvider = world?.solidsInBounds && ((index, bounds) => world.solidsInBounds(index, bounds)),
+  solidProvider = world?.collisionSolidsInBounds ? ((index,bounds,workspace)=>world.collisionSolidsInBounds(index,bounds,workspace))
+    : world?.solidsInBounds && ((index, bounds, workspace) => world.solidsInBounds(index, bounds, workspace)),
   bodyProvider = world?.bodiesInBounds && ((index, bounds) => world.bodiesInBounds(index, bounds)),
   shipRadius = 8, solidSweepBudget = 32768 } = {}) {
   if (typeof sector !== 'function') throw new TypeError('A sector sphere provider is required');
@@ -122,19 +123,25 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     macroCache.clear(); neighborhoodIndex = null; sources = [];
   }
   if (!Number.isInteger(solidSweepBudget) || solidSweepBudget < 1) throw new RangeError('solidSweepBudget must be a positive integer');
-  const solidWork = createSolidWorkspace(), solidBounds = { min: [0, 0, 0], max: [0, 0, 0] };
+  if (!Number.isFinite(shipRadius) || shipRadius < 0) throw new RangeError('shipRadius must be finite and nonnegative');
+  let solidQueryWorkspace,disposed=false;
+  const queryProgress={position:[0,0,0],velocity:[0,0,0],distance:0,timeSeconds:0,verified:false};
+  function rememberQuerySafe(position,velocity,distance,timeSeconds){copyVector(queryProgress.position,position);copyVector(queryProgress.velocity,velocity);queryProgress.distance=distance;queryProgress.timeSeconds=timeSeconds;queryProgress.verified=true;}
+  let solidWork = createSolidWorkspace();
+  const solidBounds = { min: [0, 0, 0], max: [0, 0, 0] };
   const solidDistanceOut = { distance: 0, normal: [0, 0, 0], feature: '', part: -1 };
   const solidOptions = { maxIterations: solidSweepBudget }, zeroSurface = [0, 0, 0];
   function solids(index, start, end = start) {
     if (!solidProvider) return null;
+    if(solidQueryWorkspace===undefined)solidQueryWorkspace=world?.createSolidQueryWorkspace?.();
     for (let axis = 0; axis < 3; axis++) {
       solidBounds.min[axis] = Math.min(start[axis], end[axis]) - shipRadius;
       solidBounds.max[axis] = Math.max(start[axis], end[axis]) + shipRadius;
     }
-    return solidProvider(index, solidBounds);
+    return solidProvider(index, solidBounds, solidQueryWorkspace);
   }
   function solidContact(solid, result) {
-    return { ...solid, type: 'solid', position: [...solid.position], velocity: [0, 0, 0],
+    return { ...solid, type: 'solid', position: [...solid.position], frame:solid.frame?solid.frame.slice():undefined, velocity: [0, 0, 0],
       normal: [...result.normal], feature: result.feature, part: result.part,
       contactKey: `${solid.id}:${result.part}:${result.feature}` };
   }
@@ -142,10 +149,11 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     if (!contact?.shape) return contact;
     // Shape/frame are trusted provider storage used by the active solver, not
     // mutable data handed to a caller through a contact snapshot.
-    const { shape, frame, ...snapshot } = contact;
+    const { shape, frame, localPosition, localFrame, ...snapshot } = contact;
     return snapshot;
   }
   // Instance-owned synchronous solver scratch; published vectors never alias it.
+  const solidRecoveryDirection = [0, 0, 0];
   const recoveryLocal = [0, 0, 0], travelVelocity = [0, 0, 0], remainingMotion = [0, 0, 0];
   const stepMotion = [0, 0, 0], traveledMotion = [0, 0, 0], moveLocal = [0, 0, 0];
   const movingContacts = [], staticNormals = [], staticDirection = [0, 0, 0];
@@ -172,12 +180,11 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       failure: { code, message: code === 'solid-root-precision' ? 'Solid collision could not establish a precise safe contact' : 'Solid collision work budget exhausted; motion stopped at a verified safe pose',
         cause: new RangeError(code), timeSeconds, failedTimeSeconds: timeSeconds, safeAtStart: true, contacts: [] } };
   }
-  const cache = new Map(), macroCache = new Map(), sampledSources = new WeakMap();
+  const cache = new Map(), macroCache = new Map();let sampledSources = new WeakMap();
   const bodyBounds = { min: [0, 0, 0], max: [0, 0, 0] };
   let neighborhoodIndex = null, sources = [], revision = world?.revision;
   let sampledNeighborhood = null, sampledMargins = [], neighborhoodMoving = false, centeredFrame;
   const newState = () => ({ position: [0, 0, 0], velocity: [0, 0, 0], acceleration: [0, 0, 0] });
-  setShipRadius(shipRadius);
   function refresh() {
     if (revision === world?.revision) return;
     revision = world?.revision; cache.clear(); macroCache.clear(); neighborhoodIndex = null; sources = [];
@@ -401,11 +408,12 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       .map((n, i) => n + finalBody.velocity[i]), contactFor(finalBody, normal, finalOffset), 0, true);
   }
 
-  // Retain one escape ray and advance only while the current point overlaps
-  // the actual union. Sphere exits are analytic; solid signed depths provide a
-  // lower bound on the distance to an exit along that ray. The final pose is
-  // checked against both providers, without substituting bounding spheres for
-  // actual ring holes or gaps.
+  // Recovery is an explicit overlap correction, not free-flight integration.
+  // Bisect a selected solid's current surface normal and the initial escape
+  // axis: this avoids grazing a later surface without reversing progress along
+  // the axis. Opposite normals have no bisector, so retain the escape axis.
+  // Sphere exits stay analytic. Both providers verify the final pose; holes
+  // and gaps keep their actual geometry.
   function recover(sectorIndex, initialPosition, initialVelocity, timeSeconds = 0, marginSpan = 0, timeScale = 1, out = createMoveResult()) {
     if (!solidProvider) return recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds, marginSpan, timeScale, out);
     if (!vector(initialPosition) || !vector(initialVelocity)) throw new TypeError('Collision position and velocity must be finite three-dimensional vectors');
@@ -435,6 +443,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     for (let step = 0; step < MAX_RECOVERY_STEPS; step++) {
       const view = nearby(sectorIndex, position, timeSeconds, marginSpan, timeScale), local = subtract(position, view.offset);
       let advance = 0;
+      copyVector(solidRecoveryDirection, direction);
       for (const body of view.bodies) {
         const relative = subtract(local, body.position), distance = length(relative);
         if (body.clearance - distance <= EPSILON) continue;
@@ -450,6 +459,11 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         const sample = solidDistance(solid, position, solidDistanceOut, solidWork), penetration = shipRadius - sample.distance;
         if (penetration > EPSILON && penetration + SKIN > advance) {
           advance = penetration + SKIN; contact = solidContact(solid, sample);
+          for (let axis = 0; axis < 3; axis++) solidRecoveryDirection[axis] = direction[axis] + sample.normal[axis];
+          const magnitude = length(solidRecoveryDirection);
+          if (magnitude > EPSILON) {
+            for (let axis = 0; axis < 3; axis++) solidRecoveryDirection[axis] /= magnitude;
+          } else copyVector(solidRecoveryDirection, direction);
         }
       }
       if (advance === 0) {
@@ -457,7 +471,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         if (contact.shape) contact = solidContact(contact, solidDistance(contact, position, solidDistanceOut, solidWork));
         return writeMoveResult(out, position, removeInward(subtract(velocity, contact.velocity), contact.normal).map((n, i) => n + contact.velocity[i]), contact, 0, true);
       }
-      for (let axis = 0; axis < 3; axis++) position[axis] += direction[axis] * advance;
+      for (let axis = 0; axis < 3; axis++) position[axis] += solidRecoveryDirection[axis] * advance;
       if (!position.every(Number.isFinite)) throw new RecoveryFailure('Solid recovery pose is not representable', 'solid-recovery-nonrepresentable');
     }
     throw new RecoveryFailure('No clear solid union recovery pose within the scan limit', 'solid-recovery-scan-limit');
@@ -470,7 +484,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     return result;
   }
 
-  function moveStatic(sectorIndex, timeSeconds, timeScale, safe, out) {
+  function moveStatic(sectorIndex, timeSeconds, timeScale, safe, out,stopAtContact=false) {
     let position = copyVector(out.position, safe.position), velocity = copyVector(out.velocity, safe.velocity), contact = safe.contact;
     // Recovery is a pose correction, not a segment flown toward the old end.
     let remaining = remainingMotion, distance = 0, corrected = safe.corrected;
@@ -497,6 +511,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       }
       let solidHit = null;
       if (solidProvider) {
+        rememberQuerySafe(position,velocity,distance,timeSeconds);
         for (let axis = 0; axis < 3; axis++) solidSweepEnd[axis] = position[axis] + direction[axis] * segmentLength;
         for (const solid of solids(sectorIndex, position, solidSweepEnd)) {
           const sweep = sweepSolid(solid, position, solidSweepEnd, shipRadius, solidOptions, solidWork.result, solidWork);
@@ -524,6 +539,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       velocity = hit?.orbit && timeScale !== 0 ? removeInward(subtract(velocity, hit.velocity), normal)
         .map((n, i) => n + hit.velocity[i]) : constrained(velocity, normals);
       contact = solidHit ?? contactFor(hit, normal, view.offset); corrected = true;
+      if(stopAtContact)return writeMoveResult(out,position,velocity,publicContact(contact),distance,true);
     }
     // The event bound also bounds exceptional caller-supplied long sweeps.
     // Unprocessed motion is discarded, never teleported past unchecked cells.
@@ -560,7 +576,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   }
   // Caller owns out; its vectors remain stable until that caller writes it again.
   // Contacts/failures are independent event snapshots, not solver workspace.
-  function moveInto(sectorIndex, start, end, initialVelocity, { timeSeconds = 0, deltaTime = 0, timeScale = 1 } = {}, out) {
+  function moveIntoUnchecked(sectorIndex, start, end, initialVelocity, { timeSeconds = 0, deltaTime = 0, timeScale = 1,stopAtContact=false } = {}, out) {
     if (!vector(end)) throw new TypeError('Collision endpoint must be a finite three-dimensional vector');
     if (!Number.isFinite(timeSeconds) || !Number.isFinite(deltaTime)) throw new TypeError('Collision times must be finite');
     validateTimeScale(timeScale);
@@ -577,8 +593,9 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         { code: cause.code, message: cause.message, cause, timeSeconds, failedTimeSeconds: timeSeconds,
           safeAtStart: false, contacts: [] });
     }
+    rememberQuerySafe(safe.position,safe.velocity,0,timeSeconds);
     for (let axis = 0; axis < 3; axis++) remainingMotion[axis] = end[axis] - start[axis];
-    if (!deltaTime || timeScale === 0) return moveStatic(sectorIndex, timeSeconds, timeScale, safe, out);
+    if (!deltaTime || timeScale === 0) return moveStatic(sectorIndex, timeSeconds, timeScale, safe, out,stopAtContact);
     const reach = length(remainingMotion), view = frame(sectorIndex, safe.position);
     // Static contact only shortens the remaining motion. If its entire possible
     // travel ball stays in this cell and all 27 anchor cells are static, reuse
@@ -587,7 +604,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     if (Math.abs(safe.position[0] - view.offset[0]) + reach < CELL_SIZE / 2
       && Math.abs(safe.position[1] - view.offset[1]) + reach < CELL_SIZE / 2
       && Math.abs(safe.position[2] - view.offset[2]) + reach < CELL_SIZE / 2 && !neighborhoodMoving) {
-      return moveStatic(sectorIndex, timeSeconds, timeScale, safe, out);
+      return moveStatic(sectorIndex, timeSeconds, timeScale, safe, out,stopAtContact);
     }
     const steps = Math.ceil(deltaTime / MAX_TIME_STEP);
     if (steps > MAX_TIME_STEPS) throw new RangeError('Collision interval exceeds 64 time steps; subdivide the caller interval');
@@ -655,6 +672,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         }
         let solidHit = null, solidUsed = 1;
         if (solidProvider) {
+          rememberQuerySafe(position,velocity,distance,now);
           for (let axis = 0; axis < 3; axis++) solidSweepEnd[axis] = position[axis] + motion[axis];
           for (const solid of solids(sectorIndex, position, solidSweepEnd)) {
             const sweep = sweepSolid(solid, position, solidSweepEnd, shipRadius, solidOptions, solidWork.result, solidWork);
@@ -695,6 +713,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
           'Moving collision contact constraints have no feasible velocity', contacts));
         contact = solidHit ?? contactFor({ ...hit.body, position: center, velocity: actualState.velocity }, normal, view.offset);
         corrected = true;
+        if(stopAtContact)return writeMoveResult(out,position,velocity,publicContact(contact),distance,true);
         if (timeLeft > 0) for (let axis = 0; axis < 3; axis++) travelVelocity[axis] = remaining[axis] / timeLeft;
       }
       if (elapsed < duration - EPSILON) return finishMove(out, blockedMotion(safe, timeSeconds, intervalStart + elapsed * timeScale, 'moving-sweep-event-limit',
@@ -702,7 +721,49 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     }
     return writeMoveResult(out, position, velocity, publicContact(contact), distance, corrected);
   }
-  return { move, moveInto, createMoveResult, ensureSafe, setShipRadius,
+  function moveInto(sectorIndex,start,end,initialVelocity,options={},out){
+    queryProgress.verified=false;
+    try{return moveIntoUnchecked(sectorIndex,start,end,initialVelocity,options,out);}
+    catch(cause){
+      if(!(cause instanceof SolidQueryFailure))throw cause;
+      const valid=queryProgress.verified;
+      return writeMoveResult(out,valid?queryProgress.position:start,valid?queryProgress.velocity:initialVelocity,null,valid?queryProgress.distance:0,false,
+        {code:cause.code,message:cause.message,cause,timeSeconds:options.timeSeconds??0,
+          failedTimeSeconds:valid?queryProgress.timeSeconds:options.timeSeconds??0,safeAtStart:valid,contacts:[]});
+    }
+  }
+  function disposedQuery(){throw new Error('Collision world disposed');}
+  // A fully covered view handoff ends this query owner's borrowed lifetime.
+  // The next real query acquires a new workspace; physical state is external.
+  function releaseQueryResources(){
+    if(disposed)throw new Error('Collision world disposed');
+    try{if(solidQueryWorkspace!==undefined)world?.releaseSolidQueryWorkspace?.(solidQueryWorkspace);}
+    finally{
+      solidQueryWorkspace=undefined;cache.clear();macroCache.clear();sources.length=0;sampledMargins.length=0;
+      sampledSources=new WeakMap();neighborhoodIndex=null;sampledNeighborhood=null;centeredFrame=undefined;revision=undefined;
+      movingContacts.length=staticNormals.length=staticContactKeys.length=0;
+      solidWork.sweepSolid=solidWork.pointMeshes=solidWork.pointFaces=null;
+      safeMove.contact=recoveredMove.contact=null;delete safeMove.failure;delete recoveredMove.failure;
+    }
+  }
+  function dispose(){
+    if(disposed)return;disposed=true;
+    try{if(solidQueryWorkspace!==undefined)world?.releaseSolidQueryWorkspace?.(solidQueryWorkspace);}
+    finally{
+      solidQueryWorkspace=undefined;solidWork=null;sampledSources=null;
+      cache.clear();macroCache.clear();sources.length=0;sampledMargins.length=0;
+      neighborhoodIndex=null;sampledNeighborhood=null;centeredFrame=undefined;revision=undefined;
+      movingContacts.length=staticNormals.length=staticContactKeys.length=0;
+      safeMove.contact=recoveredMove.contact=null;delete safeMove.failure;delete recoveredMove.failure;
+      // Query providers are the common resource boundary. Replacing them
+      // rejects later queries without adding checks to each sweep iteration.
+      world=undefined;sector=solidProvider=bodyProvider=disposedQuery;
+    }
+  }
+  // Acquire the external query owner last: configuration checks and local
+  // workspace construction cannot strand registry pins if they fail.
+  solidQueryWorkspace=world?.createSolidQueryWorkspace?.();
+  return { move, moveInto, createMoveResult, ensureSafe, setShipRadius,releaseQueryResources,dispose,
     bodies(index, timeSeconds = 0, timeScale = 1) {
       validateTimeScale(timeScale);
       if (!Number.isFinite(timeSeconds)) throw new TypeError('timeSeconds must be finite');
