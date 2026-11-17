@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { gasCloudGLSL } from './gas-clouds.js';
 
 const BODY_KINDS = Object.freeze({ ring: 1, 'gas-giant': 2, 'dark-world': 3, 'stellar-giant': 4, moon: 5 });
 
@@ -112,13 +113,15 @@ float plasmaCast(vec3 origin,vec3 ray,out float nearest){
 }
 `;
 
-export const COSMIC_BODY_SURFACE_GLSL = /* glsl */`
-uniform sampler2D uSurface,uClouds,uStellar;
+export const cosmicBodySurfaceShader = ({surfaceTexture,cloudTexture,stellarTexture,habitatTexture} = {}) => /* glsl */`
+${surfaceTexture ? 'uniform sampler2D uSurface;' : ''}
+${cloudTexture ? 'uniform sampler2D uClouds;' : ''}
+${stellarTexture ? 'uniform sampler2D uStellar;' : ''}
 uniform bool uHasSurface,uHasClouds,uHasStellar;
-uniform float uPixelAngle;
+uniform float uPixelAngle,uCloudTime;
 uniform bool uHasHabitatPort;
 uniform vec2 uHabitatPort,uHabitatPortAxes,uHabitatSize;
-uniform sampler2D uHabitatMap;
+${habitatTexture ? 'uniform sampler2D uHabitatMap;' : ''}
 uniform bool uHasHabitatMap;
 float bodyHash(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
 float bodyNoise(vec3 p){
@@ -131,14 +134,17 @@ float plateSeam(float p,float footprint){
   float edge=min(fract(p),1.-fract(p));
   return mix(1.-smoothstep(.003,.014+footprint,edge),.018,smoothstep(.12,.6,footprint));
 }
-vec2 bodyUV(vec3 n){
+${surfaceTexture || cloudTexture || stellarTexture ? /* glsl */`vec2 bodyUV(vec3 n){
   float longitude=dot(n.xz,n.xz)>1.e-12?atan(n.z,n.x):0.;
   return vec2(longitude/BODY_TAU+uPhase,.5+asin(clamp(n.y,-1.,1.))/3.14159265359);
 }
 vec3 bodyMap(sampler2D map,vec2 uv){
   vec2 dx=dFdx(uv),dy=dFdy(uv);dx.x-=floor(dx.x+.5);dy.x-=floor(dy.x+.5);
   return textureGrad(map,uv,dx,dy).rgb;
-}
+}` : ''}
+#define noise3 bodyNoise
+${gasCloudGLSL}
+#undef noise3
 // Value and analytic spatial derivative of the same cubic-interpolated field.
 // The height and its material normal therefore cannot invent separate ridges.
 vec4 ringNoiseGradient(vec3 p){
@@ -195,7 +201,7 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
     vec2 habitatPoint=vec2(habitatAngle*uBodyRadius,point.y*uBodyRadius);
     float portLandscape=uHasHabitatPort?1.-smoothstep(15000.,25000.,length(habitatPoint-uHabitatPort)):0.;
     vec4 portPicture=vec4(0.);
-    if(uHasHabitatPort&&uHasHabitatMap){
+    ${habitatTexture ? /* glsl */`if(uHasHabitatPort&&uHasHabitatMap){
       mat2 mapFrame=mat2(uHabitatPortAxes.x,-uHabitatPortAxes.y,uHabitatPortAxes.y,uHabitatPortAxes.x);
       vec2 h=mapFrame*(habitatPoint-uHabitatPort);
       vec2 uv=.5+vec2(h.x,-h.y)/uHabitatSize;
@@ -208,7 +214,7 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
         // Opaque features have baked surface lighting.
         if(portPicture.a>=1.)return portPicture.rgb;
       }
-    }
+    }` : ''}
     // The circular embedding is continuous at longitude +/-pi. Every scale is
     // in world units, with no camera-relative terrain translation or UV zoom.
     vec3 world=vec3(radial.x,point.y,radial.z)*uBodyRadius+uPhase*vec3(19013.,7301.,11027.);
@@ -261,11 +267,11 @@ vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
     float beachWidth=max(shoreAA,coastSlope*24.);
     float beach=1.-smoothstep(shoreAA,shoreAA+beachWidth,abs(elevation-seaLevel));
     soil=mix(soil,vec3(.19,.174,.129),beach*.65);
-    if(uHasSurface){
+    ${surfaceTexture ? /* glsl */`if(uHasSurface){
       vec2 uv=vec2(angle*uBodyRadius,point.y*uBodyRadius)/6500.+uPhase;
       float geological=dot(bodyMap(uSurface,uv),vec3(.2126,.7152,.0722));
       soil*=1.+(geological-.35)*.2;
-    }
+    }` : ''}
     // Shoreline notches must not make kilometre-wide bathymetric colour bands
     // flicker with their much finer derivatives. Keep the actual coast above,
     // and use its original broad field for the inhabited bay's water depth cue.
@@ -338,24 +344,22 @@ vec3 sphereSurface(vec3 point,vec3 normal,vec3 ray,float distance){
     float fine=filteredBodyNoise(normal*920.+seed,pixel*920.);
     float activeRegion=smoothstep(.74,.88,filteredBodyNoise(normal*13.+seed,pixel*13.));
     float textureDetail=1.;
-    if(uHasStellar){
+    ${stellarTexture ? /* glsl */`if(uHasStellar){
       // Chromospheric source supplies restrained luminance only. Its false
       // colour never becomes the visible photosphere's red/yellow marbling.
       vec3 observed=bodyMap(uStellar,bodyUV(normal));
       textureDetail=.94+dot(observed,vec3(.2126,.7152,.0722))*.12;
-    }
+    }` : ''}
     float hot=step(uTint.r,uTint.b);
     vec3 white=mix(vec3(1.03,.86,.64),vec3(.72,.86,1.06),hot);
     return white*(.88+granule*.16+fine*.045-activeRegion*.19)*textureDetail*(.27+.73*pow(facing,.43));
   }
   if(uBodyKind==2){
-    float shear=filteredBodyNoise(normal*vec3(8.,16.,8.)+seed,pixel*16.);
-    float cloud=filteredBodyNoise(normal*vec3(29.,72.,29.)+seed+shear,pixel*72.);
-    float belt=normal.y*64.+(shear-.5)*3.2+(cloud-.5)*1.5;
-    float stripe=.5+.5*sin(belt)*(1.-smoothstep(.4,1.5,pixel*64.));
-    vec3 albedo=mix(uTint*vec3(.29,.26,.23),mix(uTint*.63,vec3(.47,.44,.38),.4),stripe*.64+cloud*.36);
-    albedo*=.84+cloud*.25;
-    if(uHasClouds){vec3 observed=bodyMap(uClouds,bodyUV(normal)+vec2(shear-.5,cloud-.5)*.012);albedo=mix(albedo,observed*.48,.54);}
+    vec3 albedo=gasClouds(normal,seed,uTint*vec3(.32,.29,.26),mix(uTint*.73,vec3(.57,.52,.46),.42),1,uCloudTime,pixel);
+    ${cloudTexture ? /* glsl */`if(uHasClouds){
+      vec3 observed=bodyMap(uClouds,bodyUV(normal));
+      albedo=mix(albedo,observed*.48,.54);
+    }` : ''}
     float shadow=0.;
     if(uRinged){vec3 hit;float t;shadow=gasRingCast(point+normal*.000001,uLight,hit,t);}
     return albedo*(.014+pow(max(ndl,0.),.9)*1.12)*(1.-shadow*.8)+uTint*pow(1.-facing,5.)*max(ndl,0.)*.025;
@@ -368,7 +372,7 @@ vec3 sphereSurface(vec3 point,vec3 normal,vec3 ray,float distance){
 
 export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null, stellarTexture = null, habitatTexture = null } = {}) {
   return {
-    uBodyKind: { value: 0 }, uBodyRadius: { value: 1 }, uSphereRadius: { value: 1 }, uPhase: { value: 0 }, uRayMinimum: { value: 0 }, uVisibility: { value: 1 },
+    uCloudTime: {value: 0}, uBodyKind: { value: 0 }, uBodyRadius: { value: 1 }, uSphereRadius: { value: 1 }, uPhase: { value: 0 }, uRayMinimum: { value: 0 }, uVisibility: { value: 1 },
     uBodyCenter: { value: new THREE.Vector3() }, uBodyFrame: { value: new THREE.Matrix3() },
     uLight: { value: new THREE.Vector3() }, uTint: { value: new THREE.Color() }, uRinged: { value: false },
     uSectionCount: { value: 0 }, uSections: { value: Array.from({ length: 6 }, () => new THREE.Vector4()) }, uGaps: { value: Array.from({ length: 6 }, () => new THREE.Vector2()) },

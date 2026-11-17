@@ -1,6 +1,7 @@
 import * as THREE from 'three';
+import { cloudFlowTime } from './gas-clouds.js';
 import { COSMIC_DEPTH_GLSL } from '../cosmic-structures.js';
-import { COSMIC_BODY_INTERSECTIONS_GLSL, COSMIC_BODY_SURFACE_GLSL, cosmicBodyUniforms, setCosmicBody } from './distant-landmark.js';
+import { COSMIC_BODY_INTERSECTIONS_GLSL, cosmicBodySurfaceShader, cosmicBodyUniforms, setCosmicBody } from './distant-landmark.js';
 
 const vertexShader = /* glsl */`
 out vec3 worldRay;
@@ -35,7 +36,7 @@ void bodyDepth(vec3 direction,float physicalDistance){
   #endif
 }
 `;
-const opaqueFragment = commonFragment + COSMIC_BODY_SURFACE_GLSL + /* glsl */`
+const opaqueMain = /* glsl */`
 void main(){
   vec3 direction=normalize(worldRay),ray=uBodyFrame*direction,origin=-uBodyFrame*uBodyCenter;
   float minimum=uCameraNear/uBodyRadius/max(-(uViewRotation*direction).z,1.e-8);
@@ -121,6 +122,7 @@ export function createCosmicBodies(options = {}) {
   geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], 3));
   geometry.setIndex([0, 1, 2, 0, 2, 3]);
   const entries = [];
+  const opaqueFragment = commonFragment + cosmicBodySurfaceShader(options) + opaqueMain;
   const createEntry = () => {
     const uniforms = cosmicBodyUniforms(options);
     uniforms.uInverseProjection = { value: new THREE.Matrix4() };
@@ -148,7 +150,7 @@ export function createCosmicBodies(options = {}) {
   };
   createEntry();
   let disposed = false;
-  const updateEntry = (entry, body, camera, viewportHeight, pixelRatio) => {
+  const updateEntry = (entry, body, camera, viewportHeight, pixelRatio, time) => {
     const { uniforms, opaque, overlay } = entry;
     const visibility = body.visibility ?? 1;
     if (visibility <= 0) { opaque.visible = false; overlay.visible = false; return; }
@@ -167,19 +169,21 @@ export function createCosmicBodies(options = {}) {
     overlay.visible = visible && (body.kind === 'gas-giant' && body.ringed === true || body.kind === 'stellar-giant' && body.prominences?.length > 0);
     if (!visible) return;
     setCosmicBody(uniforms, body);
+    uniforms.uCloudTime.value = time;
     uniforms.uInverseProjection.value.copy(camera.projectionMatrixInverse);
     uniforms.uCameraRotation.value.setFromMatrix4(camera.matrixWorld);
     uniforms.uCameraNear.value = camera.near;
     uniforms.uRayMinimum.value = camera.near / body.radius;
     uniforms.uPixelAngle.value = 2 / (camera.projectionMatrix.elements[5] * viewportHeight * pixelRatio);
   };
-  group.userData.update = ({ body = null, bodies = null, camera, viewportHeight, pixelRatio = 1 }) => {
+  group.userData.update = ({ body = null, bodies = null, camera, viewportHeight, pixelRatio = 1, time = 0 }) => {
     if (disposed) return;
     const count = bodies === null ? Number(body !== null) : bodies.length;
     group.visible = count > 0;
     if (count === 0) return;
     camera.updateWorldMatrix(true, false);
-    for (let i = 0; i < count; i++) updateEntry(entries[i] || createEntry(), bodies === null ? body : bodies[i], camera, viewportHeight, pixelRatio);
+    const cloudTime=cloudFlowTime(time);
+    for (let i = 0; i < count; i++) updateEntry(entries[i] || createEntry(), bodies === null ? body : bodies[i], camera, viewportHeight, pixelRatio, cloudTime);
     for (let i = count; i < entries.length; i++) { entries[i].opaque.visible = false; entries[i].overlay.visible = false; }
   };
   group.userData.dispose = () => {

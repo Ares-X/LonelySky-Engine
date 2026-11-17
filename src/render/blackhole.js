@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { DEEP_SKY_GLSL, deepSkyUniforms, setDeepSkyEnvironment } from './deep-sky.js';
+import { deepSkyShader, deepSkyUniforms, setDeepSkyEnvironment } from './deep-sky.js';
 
 const vertexShader = /* glsl */`
 varying vec3 vLocal;
@@ -9,12 +9,11 @@ void main() {
 }
 `;
 
-const fragmentShader = /* glsl */`
+const opticalFragment = (skyTexture, detailTexture) => /* glsl */`
 uniform vec3 uCamera;
 uniform mat4 uLocalToWorld, projectionMatrix;
 uniform mat3 uSkyRotation;
-uniform sampler2D uSky;
-uniform bool uHasSky;
+${skyTexture ? 'uniform sampler2D uSky; uniform bool uHasSky;' : ''}
 uniform float uTime, uSeed, uStepScale, uSkyIntensity;
 uniform float visibility;
 uniform int uSteps;
@@ -24,7 +23,7 @@ const float BOUND = 8.0;
 const vec3 DISK_NORMAL = vec3(0.0, 0.92847669, 0.37139068);
 const vec3 DISK_X = vec3(1.0, 0.0, 0.0);
 const vec3 DISK_Y = vec3(0.0, 0.37139068, -0.92847669);
-${DEEP_SKY_GLSL}
+${deepSkyShader(Boolean(detailTexture))}
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -42,11 +41,11 @@ vec3 sky(vec3 localDirection) {
   vec3 worldDirection = normalize(mat3(uLocalToWorld) * localDirection);
   // The escaped optical ray samples the same world-fixed radiance as the sky.
   // Sky rotation/intensity belong only to the legacy photographic texture path.
-  if (!uHasSky) return deepSky(worldDirection);
+  ${skyTexture ? /* glsl */`if (!uHasSky) return deepSky(worldDirection);
   vec3 d = normalize(uSkyRotation * worldDirection);
   vec2 uv = vec2(atan(d.z, d.x) / (2.0 * PI) + 0.5,
     asin(clamp(d.y, -1.0, 1.0)) / PI + 0.5);
-  return texture2D(uSky, uv).rgb * uSkyIntensity;
+  return texture2D(uSky, uv).rgb * uSkyIntensity;` : 'return deepSky(worldDirection);'}
 }
 
 vec3 diskEmission(vec3 p, vec3 lightDirection) {
@@ -180,9 +179,6 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null, det
   const group = new THREE.Group();
   group.name = 'Black hole — curved light and accretion disk';
   const safeRadius = Number.isFinite(radius) && radius > 0 ? radius : 600;
-  // Always bind a complete texture; it is unused when the procedural sky is active.
-  const fallbackTexture = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
-  fallbackTexture.needsUpdate = true;
   const numericSeed = typeof seed === 'number' ? seed : [...String(seed)]
     .reduce((value, character) => (value * 31 + character.charCodeAt(0)) | 0, 0);
   const uniforms = {
@@ -192,7 +188,7 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null, det
     uLocalToWorld: { value: new THREE.Matrix4() },
     uSkyRotation: { value: new THREE.Matrix3() },
     uSkyIntensity: { value: 1 },
-    uSky: { value: skyTexture || fallbackTexture },
+    uSky: { value: skyTexture },
     uHasSky: { value: Boolean(skyTexture) },
     uTime: { value: 0 },
     uSeed: { value: Number.isFinite(numericSeed) ? (numericSeed % 997) * 0.017 : 0 },
@@ -201,7 +197,7 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null, det
   };
   const geometry = new THREE.SphereGeometry(8, 48, 32);
   const material = new THREE.ShaderMaterial({
-    uniforms, vertexShader, fragmentShader,
+    uniforms, vertexShader, fragmentShader: opticalFragment(skyTexture, detailTexture),
     side: THREE.BackSide,
     transparent: true,
     depthTest: true,
@@ -250,7 +246,6 @@ export function createBlackHole({ radius = 600, seed = 0, skyTexture = null, det
     disposed = true;
     geometry.dispose();
     material.dispose();
-    fallbackTexture.dispose();
   };
   return group;
 }

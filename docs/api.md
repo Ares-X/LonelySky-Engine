@@ -10,8 +10,8 @@ Generation addresses and default providers retain their published contracts.
 
 Nebula appearance descriptors may supply `rimColor` independently of `colorA`
 and `colorB`. Invalid colors fall back to their profile; a dark-cloud profile
-still cannot gain emission. The shared noise tile is 64 cubed with mipmaps,
-and paired quadrature keeps the existing 16/32/48 view-sample budgets. Density
+still cannot gain emission. Directional ray and pixel footprints filter the
+shader’s three procedural bands. Paired quadrature uses 16/32/48 view samples. Density
 and lighting are an appearance revision, while generated body addresses,
 volume bounds and per-seed offsets stay unchanged. The depth-composition API
 below remains supported. More detail does add GPU work; the sample budget is
@@ -154,15 +154,20 @@ never changes the descriptor, galaxy address or particle sample sequence. It
 does not select a safe arrival point or manage gameplay navigation.
 
 The six families refine the existing three macro morphologies. Volumes remain
-within the existing galaxy support radius and reuse the same geometry, noise
-texture and program. Quality levels retain 16/32/48 density integration samples.
+within the existing galaxy support radius and reuse the same geometry and program.
+The shader derives dust from the world seed and each volume’s offset. Quality
+levels retain 16/32/48 density integration samples.
 
 - `planetMaterial`, `atmosphereMaterial`, `ringMaterial`, `starMaterial` return
   Three.js materials. Dispose them after use. Texture arguments are borrowed.
+  Gas planets take `material.uniforms.cloudTime.value = cloudFlowTime(seconds)`
+  from the renderer entry point. The bounded time preserves wind phase and
+  frame-scale motion across long-running saves. Hold the previous value to freeze
+  the atmosphere.
 - `createNebula(options)` and `createBlackHole(options)` return groups exposing
   `userData.update(camera, seconds, {quality})` and `userData.dispose()`.
   Nebula update also accepts visibility; black holes expose `setVisibility`
-  and `setSkyTransform`. Shared noise survives until its final user releases it.
+  and `setSkyTransform`. Each nebula owns its geometry and material.
   Injected sky textures remain caller-owned.
 - Nebula `userData.distanceToVolume(worldPosition)` accepts a Three.js `Vector3`
   and returns world-unit distance to its transformed box volume, including parent
@@ -177,7 +182,9 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
   environment contains finite `ambientTint` RGB and unit `bandNormal` arrays,
   plus finite `skyBrightness`, `bandStrength`, and `starDensity` values. An
   explicit environment supersedes the legacy photographic sky texture path.
-  Both groups expose idempotent `userData.dispose()`.
+  Both groups expose idempotent `userData.dispose()`. With no supplied maps,
+  both backgrounds evaluate the same procedural sky, including the classic
+  region’s bulge and broken dust lanes in its local Galactic frame.
 - The environment may include a trusted `starSea` descriptor: `weights` is six
   finite nonnegative blend weights (all zero disables the layer), `frame` is a
   nine-number column-major rotation matrix mapping sky directions to the sea's
@@ -264,12 +271,11 @@ change the source catalogue's physical coordinates or collision state.
 
 Structural nebula descriptors may provide `childAppearance` for seeded branch,
 dust, ion and lighting controls, while `stellarTint` scales their tracer colors.
-This is a finite visual cloud approximation with 64 two-node integration cells,
-not a gas dynamics solver. One 96³ RGBA32UI corner table (14,155,776 bytes) is
-shared by all structural haze slots, bound for every structural shader to keep
-its unsigned 3D sampler distinct from depth and 2D noise. The table survives
-catalogue changes and is released with the haze. Slot uniforms and materials
-retain their owned storage across kind changes.
+The visual cloud integral uses 64 two-node cells. The shader generates
+periodic lattice corners directly from the world seed and derives the density
+gradient in each local domain. The opaque depth snapshot clips the volume
+at foreground surfaces. Slot uniforms and materials retain their storage
+across kind changes.
 
 `createGalaxyHaze().userData.setDescriptors(next)` retains the currently needed
 mesh, material and uniform slots instead of destroying all shader owners at
@@ -278,7 +284,7 @@ IDs; all descriptor inputs and initial draw state are reapplied, including for
 custom providers changing an existing ID. Call `update` with the new centres
 before drawing. Shrinking immediately disposes removed materials; no spare pool
 is retained. Final `dispose()` releases the remaining materials and shared
-geometry/texture once. This avoids needless program retirement for retained
+geometry once. This avoids needless program retirement for retained
 slots; it does not precompile new materials or guarantee a frame-time budget.
 
 Galaxy emission uses 16/32/48 bounded disk samples for low/auto/high quality.

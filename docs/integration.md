@@ -59,13 +59,13 @@ by the container. No composer private field is modified.
 ## Procedural scenery appearance
 
 The directional sky shares absorbing dust lanes with the black-hole lens. Galaxy
-volumes use a shared, mip-filtered 64 by 64 periodic multiscale texture for dusty
+volumes evaluate a seeded periodic multiscale field in the fragment shader for dusty
 complexes, uneven arm widths and small star-forming regions. Dust reduces the
 galaxy's own emission; it does not cover unrelated foreground geometry or sky.
 Descriptors, addresses, particle positions and quality prefixes are unchanged.
 
-Nebula volumes fade to zero before their bounds, use one mip-filtered 64-cubed
-noise texture, directional ray/pixel footprints and paired Gauss samples within
+Nebula volumes fade to zero before their bounds. Directional ray and pixel
+footprints attenuate unresolved procedural octaves. Paired Gauss samples stay within
 the existing 16/32/48-step budgets. Extinction follows the world-space optical
 length through a scaled volume. Appearance profiles add tapered trunks, broad
 seeded shear, depth-coherent dust erosion and two-point light-column shading.
@@ -112,7 +112,7 @@ const cosmos = createCosmos({ seed,
 null. Descriptors specify their grid size, 3D offset and Euler XYZ orientation;
 rendering and semantic context read the same positions. Star samples remain
 quality prefixes; cell rebases retain GPU attributes and mesh/material instances.
-Cloud complexes use three world-fixed texture planes to produce dusty depth;
+Cloud complexes use three transformed world-fixed noise domains for dusty depth;
 galaxy arms have uneven emission, dark inter-arm gaps, a compact core and a dim
 halo. Crossing the support changes the integrated ray interval continuously;
 there is no collision surface, painted plane or camera-facing complete galaxy.
@@ -158,7 +158,8 @@ it does not fix the ordinary path's far-distance precision on unsupported GPUs.
 
 The optional Three.js entry exports `createCosmicBodies({surfaceTexture,
 cloudTexture, stellarTexture})`. Its group has `userData.update({bodies, camera,
-viewportHeight, pixelRatio})` and `userData.dispose()`. Each input supplies
+viewportHeight, pixelRatio, time})` and `userData.dispose()`. The optional
+visual time in seconds advects gas clouds (default zero). Each input supplies
 `id`, `kind` (`ring`, `gas-giant`, `dark-world`, `stellar-giant`, or `moon`),
 `radius`, world-to-local orthonormal `frame`, camera-relative **physical** `center`,
 local light direction, linear tint, phase and `shape`. Shapes use the exact
@@ -192,12 +193,15 @@ for planetary surfaces while retaining its existing stellar geometry budget.
 
 ## Optional regional panorama
 
-The sky and black-hole lens share an optional observational equirectangular map
-supplied as `detailTexture`; ownership remains with the caller. A host can set
-`environment.classicSkyStrength` in [0,1] and `classicSkyFrame`, a column-major
-orthonormal 3×3 matrix mapping world directions to Galactic coordinates. The
-shader converts to the map's equatorial coordinates and wraps the longitude
-gradient at the seam. Missing controls retain the procedural background.
+The sky and black-hole lens share a directional Milky Way model with a central
+bulge, split dust lanes, stellar clouds and filtered star populations. A host
+selects this regional sky with `environment.classicSkyStrength` in [0,1] and
+`classicSkyFrame`, a column-major orthonormal matrix transforming world
+directions to Galactic coordinates (+X towards the centre, +Z north).
+Supplying a borrowed `detailTexture` selects the legacy observational panorama
+in that region. The renderer converts Galactic directions to equatorial map
+coordinates and wraps the longitude gradient across the seam. Missing controls
+retain the procedural background.
 
 The host owns region selection, continuous position-dependent fading and
 navigation. No application names, addresses or assets are bundled by this API.

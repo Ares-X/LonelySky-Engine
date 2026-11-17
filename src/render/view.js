@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { cloudFlowTime } from './gas-clouds.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { NebulaRenderPass } from './nebula-render-pass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
@@ -63,16 +64,16 @@ function createStarfield(seed) {
   return stars;
 }
 
-function createGlow() {
-  const size = 64, pixels = new Uint8Array(size * size * 4);
-  for (let y = 0; y < size; y += 1) for (let x = 0; x < size; x += 1) {
-    const r = Math.hypot((x + .5) / size * 2 - 1, (y + .5) / size * 2 - 1);
-    const offset = (y * size + x) * 4;
-    pixels.set([255, 255, 255, Math.round(255 * Math.exp(-r * r * 7) * Math.max(0, 1 - r))], offset);
-  }
-  const texture = new THREE.DataTexture(pixels, size, size);
-  texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter; texture.needsUpdate = true;
-  return texture;
+function starHalo(parameters) {
+  const material = new THREE.SpriteMaterial(parameters);
+  material.onBeforeCompile = shader => {
+    shader.vertexShader = 'varying vec2 haloUV;\n' + shader.vertexShader.replace(
+      '#include <uv_vertex>', '#include <uv_vertex>\nhaloUV=uv;');
+    shader.fragmentShader = 'varying vec2 haloUV;\n' + shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      'float r=length(haloUV-.5)*2.; diffuseColor.a*=exp(-r*r*7.)*max(0.,1.-r);');
+  };
+  return material;
 }
 
 /** Synchronous, asset-free renderer. Local camera coordinates belong to sectorIndex.
@@ -89,7 +90,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(55, 1, .5, 220000);
   scene.add(camera);
   const resources = [], chunks = new Map();
-  let renderer, composer, bloom, stars, sky, cosmos, sphere, distantSphere, planetLod, ringGeometry, glow, fallbackTexture;
+  let renderer, composer, bloom, stars, sky, cosmos, sphere, distantSphere, planetLod, ringGeometry;
   let disposed = false, running = false, lost = false, resumeAfterRestore = false, raf = null;
   let width = 1, height = 1, sectorIndex = 0, loadedIndex = -1, loadedRevision, time = 0, epoch = null;
   const cameraPosition = new THREE.Vector3(), bodyPosition = new THREE.Vector3();
@@ -101,7 +102,6 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     const group = new THREE.Group(); group.position.fromArray(data.position);
     const track = material => { materials.add(material); return material; };
     const surface = track(isStar ? starMaterial(data.color) : planetMaterial(data, { lightDirection: illumination }));
-    if (!isStar && !surface.uniforms.surface.value) surface.uniforms.surface.value = fallbackTexture;
     const geometry = isStar ? sphere : planetLod.geometry();
     const body = new THREE.Mesh(geometry, surface); body.scale.setScalar(data.radius); group.add(body);
     const lodMeshes = isStar ? [] : [body];
@@ -114,7 +114,6 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     }
     if (data.rings && !isStar) {
       const material = track(ringMaterial(data.ringColor, data.seed, { planetRadius: data.radius, lightDirection: illumination }));
-      material.uniforms.ringMap.value = fallbackTexture;
       const ring = new THREE.Mesh(ringGeometry, material); ring.scale.setScalar(data.radius);
       ring.rotation.set(-1.38, .14, 0);
       const axis = new THREE.Group(); axis.rotation.z = data.ringTilt ?? -.28; axis.add(ring); group.add(axis);
@@ -122,7 +121,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     }
     if (isStar) {
       for (const [scale, opacity] of [[6.5, .36], [18, .16]]) {
-        const material = track(new THREE.SpriteMaterial({ map: glow, color: new THREE.Color(data.color).multiplyScalar(1.9), opacity,
+        const material = track(starHalo({color: new THREE.Color(data.color).multiplyScalar(1.9), opacity,
           transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
         const halo = new THREE.Sprite(material); halo.scale.setScalar(data.radius * scale); halo.userData.baseOpacity = opacity; group.add(halo);
       }
@@ -202,6 +201,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     time = elapsedTime;
     scene.updateMatrixWorld(true); camera.getWorldPosition(cameraPosition);
     stars.position.copy(cameraPosition);
+    const gasTime=cloudFlowTime(time);
     sky.position.copy(cameraPosition);
     cosmos.userData.update({ sectorIndex, cameraPosition: cameraPosition.toArray(), camera, quality, viewportHeight: height, pixelRatio: renderer.getPixelRatio() });
     for (const chunk of chunks.values()) {
@@ -225,6 +225,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
         } else {
           planetLod.update(group.userData.lodMeshes, { radius: group.userData.radius, distance,
             fov: camera.fov, viewportHeight: height, pixelRatio: renderer.getPixelRatio(), quality });
+          group.userData.surface.uniforms.cloudTime.value = gasTime;
           group.userData.body.rotation.y = time * .003;
         }
         if (group.userData.ring) group.getWorldPosition(group.userData.ring.material.uniforms.planetCenter.value);
@@ -290,8 +291,7 @@ export function createUniverseView(container, { universe = createUniverse(), qua
     container.append(renderer.domElement); resources.push(() => renderer.domElement.remove());
     sphere = own(new THREE.SphereGeometry(1, 96, 64)); distantSphere = own(new THREE.SphereGeometry(1, 48, 32));
     planetLod = createPlanetLod(); resources.push(() => planetLod.dispose());
-    ringGeometry = own(new THREE.RingGeometry(1.18, 2.26, 256, 1)); glow = own(createGlow());
-    fallbackTexture = own(new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1)); fallbackTexture.needsUpdate = true;
+    ringGeometry = own(new THREE.RingGeometry(1.18, 2.26, 256, 1));
     stars = createStarfield(universe.seed); own(stars.geometry); own(stars.material); scene.add(stars);
     sky = createDeepSky(); resources.push(() => sky.userData.dispose()); scene.add(sky);
     cosmos = createCosmos({ seed: universe.seed }); resources.push(() => cosmos.userData.dispose()); scene.add(cosmos);

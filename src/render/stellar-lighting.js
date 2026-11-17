@@ -80,6 +80,11 @@ export function setPlanetRingShadow(material, { normal, texture = null, seed = 0
   validateOffset(normal);
   if (Math.hypot(normal[0], normal[1], normal[2]) < 1e-12 || !Number.isFinite(seed)) throw new TypeError('Ring shadow needs a nonzero normal and finite seed');
   uniforms.ringShadowNormal.value.fromArray(normal).normalize();
+  if (Boolean(texture) !== Boolean(material.defines.RING_SHADOW_MAP)) {
+    if (texture) material.defines.RING_SHADOW_MAP = 1;
+    else delete material.defines.RING_SHADOW_MAP;
+    material.needsUpdate = true;
+  }
   uniforms.ringShadowMap.value = texture;
   uniforms.ringShadowUseMap.value = Boolean(texture);
   uniforms.ringShadowSeed.value = seed % 100;
@@ -87,13 +92,19 @@ export function setPlanetRingShadow(material, { normal, texture = null, seed = 0
 }
 
 export const ringDensityGLSL = /* glsl */`
-float ringDensity(float r,float ringSeed,sampler2D ringTexture,bool textured){
+float ringDensity(float r,float ringSeed,float footprint){
   float v=(r-1.18)/1.08;
-  float band=.6+.12*sin(r*163.+ringSeed)+.08*sin(r*391.)+.05*sin(r*1087.);
-  float alpha=band*smoothstep(0.,.012,v)*(1.-smoothstep(.96,1.,v));
-  if(textured)alpha*=texture2D(ringTexture,vec2(v,.5)).a;
-  float cassini=1.-smoothstep(.008,.018,abs(v-.65));
-  return clamp(alpha*(1.-cassini*.88)*.7,0.,1.);
+  float denseRing=smoothstep(.22,.29,v)*(1.-smoothstep(.64,.68,v));
+  float phase=r*163.+ringSeed+1.6*sin(r*31.);
+  float band=.30+.39*denseRing+.19*smoothstep(.66,.72,v)
+    +.11*sin(phase)*(1.-smoothstep(.4,1.9,footprint*163.))
+    +.072*sin(r*391.+.9*sin(phase))*(1.-smoothstep(.4,1.9,footprint*391.))
+    +.045*sin(r*1087.+2.*sin(r*53.))*(1.-smoothstep(.4,1.9,footprint*1087.));
+  float cassini=1.-smoothstep(.008,.021,abs(v-.65));
+  float encke=1.-smoothstep(.002,.008,abs(v-.887));
+  float innerGap=1.-smoothstep(.005,.017,abs(v-.222));
+  float support=smoothstep(0.,.012,v)*(1.-smoothstep(.96,1.,v));
+  return clamp(band*support*(1.-cassini*.92)*(1.-encke*.68)*(1.-innerGap*.52),0.,1.);
 }
 `;
 
@@ -145,9 +156,13 @@ float stellarDiffuse(float cosine,float angularRadius){
 `;
 
 export const planetRingShadowGLSL = /* glsl */`
-uniform bool ringShadowEnabled,ringShadowUseMap;uniform vec3 ringShadowNormal;uniform sampler2D ringShadowMap;uniform float ringShadowSeed;
+uniform bool ringShadowEnabled,ringShadowUseMap;uniform vec3 ringShadowNormal;
+#ifdef RING_SHADOW_MAP
+uniform sampler2D ringShadowMap;
+#endif
+uniform float ringShadowSeed;
 ${ringDensityGLSL}
-float ringRayTransmission(vec3 point,vec3 direction,float sourceDistance,float radius){
+float ringRayTransmission(vec3 point,vec3 direction,float sourceDistance,float radius,float footprint){
   float denominator=dot(direction,ringShadowNormal);
   if(abs(denominator)<1e-6)return 1.;
   float travel=-dot(point,ringShadowNormal)/denominator;
@@ -155,9 +170,13 @@ float ringRayTransmission(vec3 point,vec3 direction,float sourceDistance,float r
   vec3 hit=point+direction*travel;
   float ratio=length(hit)/max(radius,1e-8);
   if(ratio<1.18||ratio>2.26)return 1.;
-  return 1.-ringDensity(ratio,ringShadowSeed,ringShadowMap,ringShadowUseMap);
+  float density=ringDensity(ratio,ringShadowSeed,footprint/abs(denominator));
+  #ifdef RING_SHADOW_MAP
+    density*=texture2D(ringShadowMap,vec2((ratio-1.18)/1.08,.5)).a;
+  #endif
+  return 1.-density;
 }
-float planetRingTransmission(vec3 point,int index,float radius){
+float planetRingTransmission(vec3 point,int index,float radius,float footprint){
   if(!ringShadowEnabled)return 1.;
   vec3 vector=stellarOffsets[index]-point,direction=safeDirection(vector);
   float distance=length(vector),spread=stellarAngularRadius(point,index)*.65;
@@ -167,6 +186,6 @@ float planetRingTransmission(vec3 point,int index,float radius){
   vec3 axis=ringShadowNormal-direction*dot(direction,ringShadowNormal);
   if(dot(axis,axis)<1e-8)axis=cross(direction,vec3(.734,.459,.5));
   axis=safeDirection(axis);
-  return (ringRayTransmission(point,direction,distance,radius)*2.+ringRayTransmission(point,safeDirection(direction+axis*spread),distance,radius)+ringRayTransmission(point,safeDirection(direction-axis*spread),distance,radius))*.25;
+  return (ringRayTransmission(point,direction,distance,radius,footprint)*2.+ringRayTransmission(point,safeDirection(direction+axis*spread),distance,radius,footprint)+ringRayTransmission(point,safeDirection(direction-axis*spread),distance,radius,footprint))*.25;
 }
 `;
