@@ -27,7 +27,8 @@ export function encodeCell({ x, y, z }) {
   return value;
 }
 
-export function decodeCell(index) {
+/** Optional caller-owned output avoids allocating a coordinate in hot queries. */
+export function decodeCell(index, out = {}) {
   if (!Number.isSafeInteger(index) || index < 0 || index > MAX_SECTOR) throw new RangeError('Cell index is outside the address space');
   let value = index, x = 0, y = 0, z = 0;
   for (let bit = 0; bit < 15; bit += 1) {
@@ -37,7 +38,8 @@ export function decodeCell(index) {
     z |= ((digit >> 2) & 1) << bit;
     value = Math.floor(value / 8);
   }
-  return { x: x & 1 ? -(x + 1) / 2 : x / 2,
-    y: y & 1 ? -(y + 1) / 2 : y / 2,
-    z: z & 1 ? -(z + 1) / 2 : z / 2 };
+  out.x = x & 1 ? -(x + 1) / 2 : x / 2;
+  out.y = y & 1 ? -(y + 1) / 2 : y / 2;
+  out.z = z & 1 ? -(z + 1) / 2 : z / 2;
+  return out;
 }

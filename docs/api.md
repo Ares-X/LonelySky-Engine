@@ -1,5 +1,9 @@
 # Generation and rendering API
 
+0.11.0 adds optional galaxy portraits and child nebula appearance, closed triangle
+solid queries, query workspace disposal and an opt-in normalized bloom helper.
+Generation addresses and default providers retain their published contracts.
+
 ## Filtered scenery appearance (0.7.1)
 
 Nebula appearance descriptors may supply `rimColor` independently of `colorA`
@@ -220,14 +224,15 @@ texture and program. Quality levels retain 16/32/48 density integration samples.
 
 Each cosmos instance may retain up to 8 MiB of exact-count particle templates
 for the built-in `describeMacro` and raw `describeCosmicStructures` providers.
-Custom or wrapped providers remain uncached; exported `sampleGalaxy` always
+Custom or wrapped providers remain uncached unless they explicitly declare
+`catalogue: {immutable: true}`; exported `sampleGalaxy` always
 returns independent arrays. The byte ceiling counts retained position/color/size
 arrays, not total application RAM or GPU memory. An oversized batch renders
 without caching; `dispose()` releases cached references. Numeric stats expose
 `sampleCacheLimit`, `sampleCacheBytes`, `sampleCacheEntries`, `sampleCacheHits`
 and `sampleGenerations`. First-time sampling and geometry rebuilding still occur.
 
-The canonical V3 renderer, selected only by
+The canonical V3 renderer, selected by
 `createCosmos({structures: true, descriptorProvider: describeCosmicStructures,
 gridCells: COSMIC_GRID_CELLS, seed})` with the raw built-in provider, fades each
 whole structure by the distance to its spherical support:
@@ -245,6 +250,24 @@ above does not include these arrays or total RAM. Custom and wrapped providers,
 other grid sizes and legacy calls retain their existing per-sample fading and
 are not subject to a new 108-descriptor limit. Direct
 `createGalaxyHaze({structures: true})` calls also retain their previous path.
+
+Wrapped immutable V3 catalogues may opt into the same path using
+`catalogue: {capacity: 108, supportFade: true, immutable: true}`. Capacity must
+be a positive multiple of four and is checked before preparation. `immutable`
+asserts that an ID retains identical sampling inputs for the instance seed;
+providers that change them must leave this false. Other custom providers keep
+per-sample fading. `descriptor.portrait` opts into resolved associations sharing
+local centers, axes and widths with their analytic haze emission; it does not
+change the source catalogue's physical coordinates or collision state.
+
+Structural nebula descriptors may provide `childAppearance` for seeded branch,
+dust, ion and lighting controls, while `stellarTint` scales their tracer colors.
+This is a finite visual cloud approximation with 64 two-node integration cells,
+not a gas dynamics solver. One 96³ RGBA32UI corner table (14,155,776 bytes) is
+shared by all structural haze slots, bound for every structural shader to keep
+its unsigned 3D sampler distinct from depth and 2D noise. The table survives
+catalogue changes and is released with the haze. Slot uniforms and materials
+retain their owned storage across kind changes.
 
 `createGalaxyHaze().userData.setDescriptors(next)` retains the currently needed
 mesh, material and uniform slots instead of destroying all shader owners at
@@ -337,3 +360,34 @@ to physical positions changes navigation and collision semantics.
 The default public seed is `lonelysky`. Applications own their world seed,
 names, save provenance and generation-migration decisions. A generator revision
 is not an instruction to replace an application's universe identity.
+
+## Closed triangle solids and query ownership
+
+`src/mesh-terrain.js` exports `buildTerrainMesh(descriptor)`. The descriptor's
+`center`, `radius`, `vertices`, `normals` and outward `faces` describe a closed
+triangle solid in its body's local frame. Construction validates closed topology
+once and builds a bounded BVH. Add built meshes to a compound shape's
+`terrainGroups`; rendering and collision must consume the same vertices.
+`solidDistance` and `sweepSolid` include these meshes, actual finite triangle
+edges and corners, and zero-radius crossings. Root/work budgets return explicit
+failures and never report unchecked travel as clear. Meshes remain static during
+a query; moving triangle meshes are outside this API.
+
+`createCollisionWorld` prefers `world.collisionSolidsInBounds(index, bounds,
+workspace)` over `solidsInBounds`. Its workspace comes from the world's optional
+`createSolidQueryWorkspace()`. `releaseQueryResources()` ends that borrowed
+lifetime and clears query caches; the next solid query acquires a new workspace.
+`dispose()` releases the workspace and references once, then rejects queries.
+Providers owning workspaces implement `releaseSolidQueryWorkspace(workspace)`.
+The optional move setting `stopAtContact: true` returns the first verified
+contact, for camera booms; default ship motion continues with contact constraints.
+
+`decodeCell(index, out)` writes to an optional caller-owned coordinate object;
+omitting `out` retains the independent snapshot API.
+
+`src/render/bloom.js` exports `createBloomPass(options)`, an opt-in artistic
+bloom pass using the installed Three.js. It normalizes the native blur/composite
+DC gain and releases the omitted native high-pass material on disposal.
+`invalidateGpuResources()` releases GPU allocations while retaining the CPU pass
+for context restoration; final `dispose()` still releases any recreated resources. It is
+not finite-image light transport or a change to existing view defaults.

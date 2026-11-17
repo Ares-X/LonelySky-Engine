@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {describeGalaxyAppearance} from '../../src/render/galaxy-appearance.js';
 import {encodeCell} from '../../src/coordinates.js';
 import {describeCosmicStructures, COSMIC_GRID_CELLS, COSMIC_VIEW_FAR} from '../../src/cosmic-structures.js';
 import {createCosmos, createLegacyGalaxySampler, sampleGalaxy, loadedMacros, galaxyRelativeCenter, COSMOS_QUALITY_COUNTS} from '../../src/render/cosmos.js';
@@ -287,4 +288,24 @@ test('default synchronous providers may repair a failed sample and succeed on th
     assert.equal(cosmos.userData.stats.sampleGenerations, 1);
     assert.equal(cosmos.children[0].geometry.attributes.position.count, COSMOS_QUALITY_COUNTS.low);
   } finally { cosmos.userData.dispose(); }
+});
+
+test('immutable wrapped catalogues retain support fading and exact portrait samples across quality changes',()=>{
+  const wrapped=coordinate=>{const d=provider(coordinate);return d?{...d,portrait:describeGalaxyAppearance(d).portrait}:null;};
+  const cosmos=createCosmos({descriptorProvider:wrapped,structures:true,catalogue:{capacity:12,supportFade:true,immutable:true}}),target=frame();
+  try{
+    cosmos.userData.update(target);
+    const material=cosmos.children[0].material,haze=cosmos.children[1],descriptors=loadedMacros(target.sectorIndex,'lonelysky',{descriptorProvider:wrapped});
+    assert.equal(material.uniforms.structureWeights.value.length,12);
+    assert.deepEqual([...material.uniforms.portraitHosts.value.slice(0,descriptors.length)],descriptors.map(()=>1));
+    for(const mesh of haze.children)assert.equal(mesh.material.defines.GALAXY_PORTRAIT,1);
+    const first=descriptors[0],sample=sampleGalaxy(first,COSMOS_QUALITY_COUNTS.low),position=cosmos.children[0].geometry.attributes.position.array,center=galaxyRelativeCenter(first,cellA);
+    for(let i=0;i<sample.positions.length;i++)assert.equal(position[i],Math.fround(sample.positions[i]+center[i%3]));
+    assert.ok(cosmos.userData.stats.sampleCacheEntries>0);
+    cosmos.userData.update(frame(cellA,'high'));cosmos.userData.update(target);
+    assert.ok(cosmos.userData.stats.sampleCacheHits>0);
+    assert.equal(material.uniforms.portraitHosts.value[0],1);
+  }finally{cosmos.userData.dispose();}
+  const small=createCosmos({descriptorProvider:c=>c.x||c.y||c.z?null:Array.from({length:5},()=>provider(cellA)),structures:true,catalogue:{capacity:4,supportFade:true}});
+  try{assert.throws(()=>small.userData.update(frame()),/declared structure capacity/);}finally{small.userData.dispose();}
 });

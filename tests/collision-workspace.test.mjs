@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCollisionWorld } from '../src/collision.js';
+import {solidDistance} from '../src/solid-geometry.js';
 import { encodeCell } from '../src/coordinates.js';
 
 const h = 1 / 120;
@@ -136,3 +137,30 @@ test('unrecoverable initial overlap preserves inputs and marks the endpoint unsa
   assert.equal(out.failure.safeAtStart, false);
   assert.deepEqual(out.position, expectedPosition); assert.deepEqual(out.velocity, expectedVelocity);
 });
+
+test('collision construction validates before acquiring external query owners and legacy disposal remains supported',()=>{
+  let created=0;const world={sector:()=>[],createSolidQueryWorkspace(){created++;return {};}};
+  for(const options of [{shipRadius:NaN},{shipRadius:-1},{solidSweepBudget:0}])assert.throws(()=>createCollisionWorld({world,...options}),RangeError);
+  assert.equal(created,0);
+  const legacy=createCollisionWorld({world});assert.deepEqual(legacy.ensureSafe(0,[0,0,0],[0,0,0]).position,[0,0,0]);legacy.dispose();legacy.dispose();assert.equal(created,1);
+});
+
+test('a failed release is explicit, clears CPU ownership and is not replayed',()=>{
+  const failure=new Error('release failed'),workspace={};let releases=0;
+  const collision=createCollisionWorld({world:{sector:()=>[],createSolidQueryWorkspace:()=>workspace,releaseSolidQueryWorkspace(w){assert.equal(w,workspace);releases++;throw failure;}}});
+  collision.bodies(0);assert.ok(collision.cacheSize>0);
+  assert.throws(()=>collision.dispose(),e=>e===failure);assert.equal(collision.cacheSize,0);collision.dispose();assert.equal(releases,1);
+  assert.throws(()=>collision.bodies(0),/Collision world disposed/);
+});
+
+
+const part={type:'annular-sector-slab',innerRadius:100,outerRadius:200,minY:-10,maxY:10,gapCenter:0,gapHalfAngle:0};
+const ring={id:'ring',position:[0,0,0],boundsRadius:210,shape:{type:'compound',parts:[part]}};
+const cases=[{name:'oblique wall',start:[150,30,-20],end:[150,0,20],hit:true},{name:'finite corner',start:[85,30,0],end:[145,0,0],hit:true},{name:'concave inner wall',start:[90,0,-10],end:[115,0,25],hit:true},{name:'clear middle hole',start:[0,0,0],end:[50,0,30],hit:false},{name:'initially clear stationary',start:[70,0,0],end:[70,0,0],hit:false}];
+for(const c of cases)test(`camera first-contact CCD stays on the prepared boom for ${c.name}; default ship behavior is unchanged`,()=>{
+ const queries=[],options={sector:()=>[],shipRadius:2,solidProvider(_index,bounds){queries.push({min:bounds.min.slice(),max:bounds.max.slice()});return [ring];}},camera=createCollisionWorld(options),ship=createCollisionWorld({...options,solidProvider:()=>[ring]}),defaultShip=createCollisionWorld({...options,solidProvider:()=>[ring]});
+ try{const velocity=c.end.map((v,i)=>v-c.start[i]),normal=defaultShip.move(0,c.start,c.end,velocity),unchanged=ship.move(0,c.start,c.end,velocity,{stopAtContact:false});assert.deepEqual(unchanged,normal);const hit=camera.move(0,c.start,c.end,velocity,{stopAtContact:true});assert.equal(hit.failure,undefined);assert.equal(!!hit.contact,c.hit);assert.ok(solidDistance(ring,hit.position).distance>=2-1e-5);for(const q of queries)for(let axis=0;axis<3;axis++){assert.ok(q.min[axis]>=Math.min(c.start[axis],c.end[axis])-2-1e-8);assert.ok(q.max[axis]<=Math.max(c.start[axis],c.end[axis])+2+1e-8);}if(c.hit){const delta=c.end.map((v,i)=>v-c.start[i]),fraction=(hit.position[0]-c.start[0])/(delta[0]||1);if(delta[0])for(let a=0;a<3;a++)assert.ok(Math.abs(hit.position[a]-c.start[a]-delta[a]*fraction)<1e-5);assert.ok(hit.distance<=normal.distance+1e-7);}else assert.deepEqual(hit.position,c.end);
+ }finally{camera.dispose();ship.dispose();defaultShip.dispose();}
+});
+test('camera first-contact option preserves explicit initial safe recovery rather than bypassing contact',()=>{const collision=createCollisionWorld({sector:()=>[],solidProvider:()=>[ring],shipRadius:2});try{const r=collision.move(0,[150,0,0],[150,30,0],[0,0,0],{stopAtContact:true});assert.equal(r.failure,undefined);assert.ok(r.corrected);assert.ok(solidDistance(ring,r.position).distance>=2-1e-5);}finally{collision.dispose();}});
+test('releaseQueryResources ends the old workspace and acquires a new owner only on the next real query',()=>{let next=0,released=0;const active=new Set(),seen=[];const world={sector:()=>[],createSolidQueryWorkspace(){const w={id:++next};active.add(w);return w;},releaseSolidQueryWorkspace(w){assert.ok(active.delete(w));released++;},collisionSolidsInBounds(_index,_bounds,w){assert.ok(active.has(w));seen.push(w);return [];}};const collision=createCollisionWorld({world,shipRadius:2});try{collision.move(0,[0,0,0],[5,0,0],[0,0,0]);const first=seen.at(-1);collision.releaseQueryResources();assert.equal(active.size,0);assert.equal(next,1);collision.move(0,[5,0,0],[8,0,0],[0,0,0]);assert.notEqual(seen.at(-1),first);assert.equal(next,2);assert.equal(released,1);}finally{collision.dispose();assert.equal(active.size,0);assert.equal(released,2);}});

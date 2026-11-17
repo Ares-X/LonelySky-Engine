@@ -71,3 +71,10 @@ test('FNV hash and random streams are deterministic and independent of global st
     0.1462021479383111, 0.46732782293111086,
   ]);
 });
+
+test('caller-owned decode output retains identity without changing published coordinates',()=>{
+  const out={x:0,y:0,z:0};
+  for(const cell of [{x:-16384,y:16383,z:-1},{x:31,y:-75,z:0},{x:0,y:0,z:0}]){
+    assert.strictEqual(decodeCell(encodeCell(cell),out),out);assert.deepEqual(out,cell);
+  }
+});

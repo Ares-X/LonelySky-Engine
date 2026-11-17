@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { describeGalaxyAppearance } from '../../src/render/galaxy-appearance.js';
 import { createGalaxyHaze, galaxyHazeScale } from '../../src/render/galaxy-haze.js';
 import { describeMacro, sampleGalaxy } from '../../src/render/cosmos.js';
+import { functionBody } from '../helpers/nebula-optics.mjs';
 
 const families = ['grand-spiral', 'barred-spiral', 'dust-disk', 'ancient-halo', 'tidal-islands', 'stellar-nursery'];
 const examples = new Map();
@@ -152,7 +153,8 @@ test('spiral stellar envelope remains connected, tapered and finite through dust
 
 test('elliptical core concentrates light, the local stellar bar is elongated and irregular islands are unequal', () => {
   const haze=createGalaxyHaze();haze.userData.setDescriptors([examples.get('ancient-halo')]);
-  const source=haze.children[0].material.fragmentShader;
+  const shader=haze.children[0].material.fragmentShader;
+  const source=functionBody(shader,'density')+functionBody(shader,'coreEmission');
   const scalar=(name,values)=>{
     const expression=source.match(new RegExp(`float ${name}=([^;]+);`))?.[1];assert.ok(expression);
     const scope={exp:Math.exp,cos:Math.cos,sin:Math.sin,dot:(a,b)=>a.reduce((sum,n,i)=>sum+n*b[i],0),...values};
@@ -180,4 +182,45 @@ test('elliptical core concentrates light, the local stellar bar is elongated and
     assert.ok(Math.max(...weights)-Math.min(...weights)>.2);
   }
   haze.userData.dispose();
+});
+
+test('parent portraits use stable host coordinates across low and high point budgets and bind the same association to the haze', () => {
+  const haze=createGalaxyHaze({structures:true}), familiesSeen=new Set();
+  try {
+    for (const [family, base] of examples) {
+      const host={...base,kind:'galaxy',revision:3,orientation:[0,0,0],radius:12000000};
+      const portrait=describeGalaxyAppearance(host).portrait;
+      const rendered={...host,portrait};
+      assert.deepEqual(describeGalaxyAppearance(host).portrait,portrait);
+      assert.equal(describeGalaxyAppearance({...host,kind:'cluster'}).portrait,null);
+      assert.ok(!familiesSeen.has(portrait.motif)); familiesSeen.add(portrait.motif);
+      const high=sampleGalaxy(rendered),low=sampleGalaxy(rendered,512);
+      const unchanged=sampleGalaxy(host);
+      for(const key of ['positions','sizes','colors'])assert.deepEqual(low[key],high[key].slice(0,low[key].length));
+      let changed=0,local=0;
+      for(let j=0;j<high.positions.length;j+=3){
+        if(high.positions[j]===unchanged.positions[j])continue;
+        changed++;
+        const p=Array.from(high.positions.slice(j,j+3),n=>n/host.radius);
+        assert.ok(Math.hypot(...p)<.981);
+        // Point support must trace actual haze cells in object coordinates,
+        // rather than a camera-facing stamp or an unrelated decorative stream.
+        if(portrait.nodes.some(n=>{
+          const d=p.map((v,k)=>v-n.center[k]),t=d.reduce((v,x,k)=>v+x*n.axis[k],0);
+          return t*t/(n.long*n.long)+d.reduce((v,x,k)=>v+(x-t*n.axis[k])**2,0)/(n.width*n.width)<9;
+        }))local++;
+      }
+      assert.ok(Math.abs(changed/4096-portrait.fraction)<.035);
+      assert.ok(local/changed>.95);
+      haze.userData.setDescriptors([rendered,host]);
+      const m=haze.children[0].material;
+      assert.equal(m.defines.GALAXY_PORTRAIT,1);
+      assert.equal(haze.children[1].material.defines.GALAXY_PORTRAIT,undefined);
+      for(const [k,n] of portrait.nodes.entries()){
+        assert.deepEqual(m.uniforms.portraitCenters.value[k].toArray(),[...n.center,1/n.width]);
+        assert.deepEqual(m.uniforms.portraitAxes.value[k].toArray(),[...n.axis,1/n.long]);
+        assert.ok(Math.abs(Math.hypot(...n.axis)-1)<1e-8&&n.width>0&&n.long>n.width);
+      }
+    }
+  } finally {haze.userData.dispose();}
 });

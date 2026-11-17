@@ -1,3 +1,4 @@
+import {createGalaxyPortrait} from './galaxy-portrait.js';
 import { randomFromSeed } from '../random.js';
 
 /** Additive visual character: never consumes the address or particle streams. */
@@ -22,5 +23,7 @@ export function describeGalaxyAppearance(descriptor) {
   const { offset, fov, ...controls } = settings;
   // Modest seeded exposure variation does not change the structural family.
   return Object.freeze({ revision: 1, family, ...controls, emissionStrength: .94 + random() * .12,
+    portrait: descriptor.kind === 'galaxy' && descriptor.revision === 3 && !descriptor.recipe
+      ? (descriptor.portrait ?? createGalaxyPortrait(descriptor, family, random)) : null,
     viewing: Object.freeze({ offset: Object.freeze([...offset]), fov }) });
 }
