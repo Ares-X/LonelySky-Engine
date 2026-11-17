@@ -38,7 +38,7 @@ void bodyDepth(vec3 direction,float physicalDistance){
 `;
 const opaqueMain = /* glsl */`
 void main(){
-  vec3 direction=normalize(worldRay),ray=uBodyFrame*direction,origin=-uBodyFrame*uBodyCenter;
+  vec3 direction=normalize(worldRay),ray=uBodyFrame*direction,origin=uBodyOrigin;
   float minimum=uCameraNear/uBodyRadius/max(-(uViewRotation*direction).z,1.e-8);
   vec3 point,normal;float distance;
   if(!bodyCast(origin,ray,minimum,point,normal,distance))discard;
@@ -50,7 +50,7 @@ void main(){
 }`;
 const overlayFragment = commonFragment + /* glsl */`
 void main(){
-  vec3 direction=normalize(worldRay),ray=uBodyFrame*direction,origin=-uBodyFrame*uBodyCenter;
+  vec3 direction=normalize(worldRay),ray=uBodyFrame*direction,origin=uBodyOrigin;
   vec3 point;float distance,alpha;vec3 color;
   if(uBodyKind==2){
     alpha=gasRingCast(origin,ray,point,distance);

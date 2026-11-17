@@ -298,6 +298,10 @@ Generation uses artistic placement. Volume and black-hole rendering uses optical
 approximations. Camera depth compression and local gravity do not form a
 physically consistent galaxy-to-planet simulation.
 
+### Ring habitat terrain
+
+A ring with a fixed surface site can specify `habitatPort.terrainReferenceRadius` in world units. This anchors the procedural terrain phase at the site's longitude if a caller changes the ring radius. Its default is the current body radius. Terrain sampling uses physical lengths and the projected surface footprint, so smaller bands of detail resolve as the camera approaches.
+
 ### Optional ring surface image
 
 `createCosmicBodies({habitatTexture})` borrows a caller-owned sRGB texture.
