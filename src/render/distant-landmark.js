@@ -19,8 +19,10 @@ const float BODY_TAU=6.28318530718;
 bool solidArc(vec3 p,vec2 gap){
   return gap.y<=0.||abs(atan(sin(atan(p.z,p.x)-gap.x),cos(atan(p.z,p.x)-gap.x)))>=gap.y;
 }
-void acceptSurface(float t,vec3 p,vec3 n,float minimum,inout float nearest,inout vec3 point,inout vec3 normal){
-  if(t>minimum&&t<nearest){nearest=t;point=p;normal=n;}
+void acceptSurface(float t,vec3 p,vec3 n,vec3 ray,bool cameraRay,float minimum,inout float nearest,inout vec3 point,inout vec3 normal){
+  // A rounded primary point can leave a sun ray just beneath its source
+  // wall. Its outward exit cannot cast a shadow; a later entry still can.
+  if(t>minimum&&t<nearest&&(cameraRay||dot(n,ray)<0.)){nearest=t;point=p;normal=n;}
 }
 bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool cameraRay,float minimum,out vec3 point,out vec3 normal,out float nearest){
   nearest=1.e25;point=vec3(0.);normal=vec3(0.);
@@ -48,14 +50,14 @@ bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool
     for(int side=0;side<2;side++){
       float t=roots[side];vec3 p=origin+ray*t;
       if(p.y>=bounds.z&&p.y<=bounds.w&&solidArc(p,gap))
-        acceptSurface(t,p,normalize(vec3(p.x,0.,p.z))*(wall==0?-1.:1.),minimum,nearest,point,normal);
+        acceptSurface(t,p,normalize(vec3(p.x,0.,p.z))*(wall==0?-1.:1.),ray,cameraRay,minimum,nearest,point,normal);
     }
   }
   if(abs(ray.y)>1.e-10)for(int side=0;side<2;side++){
     float t=((side==0?bounds.z:bounds.w)-origin.y)/ray.y;vec3 p=origin+ray*t;
     float r=length(p.xz);
     if(r>=bounds.x&&r<=bounds.y&&solidArc(p,gap))
-      acceptSurface(t,p,vec3(0.,side==0?-1.:1.,0.),minimum,nearest,point,normal);
+      acceptSurface(t,p,vec3(0.,side==0?-1.:1.,0.),ray,cameraRay,minimum,nearest,point,normal);
   }
   if(gap.y>0.)for(int end=0;end<2;end++){
     float angle=gap.x+(end==0?-1.:1.)*gap.y;
@@ -63,7 +65,7 @@ bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool
     float denominator=dot(ray,tangent);if(abs(denominator)<1.e-10)continue;
     float t=-dot(origin,tangent)/denominator;vec3 p=origin+ray*t;float r=dot(p,radial);
     if(r>=bounds.x&&r<=bounds.y&&p.y>=bounds.z&&p.y<=bounds.w)
-      acceptSurface(t,p,tangent*(end==0?1.:-1.),minimum,nearest,point,normal);
+      acceptSurface(t,p,tangent*(end==0?1.:-1.),ray,cameraRay,minimum,nearest,point,normal);
   }
   return nearest<1.e24;
 }
@@ -206,6 +208,7 @@ vec4 ringRockRidge(vec3 world,float scale,float footprint){
   return field;
 }
 float ringDirectLight(vec3 point,vec3 geometricNormal,vec3 materialNormal){
+  if(dot(geometricNormal,uLight)<=0.)return 0.;
   float diffuse=max(dot(materialNormal,uLight),0.);
   if(diffuse>.02){vec3 blocker,bn;float t;
     if(ringCast(point+geometricNormal*max(.35/uBodyRadius,1.e-7),uLight,false,max(.2/uBodyRadius,1.e-7),blocker,bn,t))diffuse*=.06;
