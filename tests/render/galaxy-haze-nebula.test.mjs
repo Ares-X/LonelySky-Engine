@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createHash} from 'node:crypto';
 import * as THREE from 'three';
-import {WebGLUniforms} from 'three/src/renderers/webgl/WebGLUniforms.js';
 import {createGalaxyHaze} from '../../src/render/galaxy-haze.js';
 import {randomFromSeed} from '../../src/random.js';
 import {noiseEvaluator,hullInterval,fixedGrid,absorptionRule,functionBody} from '../helpers/nebula-optics.mjs';
@@ -15,72 +13,26 @@ function fixture(seed='nebula-optics-regression',descriptors=[descriptor('a')]){
   return{group,material:group.children[0].material,uniforms:group.children[0].material.uniforms};
 }
 const dot=(a,b)=>a.reduce((s,v,k)=>s+v*b[k],0);
-const digest=data=>createHash('sha256').update(data).digest('hex');
-
-test('all loaded dust complexes share one bounded table across descriptor changes and dispose it once',()=>{
+test('dust complexes preserve world and descriptor seeds across streaming and camera updates',()=>{
   const descriptors=Array.from({length:27},(_,i)=>descriptor(`body-${i}`,i%2?'old-gold':'blue-nursery'));
-  const f=fixture(undefined,descriptors),table=f.uniforms.nebulaSharedCorners.value;
-  let disposed=0;table.addEventListener('dispose',()=>disposed++);
+  const f=fixture(undefined,descriptors);
+  const phases=mesh=>mesh.material.uniforms.nebulaNoisePhase.value.map(v=>v.toArray());
+  const key=f.uniforms.nebulaSeed.value;
+  const different=fixture('another-nebula-world');
   try{
-    assert.deepEqual([table.image.width,table.image.height,table.image.depth],[96,96,96]);
-    assert.equal(table.image.data.byteLength,14155776);
-    assert.equal(table.internalFormat,'RGBA32UI');assert.equal(table.format,THREE.RGBAIntegerFormat);
-    assert.equal(table.type,THREE.UnsignedIntType);assert.equal(table.minFilter,THREE.NearestFilter);assert.equal(table.magFilter,THREE.NearestFilter);
-    assert.equal(table.generateMipmaps,false);
-    const domains=[];
+    assert.notEqual(different.uniforms.nebulaSeed.value,key);
+    const domains=f.group.children.map(phases);
+    assert.equal(new Set(domains.map(domain=>JSON.stringify(domain))).size,27);
     for(const mesh of f.group.children){
-      assert.equal(mesh.material.uniforms.nebulaSharedCorners.value,table);
+      assert.equal(mesh.material.uniforms.nebulaSeed.value,key);
       assert.equal(mesh.material.blending,THREE.NormalBlending);assert.equal(mesh.material.depthWrite,false);
-      domains.push(JSON.stringify(mesh.material.uniforms.nebulaNoisePhase.value.map(v=>v.toArray())));
+      const samplers=[...mesh.material.fragmentShader.matchAll(/uniform\s+(?:highp\s+)?[iu]?sampler\w+\s+(\w+)/g)].map(match=>match[1]);
+      assert.deepEqual(samplers,['uSceneDepth']);
     }
-    assert.equal(new Set(domains).size,27);
-    f.group.userData.setDescriptors([]);assert.equal(disposed,0);assert.ok(table.image.data);
-    f.group.userData.setDescriptors(descriptors.slice(0,2));assert.equal(disposed,0);
-    assert.equal(f.group.children[1].material.uniforms.nebulaSharedCorners.value,table);
-    const positions=f.group.children.map(m=>m.material.uniforms.nebulaNoisePhase.value.map(v=>v.toArray()));
-    f.group.userData.update({centers:[[100,0,0],[-100,0,0]],cameraPosition:[2,3,4],quality:'high',brightness:1,home:false});
+    f.group.userData.setDescriptors([]);f.group.userData.setDescriptors(descriptors.slice(0,2));
     f.group.userData.update({centers:[[100,0,0],[-100,0,0]],cameraPosition:[200,30,40],quality:'high',brightness:1,home:false});
-    assert.deepEqual(f.group.children.map(m=>m.material.uniforms.nebulaNoisePhase.value.map(v=>v.toArray())),positions);
-  }finally{f.group.userData.dispose();f.group.userData.dispose();}
-  assert.equal(disposed,1);assert.equal(table.image.data,null);
-});
-
-test('the first structural upload assigns distinct 2D/depth/unsigned-3D sampler units for every kind',()=>{
-  const descriptors=['galaxy','cluster','nebula'].map(kind=>({...descriptor(kind),kind,morphology:kind==='galaxy'?'spiral':'irregular'}));
-  const f=fixture(undefined,descriptors),table=f.uniforms.nebulaSharedCorners.value;
-  let disposed=0;table.addEventListener('dispose',()=>disposed++);
-  try{
-    for(const mesh of f.group.children){
-      // These are the linked active samplers from the failing startup draw.
-      // Exercise Three's real first-upload dispatcher and value filtering.
-      const active=[{name:'structureNoise',type:0x8b5e,size:1},{name:'uSceneDepth',type:0x8b5e,size:1},{name:'nebulaSharedCorners',type:0x8dd3,size:1}];
-      const assignments=new Map(),bindings=[];
-      const gl={getProgramParameter:()=>active.length,getActiveUniform:(_,i)=>active[i],getUniformLocation:(_,name)=>name,uniform1i:(name,unit)=>assignments.set(name,unit)};
-      let nextUnit=0;
-      const textures={allocateTextureUnit:()=>nextUnit++,setTexture2D:(texture,unit)=>bindings.push({texture,unit,target:'2d'}),setTexture3D:(texture,unit)=>bindings.push({texture,unit,target:'3d'})};
-      const uniforms=new WebGLUniforms(gl,{}),values=mesh.material.uniforms;
-      WebGLUniforms.upload(gl,WebGLUniforms.seqWithValue(uniforms.seq,values),values,textures);
-      assert.equal(assignments.size,3,`${mesh.name} must bind every active sampler on its first draw`);
-      assert.equal(new Set(assignments.values()).size,3);
-      assert.equal(bindings.find(binding=>binding.target==='3d').texture,table);
-    }
-  }finally{f.group.userData.dispose();}
-  assert.equal(disposed,1,'all structural materials share one owned integer table');
-});
-
-test('packed corners reproduce periodic integer hashes and the world seed deterministically',()=>{
-  const f=fixture(),table=f.uniforms.nebulaSharedCorners.value,data=table.image.data;
-  const random=randomFromSeed('nebula-optics-regression:nebula-shared-lattice-v1'),seed=Math.floor(random()*4294967296)>>>0;
-  const hash=(x,y,z)=>{let h=(Math.imul(x,0x8da6b343)^Math.imul(y,0xd8163841)^Math.imul(z,0xcb1ab31f)^seed)>>>0;h^=h>>>16;h=Math.imul(h,0x7feb352d);h^=h>>>15;h=Math.imul(h,0x846ca68b);return(h^(h>>>16))>>>0;};
-  let expected;
-  try{
-    for(const x of [0,1,47,94,95])for(const y of [0,1,47,94,95])for(const z of [0,1,47,94,95])for(let c=0;c<4;c++)
-      assert.equal(data[(x+96*(y+96*z))*4+c],hash((x+(c&1))%96,(y+(c>>1))%96,z));
-    expected=digest(data);
-  }finally{f.group.userData.dispose();}
-  for(const [seed,equal]of [['nebula-optics-regression',true],['another-nebula-world',false]]){
-    const repeat=fixture(seed);try{assert.equal(digest(repeat.uniforms.nebulaSharedCorners.value.image.data)===expected,equal);}finally{repeat.group.userData.dispose();}
-  }
+    assert.deepEqual(f.group.children.map(phases),domains.slice(0,2));
+  }finally{f.group.userData.dispose();different.group.userData.dispose();}
 });
 
 test('uploaded noise derivatives follow the same corners, domain transform and filtered value',()=>{

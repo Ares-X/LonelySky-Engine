@@ -50,15 +50,15 @@ test('families select different structure and composition rather than only tint'
   assert.ok(elevation('grand-spiral')>.7);assert.ok(elevation('dust-disk')<.1);
 });
 
-test('profiles share bounded volumes, shader, texture and quadrature without extra draw calls', () => {
+test('profiles share bounded volumes, shader and quadrature without extra draw calls', () => {
   const descriptors=[...examples.values()],haze=createGalaxyHaze();
   haze.userData.setDescriptors(descriptors);
-  const original=haze.children[0],geometry=original.geometry,noise=original.material.uniforms.structureNoise.value;
-  let geometryReleases=0,noiseReleases=0,materialReleases=0;
-  geometry.addEventListener('dispose',()=>geometryReleases++);noise.addEventListener('dispose',()=>noiseReleases++);
+  const original=haze.children[0],geometry=original.geometry;
+  let geometryReleases=0,materialReleases=0;
+  geometry.addEventListener('dispose',()=>geometryReleases++);
   for (const [i,mesh] of haze.children.entries()) {
     mesh.material.addEventListener('dispose',()=>materialReleases++);
-    assert.equal(mesh.geometry,geometry);assert.equal(mesh.material.uniforms.structureNoise.value,noise);
+    assert.equal(mesh.geometry,geometry);
     assert.equal(mesh.material.fragmentShader,original.material.fragmentShader);
     assert.ok(galaxyHazeScale(descriptors[i]).every(n=>n>0&&n<=1));
     assert.deepEqual(mesh.userData.appearance,describeGalaxyAppearance(descriptors[i]));
@@ -73,9 +73,9 @@ test('profiles share bounded volumes, shader, texture and quadrature without ext
     assert.ok(haze.children.every(mesh=>mesh.material.uniforms.steps.value===count));
   }
   haze.userData.setDescriptors(descriptors);
-  assert.equal(materialReleases,0);assert.equal(geometryReleases,0);assert.equal(noiseReleases,0);
+  assert.equal(materialReleases,0);assert.equal(geometryReleases,0);
   haze.userData.dispose();haze.userData.dispose();
-  assert.equal(materialReleases,6);assert.equal(geometryReleases,1);assert.equal(noiseReleases,1);
+  assert.equal(materialReleases,6);assert.equal(geometryReleases,1);
 });
 
 test('actual dust column stays finite, agrees with numerical integration and darkens the plane', () => {
@@ -139,7 +139,7 @@ test('spiral stellar envelope remains connected, tapered and finite through dust
       if(r===1)assert.equal(amount,0,'existing support edge still ends all added emission');
     }
   }
-  assert.ok(maxArm/minArm<5,'multiscale texture changes detail without high-contrast coarse gates');
+  assert.ok(maxArm/minArm<5,'multiscale field changes detail without high-contrast coarse gates');
   const center=scalar('taper',{r:0,height:0}),outer=scalar('taper',{r:.9,height:0});
   assert.ok(outer<center*.4,'edge-on stellar disk narrows and fades toward its ends');
   assert.ok(scalar('interarm',{coarse:0})>0,'a continuous faint population joins otherwise separated arms');

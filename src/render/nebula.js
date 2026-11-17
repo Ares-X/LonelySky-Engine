@@ -2,63 +2,6 @@ import * as THREE from 'three';
 import { NEBULA_APPEARANCE_FAMILIES } from './nebula-appearance.js';
 import { NEBULA_VOLUME } from '../nebula-volume.js';
 
-let sharedNoise = null, noiseUsers = 0;
-
-function accumulateNoiseOctave(values, corners, lower, upper, fraction, frequency, weight, size) {
-  for (let z = 0; z < size; z += 1) for (let y = 0; y < size; y += 1) {
-    const row00 = frequency * (lower[y] + frequency * lower[z]);
-    const row10 = frequency * (upper[y] + frequency * lower[z]);
-    const row01 = frequency * (lower[y] + frequency * upper[z]);
-    const row11 = frequency * (upper[y] + frequency * upper[z]);
-    const fy = fraction[y], fz = fraction[z], offset = size * (y + size * z);
-    for (let x = 0; x < size; x += 1) {
-      const ix = lower[x], jx = upper[x], fx = fraction[x];
-      const a = corners[row00 + ix] + (corners[row00 + jx] - corners[row00 + ix]) * fx;
-      const b = corners[row10 + ix] + (corners[row10 + jx] - corners[row10 + ix]) * fx;
-      const c = corners[row01 + ix] + (corners[row01 + jx] - corners[row01 + ix]) * fx;
-      const d = corners[row11 + ix] + (corners[row11 + jx] - corners[row11 + ix]) * fx;
-      const near = a + (b - a) * fy, far = c + (d - c) * fy;
-      values[offset + x] += (near + (far - near) * fz) * weight;
-    }
-  }
-}
-
-function noiseTexture(seed) {
-  const size = 64;
-  const data = new Uint8Array(size ** 3);
-  const values = new Float64Array(data.length);
-  // Every octave visits the same small periodic lattice and the same 64 axis
-  // coordinates. Build those once instead of rehashing eight corners per voxel.
-  // Float64 and the original x/y/z interpolation order retain the exact bytes.
-  for (const [frequency, weight] of [[4, 0.57], [8, 0.29], [16, 0.14]]) {
-    const corners = new Float64Array(frequency ** 3);
-    const lower = new Uint8Array(size), upper = new Uint8Array(size), fraction = new Float64Array(size);
-    for (let z = 0; z < frequency; z += 1) for (let y = 0; y < frequency; y += 1) for (let x = 0; x < frequency; x += 1) {
-      let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ Math.imul(z, 2147483647) ^ seed;
-      h = Math.imul(h ^ (h >>> 13), 1274126177);
-      corners[x + frequency * (y + frequency * z)] = ((h ^ (h >>> 16)) >>> 0) / 4294967295;
-    }
-    for (let i = 0; i < size; i += 1) {
-      const coordinate = i / size * frequency, index = Math.floor(coordinate), t = coordinate - index;
-      lower[i] = index; upper[i] = (index + 1) % frequency; fraction[i] = t * t * (3 - 2 * t);
-    }
-    accumulateNoiseOctave(values, corners, lower, upper, fraction, frequency, weight, size);
-  }
-  for (let i = 0; i < data.length; i += 1) {
-    data[i] = Math.round(Math.max(0, Math.min(1, .5 + (values[i] - .5) * 1.25)) * 255);
-  }
-  const texture = new THREE.Data3DTexture(data, size, size, size);
-  texture.format = THREE.RedFormat;
-  texture.type = THREE.UnsignedByteType;
-  texture.minFilter = THREE.LinearMipmapLinearFilter;
-  texture.magFilter = THREE.LinearFilter;
-  texture.generateMipmaps = true;
-  texture.wrapS = texture.wrapT = texture.wrapR = THREE.RepeatWrapping;
-  texture.unpackAlignment = 1;
-  texture.needsUpdate = true;
-  return texture;
-}
-
 const vertexShader = /* glsl */`
 out vec3 vLocal;
 void main(){
@@ -68,11 +11,9 @@ void main(){
 `;
 
 const fragmentShader = /* glsl */`
-precision highp sampler3D;
 in vec3 vLocal;
 out vec4 nebulaColor;
 #define gl_FragColor nebulaColor
-uniform sampler3D uNoise;
 uniform vec3 uCamera,uColorA,uColorB,uRimColor,uNoiseOffset;
 uniform mat4 uLocalToWorld,projectionMatrix;
 uniform sampler2D uSceneDepth;
@@ -85,42 +26,78 @@ uniform vec3 uLightDirection;
 uniform float uEmission,uScattering,uExcitation,uRimStrength,uExtinction,uPhase;
 const vec3 LIGHT=vec3(-0.650945,0.650945,0.390567);
 
-// Match the density bandwidth to both the physical ray cell and pixel cone.
-// Mips integrate the stationary field; no time or screen-space jitter enters.
-float cloudNoise(vec3 p,float footprint){
-  float lod=max(0.0,log2(max(1.0,footprint*64.0)));
-  return textureLod(uNoise,p,lod).r;
+// Reconstruct the periodic field at the ray sample. Four lanes hash the XY
+// corners together; the lower and upper Z planes share their XY products.
+vec4 cloudCorners(uvec4 xy,uint z){
+  uvec4 h=xy^(z*2147483647u)^0x51a7d05u;
+  h=(h^(h>>13u))*1274126177u;
+  return vec4(h^(h>>16u))*(1./4294967295.)-.5;
 }
-float field(vec3 p,vec3 rayStep,float pixelFootprint){
+float broadCloud(vec3 uv){
+  vec3 point=uv*4.,f=fract(point);
+  uvec3 cell=uvec3(point),next=(cell+1u)&3u;
+  uvec4 xy=uvec4(cell.x,next.x,cell.x,next.x)*374761393u
+    ^uvec4(cell.yy,next.yy)*668265263u;
+  f=f*f*(3.-2.*f);
+  vec4 corners=mix(cloudCorners(xy,cell.z),cloudCorners(xy,next.z),f.z);
+  vec2 row=mix(corners.xz,corners.yw,f.x);
+  return mix(row.x,row.y,f.y);
+}
+// The broad lattice keeps the individual cloud outline. Crossing cubic waves
+// inside that envelope resolve medium and fine folds in different directions.
+mediump vec2 cloudWave(mediump vec2 turns){
+  mediump vec2 x=1.-4.*abs(fract(turns)-.5);
+  return x*(1.5-.5*x*x);
+}
+float cloudNoise(vec3 p,float footprint){
+  if(footprint>=.25)return .5;
+  vec3 uv=fract(p-vec3(1./128.));
+  mediump vec3 weight=(1.-smoothstep(vec3(.25),vec3(1.),footprint*vec3(4.,8.,16.)))*vec3(.57,.29,.14);
+  float broad=broadCloud(uv);
+  mediump vec2 mid=cloudWave(vec2(dot(uv,vec3(2.,-3.,1.)),dot(uv,vec3(-2.,1.,3.)))+broad*1.7);
+  mediump vec2 fine=cloudWave(vec2(dot(uv,vec3(4.,3.,-5.)),dot(uv,vec3(-6.,3.,2.)))+.34*mid.yx);
+  mediump vec3 bands=vec3(broad,dot(mid,vec2(.20,.17)),dot(fine,vec2(.17,.20)));
+  return clamp(.5+1.25*dot(bands,weight),0.,1.);
+}
+float dustErosion(vec3 p,float broad,float shear,float fine,float footprint){
+  vec3 flowPoint=p+vec3(broad-0.5,shear-0.5,fine-0.5)*0.32;
+  mat3 dustFrame=mat3(0.8,0.0,-0.6,0.36,0.8,0.48,0.48,-0.6,0.64);
+  return cloudNoise(dustFrame*(flowPoint*vec3(10.5,8.3,3.3))+uNoiseOffset+vec3(0.63,0.11,0.29),footprint);
+}
+float field(vec3 p,vec4 footprint){
   float edge=max(abs(p.x),max(abs(p.y),abs(p.z)));
   float support=1.0-smoothstep(0.76,0.99,edge);
   float envelope=support*(1.0-smoothstep(0.68,1.0,length(p*vec3(0.83,0.84,0.92))));
   if(envelope<=0.001)return 0.0;
-  float broad=cloudNoise(p*0.48+uNoiseOffset,max(pixelFootprint*0.48,length(rayStep)*0.24));
-  // Medium folds turn the fine dust locally. Nonempty samples keep all four queries;
-  // no single strong warp stretches every trunk into the same brushed pattern.
-  float fine=cloudNoise(p*vec3(3.7,3.1,2.4)+uNoiseOffset+vec3(0.17,0.37,0.63),max(pixelFootprint*3.7,length(rayStep*vec3(3.7,3.1,2.4))*0.5));
+  // The noise displacement is bounded, so neither shell can reach these radii.
+  // Skip its entire field in the empty cavity and outside the outer surface.
+  bool halo=uMorphology==1&&uAppearance==4,shock=uMorphology==4&&uAppearance==5;
+  float shellDelta=0.;
+  if(halo){
+    shellDelta=length(p*vec3(1.,1.6,1.25))-.62;
+    if(abs(shellDelta)>.065+.5*(.045+.012))return 0.;
+  }else if(shock){
+    shellDelta=length(p*vec3(1.,1.15,1.))-.65;
+    if(abs(shellDelta)>.06+.5*(.032+.01))return 0.;
+  }
+  float broad=cloudNoise(p*0.48+uNoiseOffset,footprint.x);
+  // Independent medium folds turn the fine dust locally.
+  float fine=cloudNoise(p*vec3(3.7,3.1,2.4)+uNoiseOffset+vec3(0.17,0.37,0.63),footprint.y);
   // These existing shell factors do not depend on shear or microstructure.
   // An exact zero cannot contribute density, including along the light rays.
   float shellGate=1.0;
-  if(uMorphology==1&&uAppearance==4){
-    float shellRadius=length(p*vec3(1.0,1.6,1.25));
+  if(halo){
     float shellOffset=(broad-0.5)*0.045+(fine-0.5)*0.012;
-    shellGate=1.0-smoothstep(0.015,0.065,abs(shellRadius-0.62+shellOffset));
-  }else if(uMorphology==4&&uAppearance==5){
-    vec3 shock=p*vec3(1.0,1.15,1.0);
-    float radius=length(shock);
+    shellGate=1.0-smoothstep(0.015,0.065,abs(shellDelta+shellOffset));
+  }else if(shock){
     float sectors=smoothstep(0.46,0.64,broad);
     float ridge=smoothstep(0.49,0.63,fine);
     float shockOffset=(broad-0.5)*0.032+(fine-0.5)*0.01;
-    float front=1.0-smoothstep(0.012,0.06,abs(radius-0.65+shockOffset));
+    float front=1.0-smoothstep(0.012,0.06,abs(shellDelta+shockOffset));
     shellGate=front*sectors*ridge;
   }
   if(shellGate==0.0)return 0.0;
-  float shear=cloudNoise(p*0.57+uNoiseOffset+vec3(0.31,0.73,0.19),max(pixelFootprint*0.57,length(rayStep)*0.285));
-  vec3 flowPoint=p+vec3(broad-0.5,shear-0.5,fine-0.5)*0.32;
-  mat3 dustFrame=mat3(0.8,0.0,-0.6,0.36,0.8,0.48,0.48,-0.6,0.64);
-  float micro=cloudNoise(dustFrame*(flowPoint*vec3(10.5,8.3,3.3))+uNoiseOffset+vec3(0.63,0.11,0.29),max(pixelFootprint*10.5,length(rayStep*vec3(10.5,8.3,3.3))*0.5));
+  float shear=cloudNoise(p*0.57+uNoiseOffset+vec3(0.31,0.73,0.19),footprint.z);
   vec3 q=p+vec3(broad-0.5,shear-0.5,broad-shear)*0.31;
   if(uAppearance!=0){
     // Seeded shear and nested erosion break the repeated geometric silhouette.
@@ -129,6 +106,7 @@ float field(vec3 p,vec3 rayStep,float pixelFootprint){
       (broad-0.5)*0.28,(broad-0.5)*0.12+cos(uPhase)*p.y*0.1);
   }
   if(uMorphology!=0){
+    float micro=dustErosion(p,broad,shear,fine,footprint.w);
     float eroded=smoothstep(0.27,0.72,broad*0.48+fine*0.34+micro*0.18);
     float shape=0.0;
     if(uMorphology==1){
@@ -181,6 +159,8 @@ float field(vec3 p,vec3 rayStep,float pixelFootprint){
   float stems=max(max(a,b),c)*smoothstep(-1.0,-0.78,q.y);
   float wisps=smoothstep(0.49,0.73,broad*0.65+fine*0.35)*0.40;
   float base=smoothstep(0.38,0.68,broad)*0.25*(1.0-smoothstep(-0.55,-0.1,q.y));
+  if(stems==0.)return max(0.,((uAppearance==0?wisps*.45+base*.6:wisps*.55+base*.9)-.08)*envelope);
+  float micro=dustErosion(p,broad,shear,fine,footprint.w);
   float erosion=smoothstep(0.29,0.66,broad*0.45+fine*0.35+micro*0.2);
   float material=stems*(0.25+erosion*1.1)+wisps*0.45+base*0.6;
   if(uAppearance!=0){
@@ -222,6 +202,9 @@ void main(){
   vec3 color=vec3(0.0);
   float transmission=1.0;
   float firstCloud=-1.0;
+  vec3 rayStep=rd*stepSize;
+  vec4 rayWidth=vec4(stepSize*.24,length(rayStep*vec3(3.7,3.1,2.4))*.5,
+    stepSize*.285,length(rayStep*vec3(10.5,8.3,3.3))*.5);
   for(int i=0;i<48;i++){
     if(i>=uSteps)break;
     // Two-point Gauss cells reduce coherent midpoint slice bands.
@@ -229,8 +212,8 @@ void main(){
     float distance=entry+node*stepSize;
     vec3 p=uCamera+rd*distance;
     float pixelFootprint=pixelCone*distance;
-    vec3 rayStep=rd*stepSize;
-    float rho=field(p,rayStep,pixelFootprint);
+    vec4 footprint=max(rayWidth,pixelFootprint*vec4(.48,3.7,.57,10.5));
+    float rho=field(p,footprint);
     if(uAppearance==4||uAppearance==5){
       vec3 shellNormal=normalize(p*(uAppearance==4?vec3(1.0,2.56,1.5625):vec3(1.0,1.3225,1.0))+vec3(0.000001));
       float limb=1.0-abs(dot(shellNormal,rd));
@@ -240,12 +223,12 @@ void main(){
     if(rho>0.012){
       if(firstCloud<0.0)firstCloud=distance;
       vec3 lightDirection=uAppearance==0?LIGHT:uLightDirection;
-      float towardLight=field(p+lightDirection*0.13,rayStep,pixelFootprint);
+      float towardLight=field(p+lightDirection*0.13,footprint);
       float lightColumn=towardLight;
-      if(uAppearance!=0)lightColumn=0.65*towardLight+0.55*field(p+lightDirection*0.32,rayStep,pixelFootprint);
+      if(uAppearance!=0)lightColumn=0.65*towardLight+0.55*field(p+lightDirection*0.32,footprint);
       float illumination=0.015+0.985*exp(-lightColumn*12.0);
       float rim=clamp((rho-towardLight)*4.0,0.0,1.0);
-      float structure=cloudNoise(p*2.3+uNoiseOffset+vec3(0.11),max(pixelFootprint*2.3,length(rayStep)*1.15));
+      float structure=cloudNoise(p*2.3+uNoiseOffset+vec3(0.11),max(pixelFootprint*2.3,stepSize*1.15));
       vec3 tint=mix(uColorA,uColorB,smoothstep(0.3,0.75,structure)*0.62);
       vec3 source=tint*(0.025+illumination*1.3);
       source+=vec3(0.09,0.29,0.37)*rim*illumination*0.6;
@@ -325,12 +308,7 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
   group.name = 'Structured interstellar dust columns';
   const numericSeed = typeof seed === 'number' ? seed >>> 0 : [...String(seed)]
     .reduce((hash, letter) => Math.imul(hash ^ letter.charCodeAt(0), 16777619) >>> 0, 2166136261);
-  // Reuse one stationary noise tile. Each volume samples a seeded offset; crossing
-  // a cell must not synchronously rebuild several 64³ textures on the main thread.
-  const texture = sharedNoise ||= noiseTexture(0x51a7d05);
-  noiseUsers += 1;
   const uniforms = {
-    uNoise: { value: texture },
     uCamera: { value: new THREE.Vector3() },
     uColorA: { value: new THREE.Color(palette('colorA')) },
     uColorB: { value: new THREE.Color(palette('colorB')) },
@@ -403,7 +381,7 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     volume.worldToLocal(boundsPoint).clampScalar(-1, 1);
     return volume.localToWorld(boundsPoint).distanceTo(worldPosition);
   };
-  group.userData.stats = { steps: 32, morphology, noiseResolution: 64, bounds: [9000, 6700, 16300], opticalApproximation: true };
+  group.userData.stats = { steps: 32, morphology, bounds: [9000, 6700, 16300], opticalApproximation: true };
   group.userData.update = (camera, time, { quality = 'auto', visibility = 1 } = {}) => {
     if (disposed || !camera) return;
     group.updateWorldMatrix(true, true);
@@ -422,8 +400,6 @@ export function createNebula({ colorA = 0x254689, colorB = 0x42a5b3, density = 1
     disposed = true;
     geometry.dispose();
     material.dispose();
-    noiseUsers -= 1;
-    if (noiseUsers === 0) { sharedNoise.dispose(); sharedNoise = null; }
   };
   return group;
 }

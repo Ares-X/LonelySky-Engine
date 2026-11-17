@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { gasCloudGLSL } from './gas-clouds.js';
 import { describePlanetAppearance } from './planet-appearance.js';
 import { stellarLightingUniforms, planetRingShadowUniforms, stellarLightingGLSL, planetRingShadowGLSL, ringDensityGLSL } from './stellar-lighting.js';
 export { setStellarLighting, setPlanetRingShadow } from './stellar-lighting.js';
@@ -24,17 +25,25 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
   const appearance=describePlanetAppearance(planet);
   const kinds={gas:0,ocean:1,ice:2,rock:3,lava:4};
   const textureKey=appearance || planet.proceduralSurface ? null : planet.texture || (planet.kind==='gas' ? (planet.seed%2?'jupiter':'saturn') : planet.kind==='ocean'?'earth':planet.kind==='ice'||planet.kind==='rock'?'moon':null);
+  const mapped=Boolean(textureKey && textures[textureKey]);
+  const regolith=appearance?.family === 'cratered' && Boolean(textures.moon);
+  // Legacy texture identifiers also specify the visual family when the host
+  // supplies no image. Saved home worlds retain their own recorded palette.
+  const nativeStyles={gas:1,ocean:4,ice:6,rock:8,lava:10};
+  const nativeStyle=planet.texture==='moon'?8:planet.texture==='saturn'?2:nativeStyles[planet.kind]??1;
+  const homeSurface=Boolean(planet.proceduralSurface || (!mapped && (planet.home || planet.homeId)));
+  const style=appearance?.surfaceStyle ?? (mapped||homeSurface?0:nativeStyle);
   // Three exactly representable integer coordinates retain every bit of the
-  // 32-bit saved seed; the older shader's seed%1000 stays untouched for v1.
+  // 32-bit saved seed in the material domain.
   const surfaceSeed=planet.seed>>>0;
   const seedOffset=new THREE.Vector3(surfaceSeed&2047,(surfaceSeed>>>11)&2047,surfaceSeed>>>22);
   return new THREE.ShaderMaterial({
-    uniforms:{...stellarLightingUniforms(),...planetRingShadowUniforms(),hasRegolithMap:{value:appearance?.family === 'cratered' && Boolean(textures.moon)},surfaceStyle:{value:appearance?.surfaceStyle ?? 0},detailScale:{value:appearance?.detailScale ?? 1},appearanceA:{value:new THREE.Color(appearance?.colorA ?? planet.colorA)},appearanceB:{value:new THREE.Color(appearance?.colorB ?? planet.colorB)},visibility:{value:1},surface:{value:textures[textureKey]||textures.moon},hasSurface:{value:Boolean(textureKey&&textures[textureKey])},proceduralSurface:{value:Boolean(planet.proceduralSurface)},seedOffset:{value:seedOffset},bodyRadius:{value:planet.radius},paletteMix:{value:planet.paletteMix || 0},colorA:{value:new THREE.Color(planet.colorA)},colorB:{value:new THREE.Color(planet.colorB)},kind:{value:kinds[planet.kind]??0},seed:{value:planet.seed%1000},lightDir:{value:lightDirection.clone().normalize()}},
+    uniforms:{...stellarLightingUniforms(),...planetRingShadowUniforms(),cloudTime:{value:0},hasRegolithMap:{value:regolith},surfaceStyle:{value:style},detailScale:{value:appearance?.detailScale ?? 1},appearanceA:{value:new THREE.Color(appearance?.colorA ?? planet.colorA)},appearanceB:{value:new THREE.Color(appearance?.colorB ?? planet.colorB)},visibility:{value:1},surface:{value:mapped?textures[textureKey]:regolith?textures.moon:null},hasSurface:{value:mapped},proceduralSurface:{value:homeSurface},seedOffset:{value:seedOffset},bodyRadius:{value:planet.radius},paletteMix:{value:planet.paletteMix || 0},colorA:{value:new THREE.Color(planet.colorA)},colorB:{value:new THREE.Color(planet.colorB)},kind:{value:kinds[planet.kind]??0},seed:{value:planet.seed%1000},lightDir:{value:lightDirection.clone().normalize()}},
     vertexShader:sphereVertex,
     fragmentShader:/* glsl */`
-      uniform bool hasRegolithMap;uniform int surfaceStyle;uniform float detailScale;uniform vec3 appearanceA,appearanceB;
-      uniform sampler2D surface;uniform bool hasSurface,proceduralSurface;uniform vec3 colorA,colorB,lightDir,seedOffset;uniform int kind;uniform float seed,paletteMix,bodyRadius;
-      varying vec3 vLocal,vNormalWorld,vWorld,vCenter;varying vec2 vUV;${noise}${visibilityDiscard}${stellarLightingGLSL}${planetRingShadowGLSL}
+      uniform int surfaceStyle;uniform float detailScale;uniform vec3 appearanceA,appearanceB;
+      ${mapped || regolith ? 'uniform sampler2D surface;' : ''}uniform float cloudTime;uniform bool hasSurface,proceduralSurface;uniform vec3 colorA,colorB,lightDir,seedOffset;uniform int kind;uniform float seed,paletteMix,bodyRadius;
+      varying vec3 vLocal,vNormalWorld,vWorld,vCenter;varying vec2 vUV;${noise}${gasCloudGLSL}${visibilityDiscard}${stellarLightingGLSL}${planetRingShadowGLSL}
       vec3 geologicalNormal(float height,vec3 normal){
         vec3 sx=dFdx(vWorld),sy=dFdy(vWorld);
         vec3 bx=cross(sy,normal),by=cross(normal,sx);
@@ -46,6 +55,7 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
       void main(){
         applyVisibility();
         vec3 p=normalize(vLocal),n=normalize(vNormalWorld),view=normalize(cameraPosition-vWorld);
+        float surfaceFootprint=max(length(dFdx(p)),length(dFdy(p)));
         vec3 base;float molten=0.;float oceanMask=kind==1?1.:0.;vec3 moltenColor=vec3(0.);
         if(surfaceStyle>0){
           // 3D local coordinates keep all patterns stationary and seam-free.
@@ -54,25 +64,11 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
           float altitude=max(0.,length(cameraPosition-vCenter)-bodyRadius)/max(bodyRadius,1.);
           float closeDetail=1.-smoothstep(.035,.65,altitude);
           if(surfaceStyle<=3){
-            float warp=fbm(terrain*.8)-.5;
-            float latitude=p.y*(surfaceStyle==2?52.:32.)+warp*(surfaceStyle==3?1.4:5.);
-            float belt=.5+.5*sin(latitude+noise3(terrain*2.3)*1.5);
-            float threads=noise3(p*vec3(25.,160.,25.)+seedOffset);
-            float amount=surfaceStyle==3?.16+belt*.18:belt*.64+.12;
-            base=mix(appearanceA,appearanceB,amount)*( .88+threads*.2 );
-            if(surfaceStyle==1){
-              vec3 stormDir=normalize(vec3(sin(seedOffset.x+.7),.18,cos(seedOffset.x+.7)));
-              vec3 delta=p-stormDir;
-              float storm=exp(-dot(delta.xz,delta.xz)*58.-delta.y*delta.y*420.);
-              float swirl=.5+.5*sin(length(delta.xz)*110.+noise3(terrain*8.)*3.);
-              base=mix(base,appearanceB*(.68+swirl*.4),storm*.6);
-            }else if(surfaceStyle==3){
-              float clouds=smoothstep(.76,.9,noise3(terrain*3.+vec3(warp*3.)));
-              base=mix(base,appearanceB,clouds*.5);
-            }
-            base*=1.+(threads-.5)*closeDetail*.1;
+            base=gasClouds(p,seedOffset,appearanceA,appearanceB,surfaceStyle,cloudTime,surfaceFootprint);
           }else if(surfaceStyle<=5){
-            float land=smoothstep(.511,.521,broad+fine*.018);
+            float coastline=broad+fine*.018;
+            float shoreWidth=max(.005,fwidth(coastline)*.5);
+            float land=smoothstep(.516-shoreWidth,.516+shoreWidth,coastline);
             oceanMask=1.-land;
             float shelf=smoothstep(.49,.513,broad)-land;
             vec3 sea=appearanceA*(.8+fine*.3);
@@ -125,18 +121,27 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
             float strata=.5+.5*sin(p.y*84.+broad*12.);
             base=mix(appearanceA,appearanceB,ice)*(.83+strata*.12+fine*.13);
           }else if(surfaceStyle==8){
-            // Low contrast mineral albedo; crater relief belongs to the lighting.
-            base=mix(appearanceA,appearanceB,.4+broad*.22)*(.92+fine*.12);
-            if(hasRegolithMap){
+            // Low-lying basalt plains and brighter rough highlands share a
+            // terrain field. Impacts disturb this rock beneath the local light.
+            vec3 basinPoint=p;
+            basinPoint.xz=cloudRotation(seedOffset.x*.31)*basinPoint.xz;
+            basinPoint.yz=cloudRotation(seedOffset.y*.19)*basinPoint.yz;
+            float basinA=dot(basinPoint,vec3(.87,.44,.22));
+            float basinB=dot(basinPoint,vec3(.49,-.22,.843));
+            float basinC=dot(basinPoint,vec3(-.69,.65,-.317));
+            float basinRim=max(basinA-.73,max(basinB-.83,basinC-.88));
+            float mare=smoothstep(-.043,.055,basinRim+(broad-.5)*.16+(fine-.5)*.018);
+            base=mix(appearanceA,appearanceB,.32+broad*.42)*(.87+broad*.15+fine*.15)*(1.-.35*mare);
+            ${regolith ? /* glsl */`{
               // Reuse the already loaded lunar map for resolved regolith and
               // varied impacts, with an independent stable longitudinal phase.
               vec2 regolithUV=vec2(fract(vUV.x+seedOffset.x/2048.+seedOffset.z/1048576.),vUV.y);
               vec3 regolith=textureGrad(surface,regolithUV,dFdx(vUV),dFdy(vUV)).rgb;
               vec3 mineralTint=mix(vec3(.94),appearanceB*1.3,.32);
               base=regolith*mineralTint*(.88+broad*.24);
-            }
+            }` : ''}
             vec3 craterGradient=vec3(0.);vec3 q=p*12.+seedOffset;
-            vec3 cell=floor(q);
+            vec3 cell=floor(q);float ejecta=0.;
             for(int x=-1;x<=1;x++)for(int y=-1;y<=1;y++)for(int z=-1;z<=1;z++){
               vec3 key=cell+vec3(float(x),float(y),float(z));
               float h=hash(key);vec3 center=key+vec3(hash(key+1.),hash(key+2.),hash(key+3.));
@@ -146,6 +151,7 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
               float rimDistance=(d-r)/.045;float rim=exp(-rimDistance*rimDistance);
               float radialSlope=-.0024*2.*rimDistance*rim/.045+.0045*bowlSlope;
               float erosion=.3+.7*clamp(fine*.65+h*.35,0.,1.);
+              ejecta+=rim*(.04+.09*h)*(1.-mare*.4)-.055*(1.-bowlPhase)*h;
               craterGradient+=delta/max(d,.0001)*radialSlope*12.*.15*erosion;
             }
             // Convert the local height gradient into world-space relief using
@@ -159,8 +165,7 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
             vec3 reliefGradient=sign(determinant)*(heightX*basisX+heightY*basisY);
             vec3 reliefNormal=abs(determinant)*n-reliefGradient;
             if(dot(reliefNormal,reliefNormal)>1e-20)n=normalize(reliefNormal);
-            // Microregolith changes reflectance softly rather than painting rims.
-            base*=1.+closeDetail*(noise3(terrain*38.)-.5)*.1;
+            base*=1.+ejecta+closeDetail*(noise3(terrain*38.)-.5)*.1;
           }else if(surfaceStyle==9){
             float basin=smoothstep(.33,.7,broad);
             float dunes=.5+.5*sin(p.x*120.+p.z*42.+broad*17.);
@@ -182,7 +187,7 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
         }
         else if(proceduralSurface){
           // Local sphere coordinates pin coastlines and bands to this sphere.
-          // No view direction, clock or mutable scene state enters the pattern.
+          // Saved home-world terrain retains its recorded seed and palette.
           vec3 terrain=p*5.1+seedOffset;
           if(kind==1){
             float land=fbm(terrain)+.12*(noise3(terrain*3.1)-.5);
@@ -196,35 +201,21 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
             float clouds=smoothstep(.72,.84,noise3(terrain*4.6+vec3(19.)));
             base=mix(base,vec3(.8,.87,.88),clouds*.27);
           }else if(kind==0){
-            float warp=fbm(terrain*.85)-.5;
-            float shear=noise3(terrain*2.8)-.5;
-            float fine=noise3(terrain*8.6)-.5;
-            float latitude=p.y*36.+warp*5.+shear*1.4;
-            float belts=sin(latitude+sin(latitude*.44)*.6)*.5+.5;
-            float jets=pow(max(0.,sin(latitude*2.7+fine*2.)*.5+.5),9.);
-            float wisps=noise3(vec3(p.x*22.,p.y*118.,p.z*22.)+seedOffset+vec3(warp*3.));
-            base=mix(colorA,colorB,clamp(.1+belts*.66+shear*.16+jets*.16+fine*.13,0.,1.))*(.82+.26*wisps);
-            vec3 stormDir=normalize(vec3(sin(seedOffset.x*.073+seedOffset.z*.017),sin(seedOffset.y*.11)*.25,cos(seedOffset.z*.047+seedOffset.x*.013)));
-            vec3 delta=p-stormDir;
-            float oval=exp(-dot(delta.xz,delta.xz)*65.-delta.y*delta.y*420.);
-            float eye=exp(-dot(delta.xz,delta.xz)*220.-delta.y*delta.y*1050.);
-            base=mix(base,colorB*1.08,(oval-eye)*.25);
-            base=mix(base,colorA*.84,eye*.25);
-            vec3 opposite=p+stormDir;
-            float distantOval=exp(-dot(opposite.xz,opposite.xz)*95.-opposite.y*opposite.y*600.);
-            base=mix(base,colorB*.9,distantOval*.12);
+            base=gasClouds(p,seedOffset,colorA,colorB,1,cloudTime,surfaceFootprint);
           }else{
             float relief=fbm(terrain*1.7);
             float detail=noise3(terrain*5.3);
+            float ridge=1.-abs(relief*2.-1.);
+            float bedding=.5+.5*sin((p.y+p.z*.31)*86.+relief*19.);
+            float strataWeight=1.-smoothstep(.3,1.2,surfaceFootprint*86.);
             float polar=kind==2?smoothstep(.55,.88,abs(p.y))*.32:0.;
-            base=mix(colorA,colorB,clamp(relief*.83+polar,0.,1.))*(.72+.45*detail);
+            base=mix(colorA,colorB,clamp(relief*.83+polar,0.,1.))*(.72+.45*detail+(bedding-.5)*strataWeight*.15);
+            n=geologicalNormal(ridge*ridge*.00065+detail*.00018+bedding*.00006*strataWeight,n);
           }
         }
-        else if(hasSurface){base=texture2D(surface,vUV).rgb;if(kind==1)oceanMask=smoothstep(.015,.12,base.b-max(base.r,base.g)*.85);if(kind==2)base=mix(base,base*vec3(.78,.9,1.1),.45);}
-        else if(kind==4){float f=fbm(p*5.+seed);float crack=pow(1.-abs(sin(f*32.)),23.);base=colorA*.25+colorB*crack*3.;}
-        else{base=mix(colorA,colorB,smoothstep(.25,.75,fbm(p*16.+seed)));}
-        // Photographic maps remain authoritative at orbital distances. Resolve
-        // additional stationary cloud structure continuously near the surface.
+        ${mapped ? /* glsl */`else if(hasSurface){base=texture2D(surface,vUV).rgb;if(kind==1)oceanMask=smoothstep(.015,.12,base.b-max(base.r,base.g)*.85);if(kind==2)base=mix(base,base*vec3(.78,.9,1.1),.45);}` : ''}
+        else{base=colorA;}
+        // Narrow cloud filaments become visible on approach.
         if(kind==0){
           float altitude=max(0.,length(cameraPosition-vCenter)-bodyRadius)/max(bodyRadius,1.);
           float nearDetail=1.-smoothstep(.025,.4,altitude);
@@ -250,7 +241,7 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
             // the fully dark hemisphere needs no eclipse/ring ray queries.
             if(horizon<=0.)continue;
             float diffuse=stellarDiffuse(dot(n,direction),angularRadius);
-            float transmission=stellarTransmission(point,i)*planetRingTransmission(point,i,bodyRadius);
+            float transmission=stellarTransmission(point,i)*planetRingTransmission(point,i,bodyRadius,surfaceFootprint);
             vec3 radiance=stellarColors[i]*stellarIntensities[i]*transmission;
             color+=base*radiance*horizon*(.045+pow(diffuse,.8)*1.15);
             if(kind==1){
@@ -267,7 +258,6 @@ export function planetMaterial(planet,{textures={},lightDirection=new THREE.Vect
           if(kind==1||kind==0)color+=vec3(.13,.27,.39)*limb*.5;
         }
         if(surfaceStyle==10)color+=moltenColor*molten*.85;
-        if(surfaceStyle==0&&kind==4&&!hasSurface)color+=colorB*pow(1.-abs(sin(fbm(p*5.+seed)*32.)),23.)*.3;
         gl_FragColor=vec4(color,visibility);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
@@ -303,12 +293,13 @@ export function ringMaterial(color,seed,{texture=null,planetRadius=1,lightDirect
   return new THREE.ShaderMaterial({uniforms:{...stellarLightingUniforms(),visibility:{value:1},tint:{value:new THREE.Color(color)},ringMap:{value:texture},useMap:{value:Boolean(texture)},seed:{value:seed%100},planetCenter:{value:new THREE.Vector3()},planetRadius:{value:planetRadius},lightDir:{value:lightDirection.clone().normalize()}},
     vertexShader:/* glsl */`varying vec3 localPoint,worldPoint,ringNormalWorld;void main(){localPoint=position;ringNormalWorld=normalize(mat3(modelMatrix)*normal);worldPoint=(modelMatrix*vec4(position,1.)).xyz;gl_Position=projectionMatrix*viewMatrix*vec4(worldPoint,1.);}`,
     fragmentShader:/* glsl */`
-      varying vec3 localPoint,worldPoint,ringNormalWorld;uniform sampler2D ringMap;uniform bool useMap;uniform vec3 tint,planetCenter,lightDir;uniform float seed,planetRadius,visibility;
+      varying vec3 localPoint,worldPoint,ringNormalWorld;${texture ? 'uniform sampler2D ringMap;' : ''}uniform vec3 tint,planetCenter,lightDir;uniform float seed,planetRadius,visibility;
       ${stellarLightingGLSL}${ringDensityGLSL}
       void main(){
         float r=length(localPoint.xy),v=(r-1.18)/1.08;
-        float alpha=ringDensity(r,seed,ringMap,useMap);vec3 color=tint;
-        if(useMap)color=texture2D(ringMap,vec2(v,.5)).rgb;
+        float alpha=ringDensity(r,seed,fwidth(r));
+        vec3 color=tint*mix(vec3(.68,.65,.64),vec3(1.14,1.12,1.07),smoothstep(.20,.82,alpha));
+        ${texture ? 'vec4 art=texture2D(ringMap,vec2(v,.5));color=art.rgb;alpha*=art.a;' : ''}
         vec3 p=worldPoint-planetCenter;vec3 illumination=vec3(0.);
         if(stellarLighting){
           for(int i=0;i<2;i++)if(i<stellarCount){

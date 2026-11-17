@@ -161,18 +161,24 @@ test('an oblique stellar occluder never eclipses its own emitter through normali
 });
 
 const densityBody = ringDensityGLSL.match(/float ringDensity\([^)]*\)\{([\s\S]*?)\n\}/)[1];
-const density = Function('r', 'ringSeed', 'textured', 'ringTexture', 'texture2D', 'vec2', 'sin', 'smoothstep', 'abs', 'clamp', densityBody.replace(/\bfloat\b/g, 'let'));
+const density = Function('r', 'ringSeed', 'footprint', 'sin', 'smoothstep', 'abs', 'clamp', densityBody.replace(/\bfloat\b/g, 'let'));
 const smoothstep = (a, b, value) => { const t = clamp((value - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
-const opacity = (r, alpha = null) => density(r, 17, alpha !== null, null, () => ({ a: alpha }), () => null, Math.sin, smoothstep, Math.abs, clamp);
+const opacity = (r, footprint = 0) => density(r, 17, footprint, Math.sin, smoothstep, Math.abs, clamp);
 
-test('shared ring density respects actual annulus, Cassini gap and texture alpha', () => {
+test('shared native ring density respects annulus, broad gaps and radial filtering', () => {
   assert.equal(opacity(1.1), 0);
   assert.equal(opacity(2.3), 0);
   const gap = 1.18 + 1.08 * .65;
   assert.ok(opacity(gap) < .08);
   assert.ok(opacity(gap - .07) > .2);
-  assert.equal(opacity(1.6, 0), 0, 'transparent texture bands cast no shadow');
-  assert.ok(Math.abs(opacity(1.6, .4) - opacity(1.6) * .4) < 1e-12);
+  for (const v of [.222,.65,.887]) {
+    const r=1.18+1.08*v;
+    assert.ok(opacity(r,.03)<opacity(r+.03,.03),'resolved divisions survive filtering of tiny ringlets');
+  }
+  const fine=[1.72,1.73,1.74,1.75].map(r=>opacity(r));
+  const coarse=[1.72,1.73,1.74,1.75].map(r=>opacity(r,.03));
+  assert.ok(Math.max(...fine)-Math.min(...fine)>.06);
+  assert.ok(Math.max(...coarse)-Math.min(...coarse)<1e-6);
 });
 
 // Evaluate the scalar finite-disc horizon directly from its GLSL source. The

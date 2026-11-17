@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { describePlanetAppearance, PLANET_APPEARANCE_FAMILIES } from '../../src/render/planet-appearance.js';
+import { cloudFlowTime } from '../../src/render/gas-clouds.js';
 import { planetMaterial } from '../../src/render/materials.js';
 import { createUniverse } from '../../src/generator.js';
 
@@ -114,4 +115,32 @@ test('only the cratered natural family borrows the loaded regolith map',()=>{
     assert.equal(material.uniforms.hasRegolithMap.value,false);material.dispose();
   }
   assert.equal(seen.size,10);moon.dispose();
+});
+
+test('authored world descriptors choose native families when their map is absent',()=>{
+  for(const [kind,texture,style] of [['gas','saturn',2],['gas','jupiter',1],['ocean','earth',4],['rock','moon',8]]){
+    const source={...body(kind),texture},material=planetMaterial(source);
+    assert.equal(material.uniforms.surfaceStyle.value,style);
+    assert.equal(material.uniforms.hasSurface.value,false);
+    assert.equal(material.uniforms.surface.value,null);
+    assert.equal(material.uniforms.cloudTime.value,0);
+    material.dispose();
+  }
+  const home={...body('ocean'),homeId:'legacy-home',texture:'earth'},material=planetMaterial(home);
+  assert.equal(material.uniforms.proceduralSurface.value,true);
+  assert.equal(material.uniforms.colorB.value.getHex(),home.colorB);
+  material.dispose();
+});
+
+test('gas circulation keeps both wind phases continuous and freezeable at distant saved epochs',()=>{
+  const phases=seconds=>[Math.sin(seconds*.006),Math.cos(seconds*.006),Math.sin(seconds*.0042),Math.cos(seconds*.0042)];
+  const angularError=(a,b)=>Math.max(...a.map((v,i)=>Math.abs(v-b[i])));
+  const period=20*Math.PI/.006;
+  for(const t of [0,14,period-.01,period+.01,1e12-21,1e12]){
+    const frozen=Math.fround(cloudFlowTime(t));
+    assert.equal(Math.fround(cloudFlowTime(t)),frozen);
+    assert.ok(Math.abs(frozen)<period);
+    assert.ok(angularError(phases(frozen),phases(t))<6e-6);
+    assert.ok(angularError(phases(frozen),phases(Math.fround(cloudFlowTime(t-1/60))))>4e-5);
+  }
 });

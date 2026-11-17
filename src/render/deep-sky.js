@@ -11,7 +11,7 @@ export const DEEP_SKY_SPARK_FILTER = Object.freeze({
 
 // Shared directional radiance for the sky and black-hole lens. World geometry
 // owns its orientation and density; time and camera turning never reseed it.
-export const DEEP_SKY_GLSL = /* glsl */`
+export const deepSkyShader = (mapped = false) => /* glsl */`
 uniform vec3 uSkyTint;
 uniform vec3 uSkyBandNormal;
 uniform float uSkyBrightness;
@@ -20,8 +20,7 @@ uniform float uSkyStarDensity;
 uniform vec3 uSeaWeightsA,uSeaWeightsB;
 uniform mat3 uSeaFrame;
 uniform float uSeaPhase,uSeaWidth,uSeaQuiet;
-uniform sampler2D uSeaDetail;
-uniform bool uSeaHasDetail;
+${mapped ? 'uniform sampler2D uSeaDetail; uniform bool uSeaHasDetail;' : ''}
 uniform mat3 uSkyPanoramaFrame;
 uniform float uSkyPanoramaStrength;
 uniform vec3 uSeaMorphA,uSeaMorphB,uSeaMorphC,uSeaMorphD,uSeaMorphE,uSeaMorphF;
@@ -35,7 +34,7 @@ float skyNoise(vec3 p) {
 }
 // GLSL pow has no defined negative-base domain, including exponent 2.0.
 float seaSquare(float value) { return value*value; }
-vec2 skyCatalogUv(vec3 galactic) {
+${mapped ? /* glsl */`vec2 skyCatalogUv(vec3 galactic) {
   vec3 equatorial=mat3(-.05487556,-.87343709,-.48383502,
     .49410943,-.44482963,.74698224,-.86766615,-.19807637,.45598378)*galactic;
   float longitude=dot(equatorial.xy,equatorial.xy)>.0000001?atan(equatorial.y,equatorial.x):0.;
@@ -45,7 +44,7 @@ vec3 skyCatalog(vec3 galactic) {
   vec2 uv=skyCatalogUv(galactic),uvDx=dFdx(uv),uvDy=dFdy(uv);
   uvDx.x-=floor(uvDx.x+.5);uvDy.x-=floor(uvDy.x+.5);
   return textureGrad(uSeaDetail,uv,uvDx,uvDy).rgb;
-}
+}` : ''}
 
 // Eighteen spatial building blocks share seeded population, erosion and light.
 // Their controls are interpolated in world space, never chosen by a screen or clock.
@@ -61,7 +60,7 @@ vec3 stellarSea(vec3 direction) {
   micro=mix(micro,.5,smoothstep(.5,1.4,length(fwidth(d*811.))));
   float grain=broad*.34+middle*.3+fine*.22+micro*.14;
   float stellarGrain=.7+micro*.6;
-  if(uSeaHasDetail){
+  ${mapped ? /* glsl */`if(uSeaHasDetail){
     // Borrow only filtered high-frequency stellar grain. The catalogue's
     // recognizable Galactic panorama must never determine another galaxy's shape.
     vec3 galactic=normalize(d+vec3(uSeaOffset.xy*.013,0.));
@@ -70,7 +69,7 @@ vec3 stellarSea(vec3 direction) {
     float lowFrequency=dot(textureLod(uSeaDetail,uv,5.).rgb,vec3(.2126,.7152,.0722));
     float grainRatio=dot(catalog,vec3(.2126,.7152,.0722))/max(lowFrequency,.003);
     stellarGrain*=mix(.8,1.2,clamp(grainRatio*.5,0.,1.));
-  }
+  }` : ''}
   float stretch=uSeaShape.x,warp=uSeaShape.y,core=uSeaShape.z,spread=uSeaShape.w;
   float arms=uSeaStructure.x,pitch=uSeaStructure.y,clump=uSeaStructure.z,asymmetry=uSeaStructure.w;
   float width=uSeaWidth*(.65+spread*.5);
@@ -214,6 +213,73 @@ vec3 stellarSea(vec3 direction) {
     +uSeaWarm*nucleus*(.5+core)+uSeaAccent*youngKnots*.65;
   return radiance*uSeaState.y*uSeaState.z*uSeaQuiet;
 }
+// Galactic +X faces the central bulge and +Z is north. Nearby dusty arms
+// cross older stars along the plane, with knots seen through irregular gaps.
+// Fixed cube-face star cells. Widen a Gaussian with the projected pixel
+// footprint, conserving its energy; unresolved cells converge to a mean.
+float classicStars(vec2 plane,float face,float scale,float pixel,float population){
+  vec2 grid=plane*scale;
+  vec3 cell=vec3(floor(grid),face+scale);
+  float pick=skyHash(cell);
+  vec2 center=.16+.68*vec2(skyHash(cell+7.1),skyHash(cell+19.7));
+  vec2 v=fract(grid)-center;
+  float radius=.022+.048*skyHash(cell+11.2);
+  float variance=radius*radius;
+  float filterWidth=pixel*scale;
+  float filtered=variance+filterWidth*filterWidth*.11;
+  float individual=step(1.-population,pick)*exp(-dot(v,v)/(2.*filtered))*variance/filtered;
+  return mix(individual,6.28318*.002308*population,smoothstep(.55,1.3,filterWidth));
+}
+vec3 classicMilkyWay(vec3 d){
+  vec3 q=d+vec3(1.71,4.08,2.63);
+  float grain=skyNoise(q*4.9);
+  float cloud=skyNoise(q*15.+grain*2.8);
+  float filaments=skyNoise(q*48.+vec3(cloud,grain,-cloud)*3.1);
+  float pixel=length(fwidth(d));
+  float midplane=d.z+.032*d.y+.024*(grain-.5);
+  float towardCore=max(d.x,0.);
+  float core=exp(-5.2*(1.-d.x)-seaSquare((d.z+.015)/.23));
+  float disc=exp(-abs(midplane)/(.068+.047*towardCore));
+  float envelope=exp(-seaSquare(midplane/(.23+.09*towardCore)));
+  float terrain=skyNoise(q*38.+vec3(cloud,grain,cloud)*5.);
+  float detail=skyNoise(q*94.+terrain*3.4);
+  float wisps=skyNoise(q*244.+detail*2.8);
+  wisps=mix(wisps,.5,smoothstep(.35,1.1,pixel*244.));
+  float matter=.38*grain+.27*cloud+.19*terrain+.10*detail+.06*wisps;
+  float lane=midplane-.024-(grain-.5)*.13-(cloud-.5)*.072-(terrain-.5)*.038-(detail-.5)*.016;
+  float fork=lane-.056-.045*d.y-(cloud-.5)*.09-(filaments-.5)*.043;
+  float mainRift=exp(-seaSquare(lane/(.017+.033*grain)));
+  float splitRift=exp(-seaSquare(fork/(.009+.023*cloud)));
+  float clump=.38*cloud+.29*terrain+.21*detail+.12*wisps;
+  float broken=smoothstep(.24,.73,clump);
+  float depth=((mainRift+splitRift*.74)*(.26+4.4*broken)
+    +envelope*smoothstep(.45,.71,matter)*1.9)*(.45+.55*towardCore);
+  float pockets=skyNoise(q*107.+vec3(filaments,terrain,cloud)*5.);
+  depth*=.64+.48*pockets+.43*wisps;
+  vec3 extinction=exp(-vec3(.84,1.06,1.3)*depth);
+  float starCloud=.22+2.45*smoothstep(.25,.75,matter);
+  float knots=disc*smoothstep(.46,.74,cloud)*smoothstep(.45,.76,filaments);
+  vec3 absD=abs(d);
+  vec2 plane;float face;
+  if(absD.x>absD.y&&absD.x>absD.z){plane=d.yz/absD.x;face=sign(d.x);}
+  else if(absD.y>absD.z){plane=d.zx/absD.y;face=3.*sign(d.y);}
+  else{plane=d.xy/absD.z;face=5.*sign(d.z);}
+  float footprint=pixel/max(absD.x,max(absD.y,absD.z));
+  float population=.055+.53*disc+.20*core;
+  float stars=classicStars(plane,face,78.,footprint,population)*.87
+    +classicStars(plane,face,248.,footprint,population)*1.15;
+  float speck=skyNoise(q*620.);
+  speck=mix(speck,.5,smoothstep(.5,1.7,pixel*620.));
+  vec3 oldStars=vec3(.47,.31,.20)*core*(.62+.78*matter);
+  vec3 arms=mix(vec3(.115,.137,.168),vec3(.29,.247,.203),towardCore)*disc*starCloud;
+  vec3 light=(oldStars+arms+vec3(.18,.19,.21)*knots)*extinction*(.68+.64*speck);
+  float cluster=smoothstep(.47,.82,.53*pockets+.31*wisps+.16*speck);
+  light*=.82+.35*wisps+.16*(pockets-.5);
+  light+=vec3(.12,.14,.18)*disc*cluster*extinction;
+  vec3 unresolved=vec3(.009,.011,.015)*envelope*starCloud;
+  vec3 points=vec3(1.,.94,.88)*stars*mix(vec3(.16),extinction,.84);
+  return vec3(.0016,.0021,.0034)+light+unresolved+points;
+}
 vec3 deepSky(vec3 direction) {
   vec3 d=normalize(direction);
   vec3 sky=uSkyTint*uSkyBrightness*.055;
@@ -247,12 +313,16 @@ vec3 deepSky(vec3 direction) {
   }
   sky+=vec3(.55,.63,.7)*filteredSpark*.22;
   sky+=stellarSea(d);
-  // A caller may retain one observational panorama in its own fixed region.
-  // The same world direction is used by the visible sky and lensing shader.
-  if(uSkyPanoramaStrength>0.&&uSeaHasDetail)
-    sky=mix(sky,skyCatalog(normalize(uSkyPanoramaFrame*d)),uSkyPanoramaStrength);
+  if(uSkyPanoramaStrength>0.){
+    vec3 galactic=normalize(uSkyPanoramaFrame*d);
+    vec3 panorama=${mapped ? 'uSeaHasDetail ? skyCatalog(galactic) : ' : ''}classicMilkyWay(galactic);
+    sky=mix(sky,panorama,uSkyPanoramaStrength);
+  }
   return sky;
 }`;
+
+// Raw GLSL historically supported caller-supplied detail maps in custom materials.
+export const DEEP_SKY_GLSL = deepSkyShader(true);
 
 // Defaults retain the public pre-profile starSea descriptor contract. New
 // callers supply all appearance controls; the renderer only copies their data.
@@ -312,7 +382,7 @@ export function createDeepSky({detailTexture = null} = {}) {
   const geometry = new THREE.SphereGeometry(100000,32,20);
   const material = new THREE.ShaderMaterial({uniforms:deepSkyUniforms({detailTexture}),
     vertexShader:'varying vec3 skyDirection;void main(){skyDirection=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
-    fragmentShader:`varying vec3 skyDirection;${DEEP_SKY_GLSL}\nvoid main(){gl_FragColor=vec4(deepSky(skyDirection),1.);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}`,
+    fragmentShader:`varying vec3 skyDirection;${deepSkyShader(Boolean(detailTexture))}\nvoid main(){gl_FragColor=vec4(deepSky(skyDirection),1.);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}`,
     side:THREE.BackSide,depthWrite:false,depthTest:false});
   const group=new THREE.Group(),mesh=new THREE.Mesh(geometry,material);mesh.renderOrder=-1000;mesh.frustumCulled=false;group.add(mesh);
   let disposed=false;

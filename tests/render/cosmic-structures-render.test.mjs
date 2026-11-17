@@ -56,10 +56,10 @@ test('scene-depth handshake carries the active target dimensions and camera with
     let geometries = 0, materials = 0, textures = 0;
     mesh.geometry.addEventListener('dispose', () => geometries++);
     for (const volume of cosmos.children[1].children) volume.material.addEventListener('dispose', () => materials++);
-    uniforms.structureNoise.value.addEventListener('dispose', () => textures++);
+    depth.addEventListener('dispose', () => textures++);
     const materialCount = cosmos.children[1].children.length;
     cosmos.userData.dispose(); cosmos.userData.dispose();
-    assert.equal(geometries, 1); assert.equal(materials, materialCount); assert.equal(textures, 1);
+    assert.equal(geometries, 1); assert.equal(materials, materialCount); assert.equal(textures, 0);
   } finally { cosmos.userData.dispose(); depth.dispose(); }
 });
 

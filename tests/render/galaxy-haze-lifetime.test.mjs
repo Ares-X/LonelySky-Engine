@@ -66,9 +66,9 @@ test('shrinking releases only removed slots, growing has no hidden pool, and emp
   const releases = new Map();
   const watch = mesh => {const material = mesh.material; releases.set(material, 0); material.addEventListener('dispose', () => releases.set(material, releases.get(material) + 1));};
   haze.userData.setDescriptors([base, other, changed]);
-  const original = [...haze.children], geometry = original[0].geometry, noise = original[0].material.uniforms.structureNoise.value;
-  let geometryReleases = 0, noiseReleases = 0;
-  geometry.addEventListener('dispose', () => geometryReleases++); noise.addEventListener('dispose', () => noiseReleases++);
+  const original = [...haze.children], geometry = original[0].geometry;
+  let geometryReleases = 0;
+  geometry.addEventListener('dispose', () => geometryReleases++);
   for (const mesh of original) watch(mesh);
   try {
     haze.userData.setDescriptors([other]);
@@ -80,11 +80,11 @@ test('shrinking releases only removed slots, growing has no hidden pool, and emp
     for (const mesh of haze.children.slice(1)) {assert.ok(!original.includes(mesh)); watch(mesh);}
     haze.userData.setDescriptors([]);
     assert.equal(haze.children.length, 0); assert.ok([...releases.values()].every(n => n === 1));
-    assert.equal(geometryReleases, 0); assert.equal(noiseReleases, 0);
+    assert.equal(geometryReleases, 0);
     haze.userData.setDescriptors([base]); watch(haze.children[0]);
-    assert.equal(haze.children[0].geometry, geometry); assert.equal(haze.children[0].material.uniforms.structureNoise.value, noise);
+    assert.equal(haze.children[0].geometry, geometry);
   } finally {haze.userData.dispose(); haze.userData.dispose();}
   haze.userData.setDescriptors([base]);
   assert.equal(haze.children.length, 0); assert.ok([...releases.values()].every(n => n === 1));
-  assert.equal(geometryReleases, 1); assert.equal(noiseReleases, 1);
+  assert.equal(geometryReleases, 1);
 });

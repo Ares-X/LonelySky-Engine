@@ -22,24 +22,20 @@ function camera() {
   return result;
 }
 
-test('nebula instances share noise until the last owner is disposed', () => {
+test('nebula materials keep independent seeds, visibility and integration quality', () => {
   const a = createNebula({ seed: 'dust-a' }), b = createNebula({ seed: 'dust-b' });
-  const noise = a.children[0].material.uniforms.uNoise.value;
-  const released = disposalCount(noise);
-  assert.equal(b.children[0].material.uniforms.uNoise.value, noise);
+  const first = a.children[0], second = b.children[0];
+  const geometryReleased = disposalCount(first.geometry), materialReleased = disposalCount(first.material);
   try {
+    assert.notDeepEqual(first.material.uniforms.uNoiseOffset.value, second.material.uniforms.uNoiseOffset.value);
     a.userData.update(camera(), 1, { quality: 'low', visibility: .4 });
     assert.equal(a.userData.stats.steps, 16);
-    assert.equal(a.children[0].material.uniforms.uVisibility.value, .4);
+    assert.equal(first.material.uniforms.uVisibility.value, .4);
     a.userData.dispose(); a.userData.dispose();
-    assert.equal(released(), 0);
+    assert.equal(geometryReleased(), 1); assert.equal(materialReleased(), 1);
     b.userData.update(camera(), 2, { quality: 'high' });
     assert.equal(b.userData.stats.steps, 48);
-    b.userData.dispose(); b.userData.dispose();
-    assert.equal(released(), 1);
-    const next = createNebula();
-    try { assert.notEqual(next.children[0].material.uniforms.uNoise.value, noise); }
-    finally { next.userData.dispose(); }
+    assert.equal(second.material.uniforms.uVisibility.value, 1);
   } finally { a.userData.dispose(); b.userData.dispose(); }
 });
 
@@ -127,27 +123,23 @@ test('cosmos streaming bounds allocations, avoids stationary rebuilds and releas
   } finally { cosmos.userData.dispose(); }
 });
 
-test('haze replacement retains current materials and noise until final disposal', () => {
+test('haze replacement retains current materials until final disposal', () => {
   const haze = createGalaxyHaze({ seed: 'haze-fixture' });
   const descriptor = loadedMacros(0, 'haze-fixture')[0];
   assert.ok(descriptor);
   try {
     haze.userData.setDescriptors([descriptor]);
     const original = haze.children[0], materialReleased = disposalCount(original.material);
-    const noise = original.material.uniforms.structureNoise.value, noiseReleased = disposalCount(noise);
     const geometryReleased = disposalCount(original.geometry);
     haze.userData.setDescriptors([descriptor]);
     assert.equal(haze.children[0], original);
     assert.equal(materialReleased(), 0);
-    assert.equal(haze.children[0].material.uniforms.structureNoise.value, noise);
-    assert.equal(noiseReleased(), 0);
     assert.equal(geometryReleased(), 0);
     const finalMaterialReleased = disposalCount(haze.children[0].material);
     haze.userData.dispose(); haze.userData.dispose();
     assert.equal(materialReleased(), 1);
     assert.equal(finalMaterialReleased(), 1);
     assert.equal(geometryReleased(), 1);
-    assert.equal(noiseReleased(), 1);
     assert.equal(haze.children.length, 0);
   } finally { haze.userData.dispose(); }
 });

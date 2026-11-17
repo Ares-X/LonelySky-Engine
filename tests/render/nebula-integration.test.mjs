@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createHash} from 'node:crypto';
 import * as THREE from 'three';
 import {createNebula} from '../../src/render/nebula.js';
 
 const smoothstep=(a,b,x)=>{const t=Math.max(0,Math.min(1,(x-a)/(b-a)));return t*t*(3-2*t);};
 function withShader(check) {
   const nebula=createNebula();
-  try {check(nebula.children[0].material.fragmentShader,nebula.children[0].material.uniforms.uNoise.value);}
+  try {check(nebula.children[0].material.fragmentShader);}
   finally {nebula.userData.dispose();}
 }
 
@@ -37,21 +36,6 @@ test('paired ray cells conserve constant light and integrate cubic variation exa
       assert.ok(Math.abs(integral-1/(power+1))<1e-10,'known polynomial integrals protect the uploaded ray rule');
     }
   }
-}));
-
-test('shared cloud noise retains a bounded mip chain for pixel and ray filtering',()=>withShader((shader,texture)=>{
-  assert.equal(texture.image.width,64);assert.equal(texture.image.height,64);assert.equal(texture.image.depth,64);
-  assert.equal(texture.image.data.byteLength,64**3);
-  assert.equal(texture.generateMipmaps,true);assert.equal(texture.minFilter,THREE.LinearMipmapLinearFilter);
-  assert.equal(texture.magFilter,THREE.LinearFilter);
-}));
-
-test('first-owner noise optimization preserves every approved candidate tile byte',()=>withShader((shader,texture)=>{
-  // Captured from the original uncached 64³ algorithm at the fixed tile seed
-  // 0x51a7d05. The complete tile protects periodic seams and all three octaves;
-  // caller seeds still select offsets in this same shared stationary texture.
-  assert.equal(createHash('sha256').update(texture.image.data).digest('hex'),
-    'cd0198eda09bb72ded74028c817b5253fab8f298d231ac4cfee51b4ef535b17a');
 }));
 
 // Execute the uploaded interval control flow. Vector reconstruction is supplied

@@ -35,7 +35,7 @@ test('appearance leaves seeded geometry, stationary noise and legacy defaults in
     assert.equal(uniforms(legacy).uColorA.value.getHex(), 0x123456);
     assert.equal(uniforms(legacy).uExtinction.value, 1);
     assert.equal(uniforms(styled).uAppearance.value, 4);
-    for (const key of ['uMorphology', 'uNoise', 'uNoiseOffset']) {
+    for (const key of ['uMorphology', 'uNoiseOffset']) {
       assert.deepEqual(uniforms(styled)[key].value, uniforms(legacy)[key].value);
     }
     assert.deepEqual(styled.children[0].position, legacy.children[0].position);
@@ -67,18 +67,4 @@ test('caller coefficients stay finite and bounded and dark clouds cannot gain em
     assert.ok(uniforms(dark).uScattering.value <= .035);
     assert.ok(uniforms(dark).uRimStrength.value <= .015);
   } finally { extreme.userData.dispose(); dark.userData.dispose(); }
-});
-
-test('appearance shares the existing noise and releases each owned resource once', () => {
-  const a = createNebula({ appearance: describeNebulaAppearance({ seed: 'a', morphology: 'shell' }) });
-  const b = createNebula({ appearance: describeNebulaAppearance({ seed: 'b', morphology: 'rift' }) });
-  const noise = uniforms(a).uNoise.value;
-  const resources = [a.children[0].geometry, a.children[0].material, noise];
-  const counts = resources.map(() => 0);
-  resources.forEach((resource, i) => resource.addEventListener('dispose', () => counts[i]++));
-  assert.equal(uniforms(b).uNoise.value, noise);
-  a.userData.dispose(); a.userData.dispose();
-  assert.deepEqual(counts, [1, 1, 0]);
-  b.userData.dispose(); b.userData.dispose();
-  assert.deepEqual(counts, [1, 1, 1]);
 });
