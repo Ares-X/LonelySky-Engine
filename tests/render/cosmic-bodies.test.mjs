@@ -36,9 +36,42 @@ test('physical solids carry the catalogue bounds and every independent breach in
   } finally { group.userData.dispose(); }
 });
 
+test('uploaded wall clearances retain grazing hit distances as a camera skims a large tilted ring', () => {
+  const {group, body, camera, update} = fixture();
+  const radius = 3321532, inner = radius - 1923;
+  body.radius = radius;
+  body.frame = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromEuler(
+    new THREE.Euler(.42, -.81, 1.2))).toArray();
+  body.shape.parts[0].innerRadius = inner;
+  body.shape.parts[0].outerRadius = radius + 1923;
+  body.shape.parts[1].innerRadius = inner - 866;
+  body.shape.parts[1].outerRadius = radius + 2596;
+  const toWorld = new THREE.Matrix3().fromArray(body.frame).transpose();
+  try {
+    for (const altitude of [15, 80]) {
+      const rho = inner - altitude;
+      const local = new THREE.Vector3(rho * Math.cos(2.3), -9610, rho * Math.sin(2.3));
+      body.center = local.applyMatrix3(toWorld).negate().toArray();
+      camera.lookAt(camera.position.clone().add(new THREE.Vector3(...body.center)));
+      update();
+      const walls = group.children[0].material.uniforms.uCameraWallC.value;
+      for (const [i, part] of body.shape.parts.entries()) {
+        for (const [side, wall] of [part.innerRadius, part.outerRadius].entries()) {
+          // A horizontal tangent reaches an enclosing cylinder at this chord
+          // length. A camera outside the cylinder must miss both tangent rays.
+          const squaredChord = -Math.fround(walls[i].getComponent(side)) * radius ** 2;
+          const reference = (wall - rho) * (wall + rho);
+          assert.equal(Math.sign(squaredChord), Math.sign(reference));
+          if (reference > 0) assert.ok(Math.abs(Math.sqrt(squaredChord) - Math.sqrt(reference)) < .05);
+        }
+      }
+    }
+  } finally { group.userData.dispose(); }
+});
+
 test('optional surface ports follow their current body without leaking across reused slots', () => {
   const {group,body,camera}=fixture();
-  const port={along:-12000,across:3400,angle:Math.PI/3,size:[3000,1200]};
+  const port={along:-12000,across:3400,angle:Math.PI/3,size:[3000,1200],terrainReferenceRadius:250000};
   body.habitatPort=port;
   try {
     group.userData.update({body,camera,viewportHeight:720});
@@ -47,6 +80,7 @@ test('optional surface ports follow their current body without leaking across re
     assert.equal(u.uHasHabitatPort.value,true);
     assert.deepEqual(u.uHabitatSize.value.toArray(),[3000,1200]);
     assert.deepEqual(portUniform.toArray(),[-12000,3400]);
+    assert.equal(u.uHabitatTerrainReferenceRadius.value,250000);
     assert.ok(u.uHabitatPortAxes.value.distanceTo(new THREE.Vector2(.5,Math.sqrt(3)/2))<1e-12);
     const sections=u.uSections.value.map(section=>section.toArray());
     const replacement={...body,habitatPort:undefined};
@@ -60,6 +94,7 @@ test('optional surface ports follow their current body without leaking across re
     const unrotated={...body,habitatPort:{along:0,across:0,size:[400,200]}};
     group.userData.update({body:unrotated,camera,viewportHeight:720});
     assert.deepEqual(u.uHabitatPortAxes.value.toArray(),[1,0],'omitted angle restores the default port axes');
+    assert.equal(u.uHabitatTerrainReferenceRadius.value,body.radius,'an ordinary port retains the original terrain coordinates');
     assert.deepEqual(body.habitatPort,port);
   } finally {group.userData.dispose();}
 });
@@ -90,7 +125,7 @@ test('the physical ray remains correct after camera rotation, floating-origin mo
   try {
     update();
     const u = group.children[0].material.uniforms;
-    const centreUniform = u.uBodyCenter.value, cameraUniform = u.uCameraRotation.value, sections = u.uSections.value;
+    const originUniform = u.uBodyOrigin.value, cameraUniform = u.uCameraRotation.value, sections = u.uSections.value;
     const direction = new THREE.Vector3(0, 0, 1).applyMatrix4(u.uInverseProjection.value).normalize().applyMatrix3(u.uCameraRotation.value);
     const expected = camera.getWorldDirection(new THREE.Vector3());
     assert.ok(direction.distanceTo(expected) < 1e-12);
@@ -99,8 +134,8 @@ test('the physical ray remains correct after camera rotation, floating-origin mo
     camera.position.addScalar(9000000);camera.lookAt(0, 0, 0);body.center[0] -= 9000000;
     group.userData.update({ body, camera, viewportHeight: 1440, pixelRatio: 1.25 });
     assert.equal(u.uPixelAngle.value, oldSize / 2);
-    assert.equal(u.uBodyCenter.value.x, -7);
-    assert.equal(u.uBodyCenter.value, centreUniform);
+    assert.equal(u.uBodyOrigin.value.x, 7);
+    assert.equal(u.uBodyOrigin.value, originUniform);
     assert.equal(u.uCameraRotation.value, cameraUniform);
     assert.equal(u.uSections.value, sections, 'stable update workspaces');
     assert.equal(group.children[0].frustumCulled, false, 'physical 4M distance is never clipped as a small proxy mesh');

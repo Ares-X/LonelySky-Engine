@@ -178,6 +178,14 @@ are not real mountains. The stellar surface models a restrained photosphere,
 not false-color chromospheric imagery. Texture inputs are optional host assets;
 the engine does not package a game's art or reference photographs.
 
+For camera rays close to a cylindrical ring wall, the renderer computes the
+camera's squared radial clearance for each wall in CPU double precision. The
+fragment solver uses it for both quadratic roots. Surface-origin shadow rays
+and distant camera rays use their own projected closest approach. A WebGL 2
+SwiftShader probe at radius 3,321,532 compared 234 camera rays against the
+analytic intersections at clearances of 15, 30 and 80 units. The largest
+hit-distance error was 0.45 units.
+
 At million-unit radii, float32 intersection error is measurable even with
 reversed Float32 depth. In the tested 1M-radius scene, a camera at 0.55 units
 from the surface with a 0.5-unit near plane can miss the near face; separations
