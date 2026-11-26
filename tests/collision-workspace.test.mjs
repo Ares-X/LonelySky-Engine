@@ -1,13 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCollisionWorld } from '../src/collision.js';
-import {solidDistance} from '../src/solid-geometry.js';
 import { encodeCell } from '../src/coordinates.js';
+import {createRingHabitatRegions} from '../src/ring-habitat-regions.js';
+import {solidDistance} from '../src/solid-geometry.js';
 
 const h = 1 / 120;
 const orbiting = (extra = {}) => ({ id: 'moon', type: 'planet', radius: 10, position: [0, 0, 0],
   orbit: { semiMajorAxis: 1000, eccentricity: 0, mu: 1e13 }, ...extra });
 const provider = bodies => index => index === 0 ? bodies : [];
+
+test('collision disposal releases real terrain registry query pins across repeated owners',async()=>{
+  const recipe={version:'halo-field-v1',siteIndex:0,innerRadius:10000,depth:100,minAngle:0,maxAngle:.0256,minY:0,maxY:256};
+  const body={id:'terrain-lifecycle',position:[0,0,0],frame:[1,0,0,0,1,0,0,0,1],habitat:{terrainRecipes:[recipe]}};
+  const registry=createRingHabitatRegions({parentsInBounds:()=>[body],createField:r=>({statistics:{accountedBytes:256},innerRadius:r.innerRadius,minAngle:r.minAngle,minY:r.minY,bounds:{minX:0,minY:0,maxX:256,maxY:256},hmin:40,hmax:40,
+    position(x,y,out){const a=x/10000;out[0]=9960*Math.cos(a);out[1]=y;out[2]=9960*Math.sin(a);return out;},normal(x,y,out){const a=x/10000;out[0]=-Math.cos(a);out[1]=0;out[2]=-Math.sin(a);return out;}})});
+  const angle=128/10000,position=[9940*Math.cos(angle),128,9940*Math.sin(angle)],bounds={min:position.map(n=>n-10),max:position.map(n=>n+10)};
+  const ready=await registry.prepare(0,bounds);ready.release();let releases=0;
+  const world={sector:()=>[],createSolidQueryWorkspace:()=>registry.createQueryWorkspace(),collisionSolidsInBounds:(i,b,w)=>registry.query(i,b,w),releaseSolidQueryWorkspace(w){releases++;registry.releaseQuery(w);}};
+  try{
+    for(let i=0;i<40;i++){
+      const collision=createCollisionWorld({world,shipRadius:7});
+      try{assert.equal(collision.ensureSafe(0,position,[0,0,0]).corrected,false);assert.equal(registry.stats.queryWorkspaces,1);assert.equal(registry.stats.pinnedRegions,1);}
+      finally{collision.dispose();collision.dispose();}
+      assert.equal(releases,i+1);assert.equal(registry.stats.queryWorkspaces,0);assert.equal(registry.stats.pinnedRegions,0);assert.equal(collision.cacheSize,0);
+      assert.throws(()=>collision.ensureSafe(0,position,[0,0,0]),/Collision world disposed/);
+      assert.throws(()=>collision.move(0,position,position,[0,0,0]),/Collision world disposed/);
+      assert.throws(()=>collision.bodies(0),/Collision world disposed/);
+    }
+  }finally{registry.dispose();}
+  assert.equal(registry.stats.accountedBytes,0);
+});
+
+test('collision construction validates before acquiring external query owners and legacy disposal remains supported',()=>{
+  let created=0;const world={sector:()=>[],createSolidQueryWorkspace(){created++;return {};}};
+  for(const options of [{shipRadius:NaN},{shipRadius:-1},{solidSweepBudget:0}])assert.throws(()=>createCollisionWorld({world,...options}),RangeError);
+  assert.equal(created,0);
+  const legacy=createCollisionWorld({world});assert.deepEqual(legacy.ensureSafe(0,[0,0,0],[0,0,0]).position,[0,0,0]);legacy.dispose();legacy.dispose();assert.equal(created,1);
+});
+
+test('a failed release is explicit, clears CPU ownership and is not replayed',()=>{
+  const failure=new Error('release failed'),workspace={};let releases=0;
+  const collision=createCollisionWorld({world:{sector:()=>[],createSolidQueryWorkspace:()=>workspace,releaseSolidQueryWorkspace(w){assert.equal(w,workspace);releases++;throw failure;}}});
+  collision.bodies(0);assert.ok(collision.cacheSize>0);
+  assert.throws(()=>collision.dispose(),e=>e===failure);assert.equal(collision.cacheSize,0);collision.dispose();assert.equal(releases,1);
+  assert.throws(()=>collision.bodies(0),/Collision world disposed/);
+});
 
 // Public snapshots and separate caller outputs may remain live while this
 // instance services other moves and body queries.
@@ -137,22 +175,6 @@ test('unrecoverable initial overlap preserves inputs and marks the endpoint unsa
   assert.equal(out.failure.safeAtStart, false);
   assert.deepEqual(out.position, expectedPosition); assert.deepEqual(out.velocity, expectedVelocity);
 });
-
-test('collision construction validates before acquiring external query owners and legacy disposal remains supported',()=>{
-  let created=0;const world={sector:()=>[],createSolidQueryWorkspace(){created++;return {};}};
-  for(const options of [{shipRadius:NaN},{shipRadius:-1},{solidSweepBudget:0}])assert.throws(()=>createCollisionWorld({world,...options}),RangeError);
-  assert.equal(created,0);
-  const legacy=createCollisionWorld({world});assert.deepEqual(legacy.ensureSafe(0,[0,0,0],[0,0,0]).position,[0,0,0]);legacy.dispose();legacy.dispose();assert.equal(created,1);
-});
-
-test('a failed release is explicit, clears CPU ownership and is not replayed',()=>{
-  const failure=new Error('release failed'),workspace={};let releases=0;
-  const collision=createCollisionWorld({world:{sector:()=>[],createSolidQueryWorkspace:()=>workspace,releaseSolidQueryWorkspace(w){assert.equal(w,workspace);releases++;throw failure;}}});
-  collision.bodies(0);assert.ok(collision.cacheSize>0);
-  assert.throws(()=>collision.dispose(),e=>e===failure);assert.equal(collision.cacheSize,0);collision.dispose();assert.equal(releases,1);
-  assert.throws(()=>collision.bodies(0),/Collision world disposed/);
-});
-
 
 const part={type:'annular-sector-slab',innerRadius:100,outerRadius:200,minY:-10,maxY:10,gapCenter:0,gapHalfAngle:0};
 const ring={id:'ring',position:[0,0,0],boundsRadius:210,shape:{type:'compound',parts:[part]}};

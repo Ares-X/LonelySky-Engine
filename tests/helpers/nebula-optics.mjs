@@ -33,20 +33,20 @@ export function noiseEvaluator(shader, uniforms, scalar=false) {
     `const ab=${expression(interpolation)};return {value:${expression(value)},gradient:[${derivatives.map(expression).join(',')}]} ;`);
   const hermite=Function('f',`return [${body.match(/u=([^,;]+),d=([^;]+);/).slice(1).join(',')}];`);
   const attenuationRule=Function('width','exp',`return ${body.match(/attenuation=([^;]+);/)[1]};`);
-  const key=uniforms.nebulaSeed.value;
-  // Reference the original world field on signed coordinates across period seams.
-  const corner=(x,y,z)=>{
-    let h=Math.imul(wrap(x),0x8da6b343)^Math.imul(wrap(y),0xd8163841)^Math.imul(wrap(z),0xcb1ab31f)^key;
-    h=Math.imul(h^(h>>>16),0x7feb352d);h=Math.imul(h^(h>>>15),0x846ca68b);
-    return (h^(h>>>16))>>>0;
-  };
+  const seed=uniforms.nebulaCornerSeed.value;
   return (point,frequency,level,footprint=0)=>{
     const domain=uniforms.nebulaNoiseDomain.value[level].elements,phase=uniforms.nebulaNoisePhase.value[level].toArray();
     const p=[0,1,2].map(r=>(domain[r]*point[0]+domain[r+3]*point[1]+domain[r+6]*point[2])*frequency);
     const cell=p.map(Math.floor),f=p.map((v,k)=>v-cell[k]),u=[],d=[];
     for(const value of f){const pair=hermite(value);u.push(pair[0]);d.push(pair[1]);}
-    const fetch=(z,channel)=>corner(cell[0]+phase[0]+(channel&1),cell[1]+phase[1]+(channel>>1),cell[2]+phase[2]+z);
-    const words=[fetch(0,0),fetch(0,1),fetch(0,2),fetch(0,3),fetch(1,0),fetch(1,1),fetch(1,2),fetch(1,3)];
+    const sample=(z,channel)=>{
+      const x=wrap(cell[0]+phase[0]+(channel&1)),y=wrap(cell[1]+phase[1]+(channel>>1));
+      let hash=Math.imul(x,0x8da6b343)^Math.imul(y,0xd8163841)^Math.imul(wrap(cell[2]+phase[2]+z),0xcb1ab31f)^seed;
+      hash=Math.imul(hash^(hash>>>16),0x7feb352d);
+      hash=Math.imul(hash^(hash>>>15),0x846ca68b);
+      return (hash^(hash>>>16))>>>0;
+    };
+    const words=[sample(0,0),sample(0,1),sample(0,2),sample(0,3),sample(1,0),sample(1,1),sample(1,2),sample(1,3)];
     const attenuation=attenuationRule(frequency*footprint,Math.exp),value=[],gradient=[];
     for(let component=0;component<(scalar?1:3);component++){
       const corners=words.map(h=>((h>>>(10*component))&1023)*2/1023-1);

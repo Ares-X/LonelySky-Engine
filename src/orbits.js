@@ -11,6 +11,12 @@ function positive(value, name) {
   return value;
 }
 
+function eccentricity(value) {
+  finite(value, 'eccentricity');
+  if (value < 0 || value >= 1) throw new RangeError('eccentricity must be in [0, 1)');
+  return value;
+}
+
 function rates({ semiMajorAxis, mu }) {
   positive(semiMajorAxis, 'semiMajorAxis');
   positive(mu, 'mu');
@@ -70,8 +76,7 @@ function prepareOrbit(elements) {
   const { semiMajorAxis: a, mu, eccentricity: e, inclination = 0, ascendingNode = 0,
     argumentOfPeriapsis = 0, meanAnomalyAtEpoch = 0, epochSeconds = 0 } = elements;
   const { speed, meanMotion, periodSeconds } = rates(elements);
-  finite(e, 'eccentricity');
-  if (e < 0 || e >= 1) throw new RangeError('eccentricity must be in [0, 1)');
+  eccentricity(e);
   const periapsisRadius = a * (1 - e);
   // The two-body maximum is mu/r_peri². Small outward slack covers arithmetic
   // and frame-rotation rounding when consumers use it as a conservative bound.
@@ -157,14 +162,36 @@ export function evaluateOrbit(elements, timeSeconds) {
   return sampleOrbit(orbit, timeSeconds, newState());
 }
 
+// Body orbits support a fixed primary, one orbiting planet and its moon.
+// Both ellipses use the same inertial axes and absolute simulation time.
+function parentOf(orbit) {
+  const parent = orbit.parentOrbit;
+  if (parent?.parentOrbit != null) throw new RangeError('Only one moving parent orbit is supported');
+  return parent;
+}
+
+function apoapsis(orbit) {
+  return positive(orbit.semiMajorAxis, 'semiMajorAxis') * (1 + eccentricity(orbit.eccentricity));
+}
+
+/** Maximum displacement from the system anchor, independent of orbital phase. */
+export function orbitExtent(orbit) {
+  if (orbit == null) return 0;
+  const parent = parentOf(orbit);
+  const extent = apoapsis(orbit) + (parent == null ? 0 : apoapsis(parent));
+  if (!Number.isFinite(extent)) throw new RangeError('orbital extent is outside the representable numeric range');
+  return extent;
+}
+
 /**
  * Sample a body for rendering, gravity or collision without mutating its descriptor.
  * body.position must be a finite three-number array. For an orbiting body it is
- * the fixed focus/anchor; the orbit's radius remains relative to that focus.
+ * the fixed system anchor. If orbit.parentOrbit is present it moves the local
+ * focus. radius, anomalies and period describe the body's local ellipse.
  * Missing/null body.orbit denotes a static body. Time is required in both cases.
  * Every returned vector is detached from the descriptor; velocities and
  * accelerations use the stationary anchor's frame. accelerationBound is zero
- * for static bodies and is preserved from evaluateOrbit for orbiting bodies.
+ * for static bodies and sums the periapsis bounds of the contributing ellipses.
  */
 export function evaluateBodyState(body, timeSeconds) {
   finite(timeSeconds, 'timeSeconds');
@@ -184,10 +211,27 @@ export function createBodyStateSampler(body) {
     throw new TypeError('body.position must be a finite three-number array');
   }
   const anchor = [...body.position], orbit = body.orbit == null ? null : prepareOrbit(body.orbit);
+  const parentElements = body.orbit == null ? null : parentOf(body.orbit);
+  const parent = parentElements == null ? null : prepareOrbit(parentElements);
+  const parentState = parent ? newState() : null;
+  const bound = orbit ? orbit.accelerationBound + (parent ? parent.accelerationBound : 0) : 0;
+  if (!Number.isFinite(bound)) throw new RangeError('combined orbital acceleration bound is outside the representable numeric range');
   return function sample(timeSeconds, out = newState()) {
     finite(timeSeconds, 'timeSeconds');
     if (orbit) {
       sampleOrbit(orbit, timeSeconds, out);
+      if (parent) {
+        sampleOrbit(parent, timeSeconds, parentState);
+        for (let i = 0; i < 3; i++) {
+          out.position[i] += parentState.position[i];
+          out.velocity[i] += parentState.velocity[i];
+          out.acceleration[i] += parentState.acceleration[i];
+          if (!Number.isFinite(out.velocity[i]) || !Number.isFinite(out.acceleration[i])) {
+            throw new RangeError('combined orbital state is outside the representable numeric range');
+          }
+        }
+        out.accelerationBound = bound;
+      }
       for (let i = 0; i < 3; i++) {
         out.position[i] += anchor[i];
         if (!Number.isFinite(out.position[i])) {

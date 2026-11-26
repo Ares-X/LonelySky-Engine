@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describeMacro, sampleGalaxy, COSMOS_QUALITY_COUNTS } from '../../src/render/cosmos.js';
+import {createOpenClusterProfile,createGalaxyHaze} from '../../src/render/galaxy-haze.js';
 
 const base = Object.freeze({ seed: 'volume-contract', revision: 3, kind: 'cluster', family: 'open',
   morphology: 'irregular', radius: 6500000, thickness: .8,
   orientation: Object.freeze([.27, 1.1, -.64]), asymmetry: .37, arms: 3, pitch: .31, bar: false });
 const appearanceHashes = [
-  ['volume-contract', 'f2f3bc72a3ddbc0d40930c669d8d1edea53eed08756d7069cc2912249f02c595'],
-  ['volume-contract-1', 'f4b45af5daa383106ca8bc2e8183182129ade00fd1db27b8bf913e969d1e4e00'],
-  ['volume-contract-2', '5cd2343552e882b26514821d466b71695ba940267e3139443022c185b30d774a'],
+  ['volume-contract', '7e1e76e51d93b63ab1ade345b9eea88df56feec351c1f623bf6ce5e6dc58f478'],
+  ['volume-contract-1', '20f9ba6fac9e4a9b8d6a2566e61e5ea1c7b752b4d7aa85fdfd21a7e8ba87456d'],
+  ['volume-contract-2', 'd7cf87872a8836674f9929b3de925226bad05c8c00cbf360be7072b380107714'],
 ];
 const digest = (...arrays) => {
   const hash = createHash('sha256');
@@ -42,13 +43,14 @@ test('open clusters retain a bounded 3D population without a dense support shell
   }
 });
 
-test('open-cluster quality prefixes and the existing appearance stream remain exact', () => {
+test('V3 open-cluster representation has stable appearance bytes and exact 16k quality prefixes', () => {
   for (const [seed, appearanceHash] of appearanceHashes) {
-    const descriptor = { ...base, seed }, full = sampleGalaxy(descriptor);
-    // Recorded from the preceding public sampler; no duplicate sampling algorithm.
-    assert.equal(digest(full.colors, full.sizes), appearanceHash);
-    assert.deepEqual(sampleGalaxy(descriptor), full);
-    for (const count of [0, ...Object.values(COSMOS_QUALITY_COUNTS)]) {
+    const descriptor = { ...base, seed }, full = sampleGalaxy(descriptor,16384);
+    // Only these V3 open fixtures adopt the new shared association stream.
+    // The recorded 4k appearance leaf remains separate from tier-prefix checks.
+    assert.equal(digest(full.colors.subarray(0,4096*3),full.sizes.subarray(0,4096)),appearanceHash);
+    assert.deepEqual(sampleGalaxy(descriptor,16384),full);
+    for (const count of [0, ...Object.values(COSMOS_QUALITY_COUNTS),16384]) {
       const prefix = sampleGalaxy(descriptor, count);
       assert.deepEqual(prefix.positions, full.positions.slice(0, count * 3));
       assert.deepEqual(prefix.colors, full.colors.slice(0, count * 3));
@@ -82,4 +84,50 @@ test('other revisions and structure families retain their existing samples', () 
     const sample = sampleGalaxy({ ...base, ...change }, 128);
     assert.equal(digest(sample.positions, sample.colors, sample.sizes), expected);
   }
+});
+
+test('open-cluster identities vary unequal associations while visits and parent-family structure stay deterministic',()=>{
+  const profiles=new Set(),counts=new Set();
+  for(let i=0;i<128;i++){
+    const descriptor={...base,id:`association:${i}`,seed:'shared-seed',childAppearance:{family:'barred-spiral'}},profile=createOpenClusterProfile(descriptor);
+    createOpenClusterProfile({...descriptor,id:'unrelated'});
+    assert.deepEqual(createOpenClusterProfile(descriptor),profile);
+    assert.ok(Object.isFrozen(profile.nodes));assert.ok(Object.isFrozen(profile.nodes[0].center));
+    assert.ok(profile.nodes.length>=4&&profile.nodes.length<=8);counts.add(profile.nodes.length);
+    assert.ok(new Set(profile.nodes.map(node=>node.width)).size>1);
+    assert.equal(profile.cdf.at(-1),1);profiles.add(JSON.stringify(profile));
+  }
+  assert.equal(profiles.size,128);assert.deepEqual([...counts].sort(),[4,5,6,7,8]);
+  const a=createOpenClusterProfile({...base,id:'parent-shape',childAppearance:{family:'barred-spiral'}});
+  const b=createOpenClusterProfile({...base,id:'parent-shape',childAppearance:{family:'ancient-halo'}});
+  assert.notDeepEqual(a.nodes.map(node=>node.center),b.nodes.map(node=>node.center));
+  assert.equal(createOpenClusterProfile({...base,family:'globular'}),null);
+});
+
+test('open-cluster point and diffuse representations consume the same immutable association geometry',()=>{
+  const descriptor={...base,id:'shared-associations',stellarTint:[1,1,1],childAppearance:{family:'barred-spiral'}},profile=createOpenClusterProfile(descriptor);
+  const haze=createGalaxyHaze({structures:true});
+  try{
+    haze.userData.setDescriptors([descriptor]);
+    const uniforms=haze.children[0].material.uniforms;
+    assert.equal(uniforms.openClusterCount.value,profile.nodes.length);
+    assert.deepEqual(uniforms.openClusterHaloAxes.value.toArray(),profile.haloAxes);
+    assert.equal(uniforms.openClusterHaloFraction.value,profile.haloFraction);
+    for(let i=0;i<profile.nodes.length;i++){
+      const node=profile.nodes[i];
+      assert.deepEqual(uniforms.openClusterCenters.value[i].toArray(),[...node.center,node.width]);
+      assert.deepEqual(uniforms.openClusterAxes.value[i].toArray(),[...node.axis,node.long]);
+      assert.ok(Math.abs(uniforms.openClusterMasses.value[i]-(profile.cdf[i]-(profile.cdf[i-1]??0)))<1e-7);
+    }
+    assert.ok(Math.abs(uniforms.openClusterMasses.value.reduce((sum,mass)=>sum+mass,0)-1)<1e-7);
+    // The sampler's observable first moment must follow these association
+    // centers, not just upload correct-looking uniforms beside unrelated points.
+    const sample=sampleGalaxy({...descriptor,orientation:[0,0,0]},16384),actual=[0,0,0],expected=[0,0,0];
+    for(let i=0;i<sample.sizes.length;i++)for(let axis=0;axis<3;axis++)actual[axis]+=sample.positions[i*3+axis]/descriptor.radius/sample.sizes.length;
+    for(let i=0;i<profile.nodes.length;i++){
+      const mass=profile.cdf[i]-(profile.cdf[i-1]??0);
+      for(let axis=0;axis<3;axis++)expected[axis]+=(1-profile.haloFraction)*mass*profile.nodes[i].center[axis];
+    }
+    for(let axis=0;axis<3;axis++)assert.ok(Math.abs(actual[axis]-expected[axis])<.025,'sampled stars follow the shared mixture within sampling and bounded-tail error');
+  }finally{haze.userData.dispose();}
 });

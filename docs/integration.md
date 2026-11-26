@@ -56,6 +56,16 @@ target/pass dimensions and renderer canvas floor/viewport rounding. This avoids
 The renderer uses the public `setDrawingBufferSize` API; canvas CSS remains owned
 by the container. No composer private field is modified.
 
+To opt into normalized bloom, use `createBloomPass` from `src/three.js` (or `src/render/bloom.js`) in the
+existing `NebulaRenderPass → bloom → OutputPass` chain. It returns the native
+pass, so existing quality/ambience strength changes, composer resizing and
+lifetime ownership continue at their current owners. The factory normalizes the
+finite blur kernels and neutral composite DC gain once during construction;
+it does not add a renderer, target, scene replay or per-frame normalization.
+Strength denotes the added DC fraction for a constant HDR field above the
+high-pass transition, not a bound on arbitrary scene pixels or total energy.
+See the API for the global artistic change and tint/lifecycle boundaries.
+
 ## Procedural scenery appearance
 
 The directional sky shares absorbing dust lanes with the black-hole lens. Galaxy
@@ -64,9 +74,11 @@ complexes, uneven arm widths and small star-forming regions. Dust reduces the
 galaxy's own emission; it does not cover unrelated foreground geometry or sky.
 Descriptors, addresses, particle positions and quality prefixes are unchanged.
 
-Nebula volumes fade to zero before their bounds. Directional ray and pixel
-footprints attenuate unresolved procedural octaves. Paired Gauss samples stay within
-the existing 16/32/48-step budgets. Extinction follows the world-space optical
+The black-hole disk's emission detail uses angularly periodic noise in a polar
+frame and shears with the existing orbital phase approximation. Local nebula
+volumes fade at their bounds and attenuate unresolved procedural octaves using
+directional ray and pixel footprints. The local nebula uses 32, 64 or 96
+integration cells depending on quality. Extinction follows the world-space optical
 length through a scaled volume. Appearance profiles add tapered trunks, broad
 seeded shear, depth-coherent dust erosion and two-point light-column shading.
 An optional `rimColor` separates ionized skins from reflected dust light. Calls
@@ -92,8 +104,8 @@ collision boundary; local bodies remain the physics world's responsibility.
 Parents occupy a 4,096-cell grid (81.92 million units); at most one candidate in
 each 2³ block survives its seeded density choice. A fixed 5³ neighborhood contains
 at most 27 parents / 108 total structures. Removed supports lie beyond the
-100-million-unit visibility limit, including the address seam. Visibility fades
-from 80 to 100 million units. `cosmicStructureContext({sectorIndex,
+150-million-unit visibility limit for a rebased camera, including the address
+seam. Visibility fades from 125 to 150 million units. `cosmicStructureContext({sectorIndex,
 cameraPosition, seed})` returns a containing parent's `{id, family, theme}`, or
 null in a void. Body providers may consume that semantic theme without copying
 the catalogue's positioning decisions or adding game content to this module.
@@ -154,16 +166,61 @@ matrix. Frustum consumers must pass the camera coordinate system and reversed
 flag to `setFromProjectionMatrix`. This preserves ordinary-depth compatibility;
 it does not fix the ordinary path's far-distance precision on unsupported GPUs.
 
+## Finite local source detail
+
+`createSpatialGalacticMedium` optionally accepts one `sourceBrick`:
+`{kernelIndex, profile: 'coherent-ribbon-v1', macroSpan: [x,y,z],
+fineSpan: [x,y,z]}`. Spans are positive lengths in body-radius coordinates.
+The fixed 32-cubed scalar brick follows that source kernel's center and rotation;
+the 64-cubed source base and 128-cubed dust grid retain their resolutions.
+This is a seeded artistic ribbon, not a physical stellar or gas simulation.
+
+The selected kernel is excluded before baking the base. Its original isolated
+coarse integral and the remaining family's actual coarse integral divide that
+family's luminosity between base and brick. CPU queries, point CDF/tent draws and
+the renderer consume their nonnegative sum. Changing this representation changes
+point positions; omitting the option retains the previous field and prefixes.
+The published `sourceBrick` owns its read-only Float32 texels, frame and integral;
+`sourceComponentIntegrals` includes both base and brick.
+
+The renderer owns one additional R16F texture (64 KiB of pixel data), disposed
+with the mesh. Half-float upload is a measured approximation to the CPU field.
+Local grid faces join the existing ordered ray traversal, including segments
+with no dust; the source is not a second light pass. Creation yields at actual
+rows, cancellation releases work in progress, and quality changes reuse fields.
+This bounded storage and finite integration do not establish GPU performance or
+visual acceptance on a host device.
+
+Spatial fields may extend beyond one body-radius unit. Shared distance fading
+uses their published finite `supportRadius`; viewport admission uses the medium
+mesh's enclosing hull transformed into world space. Legacy descriptors retain
+their existing unit support and distance-fade boundary.
+Installing a medium through `createGalaxyHaze` requires shared `supportVisibility`;
+`createCosmos` supplies it through its `supportFade` path. Standalone calls without
+that table reject medium descriptors before the legacy distance-admission path.
+
+For a selected medium, the host can pass `galacticMediumOptions: descriptor =>
+selected(descriptor) ? {starCounts: {low: 512, auto: 2048, high: 16384},
+resolvedFraction: .6} : undefined` to `createCosmos` (or `createGalaxyHaze`). This
+changes only the resolved/continuum representation of that same field. The
+resolver runs when descriptors are installed, not every frame; unselected media
+retain their 4096 capacity and original resolved fraction. Capacity is bounded at
+16384, and all quality prefixes retain the same total luminous budget. See the
+API's `starBufferBytes` definition when accounting for the additional point data.
+
 ## Physical cosmic surfaces
 
 The optional Three.js entry exports `createCosmicBodies({surfaceTexture,
-cloudTexture, stellarTexture})`. Its group has `userData.update({bodies, camera,
-viewportHeight, pixelRatio, time})` and `userData.dispose()`. The optional
-visual time in seconds advects gas clouds (default zero). Each input supplies
+cloudTexture, cloudColorMean, stellarTexture})`. Call
+`group.userData.update({bodies, camera, viewportHeight, pixelRatio,
+celestialTime, gasWeatherTime})` and `group.userData.dispose()` at retirement.
+Both clocks use seconds. `celestialTime` defaults to the existing `time` option
+or zero, and `gasWeatherTime` defaults to `celestialTime`. Each body supplies
 `id`, `kind` (`ring`, `gas-giant`, `dark-world`, `stellar-giant`, or `moon`),
 `radius`, world-to-local orthonormal `frame`, camera-relative **physical** `center`,
 local light direction, linear tint, phase and `shape`. Shapes use the exact
-world-unit sphere or six-section annular compound from the physics catalogue.
+world-unit sphere or annular compound from the physics catalogue, including its
+retained habitat terrain meshes.
 Visibility zero hides the slot; one writes opaque surface depth; fractional
 visibility uses a depth-tested transparent far LOD. Slots and the quad are reused.
 Translucent gas rings and stellar prominences have separate depth-tested passes.
@@ -171,12 +228,52 @@ The host samples orbital descriptors at its simulation time before updating
 moving moon surfaces. Rotating a moon's local frame towards its parent can keep
 its material phase tidally locked without changing the sphere's collision.
 
-Surface detail is fixed in body space and filtered by projected footprint.
-Ring plate dimensions and continental detail do not change the analytic slab
-geometry: its current inner terrain remains a flat radial deck. Material normals
-are not real mountains. The stellar surface models a restrained photosphere,
-not false-color chromospheric imagery. Texture inputs are optional host assets;
-the engine does not package a game's art or reference photographs.
+Gas giants without an explicit cloud map derive belt geometry, cloud palettes
+and vortex dimensions from their full body identity and seed or phase. Opposing
+jets carry the cloud filaments in longitude. Vortex centres travel with the local
+jet and their clouds circulate around the moving centre. The opaque surface and
+optical volume use the same weather coordinates. Close cloud extinction and
+solar shadows share the same body-local, advected density field. This visual
+model uses prescribed jet speeds, periodic vortex motion, and a bounded optical
+shell.
+
+The host can hold `gasWeatherTime` for reduced motion or replay. An optional
+borrowed `cloudTexture` owns the mapped surface belts and vortices. When supplying
+`cloudColorMean: [r,g,b]`, use finite positive linear values measured after the
+shader's `.48` scale and `exp(1.6 * edge)` response. The default is `[1,1,1]`.
+The engine copies calibration metadata once. The caller loads and disposes maps.
+Keep the signed simplex [MIT license](../licenses/webgl-noise.MIT.txt) and
+[NOTICE](../NOTICE) with distributions.
+
+Ring mountains use shared physical triangles and bounds for rendering and
+collision. Marine shorelines follow the terrain's height. Cloud weather is
+evaluated in body-fixed coordinates, with `celestialTime` advancing the wind
+phase used by viewing, solar extinction and ground shadows. Additional material
+normals, foliage, streams and atmosphere are optical or decorative layers.
+
+`habitatMaterials` accepts a rock layer (`rockColor`, `rockNormal`,
+`rockTileSize`, `rockColorMean`) and an optional ground layer with corresponding
+`ground*` keys. Color means have three positive linear components up to 1.
+Tile sizes are positive world-unit lengths. Maps are borrowed Three.js textures;
+normal maps use the OpenGL convention. `foliageMaterial: {color, alpha, uvRect}`
+can supply a borrowed twig atlas. Use a normalized UV rectangle with positive
+area and a loaded color texture. Terrain and foliage have procedural defaults.
+The optional ring image and regional terrain lifecycles are in the [API](api.md).
+
+The procedural stellar material uses a body-fixed granulation wavelength of
+`0.00145 * radius`. Star type affects its broader photosphere and prominences.
+A host can opt into stellar scans with a borrowed `stellarTexture` and
+`photosphereMaterial: {uvRect, linearLumaMean, tileGranules, maxLod}`. Supply a
+loaded image, a normalized UV crop, a linear mean in (0, 1], a positive tile scale
+in granules and a mip index supported by the image dimensions. This selects
+local triplanar luminance sampling in place of spherical image modulation.
+
+For near planetary surfaces, the optional `naturalRingField` and
+`rockySurfaceField` inputs borrow the fields in `src/natural-ring.js` and
+`src/rocky-surface.js`. Use the same fields with the host's collision provider.
+Bounds queries use reusable workspaces and report `SolidQueryFailure` when the
+cell or result budget is exceeded. Release renderer consumers before disposing
+their borrowed fields and any fine-mesh assets.
 
 For camera rays close to a cylindrical ring wall, the renderer computes the
 camera's squared radial clearance for each wall in CPU double precision. The

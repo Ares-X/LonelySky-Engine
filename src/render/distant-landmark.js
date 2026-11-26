@@ -1,17 +1,39 @@
+import {gasMacroUniforms} from './gas-cloud-macro.js';
+import {NATURAL_RING_GLSL} from '../natural-ring.js';
+import {COSMIC_BODY_NOISE_GLSL} from './cosmic-body-noise.js';
+export {COSMIC_BODY_NOISE_GLSL} from './cosmic-body-noise.js';
+import {RING_HABITAT_ECOLOGY} from '../ring-habitat.js';
 import * as THREE from 'three';
-import { gasCloudGLSL } from './gas-clouds.js';
+import {COSMIC_SPHERE_SURFACE_GLSL} from './cosmic-sphere-surface.js';
+import {GAS_CLOUD_MATERIAL_SCALES} from './gas-cloud-material.js';
+import {FLAT_DECK_SURFACE_GLSL} from './ring-flat-deck.js';
+import {RING_ENGINEERING_MATERIAL_GLSL} from './ring-engineering-material.js';
+import {RING_HABITAT_SURFACE_GLSL} from './ring-habitat-surface.js';
+import {RING_HABITAT_AIR_GLSL} from './ring-habitat-atmosphere.js';
+import {RING_HABITAT_SHADOW_GLSL,createRingHabitatShadowUniforms} from './ring-habitat-shadows.js';
+import {RING_HABITAT_GEOMETRY_GLSL,createRingHabitatGeometryTexture,createEmptyRingHabitatGeometryTexture,setRingHabitatGeometry} from './ring-habitat-geometry.js';
+import {RING_SURFACE_LATTICE_GLSL} from '../ring-surface-lattice.js';
 
-const BODY_KINDS = Object.freeze({ ring: 1, 'gas-giant': 2, 'dark-world': 3, 'stellar-giant': 4, moon: 5 });
+const RING_SECTION_CAPACITY = 64;
+
+const BODY_KINDS = Object.freeze({ ring: 1, 'gas-giant': 2, 'dark-world': 3, 'stellar-giant': 4, moon: 5, 'icy-moon': 6 });
+const PROMINENCE_FOOT = .996, PROMINENCE_HALF_SPAN = 1.12, PROMINENCE_HEIGHT = 1.16;
+
+export function stellarProminenceSupport(width,height){
+  return Math.hypot(PROMINENCE_FOOT+height*PROMINENCE_HEIGHT,width*PROMINENCE_HALF_SPAN);
+}
 
 // Every length in the shader is divided by the descriptor radius. The solid
 // catalogue, rather than a second rendering model, owns all slab dimensions.
 export const COSMIC_BODY_INTERSECTIONS_GLSL = /* glsl */`
-uniform int uBodyKind,uSectionCount;
-uniform float uBodyRadius,uSphereRadius,uPhase,uRayMinimum,uVisibility;
-uniform vec3 uBodyOrigin,uLight,uTint;
+uniform int uBodyKind,uSectionCount,uHabitatClimate;
+uniform float uBodyRadius,uSphereRadius,uPhase,uRayMinimum,uVisibility,uPixelAngle;
+uniform vec3 uBodyOrigin,uLight,uTint,uHabitatEcology,uRingVoid,uRingCore;
 uniform mat3 uBodyFrame;
-uniform vec4 uSections[6];
-uniform vec2 uGaps[6],uCameraWallC[6];
+uniform vec4 uSections[${RING_SECTION_CAPACITY}];
+// xy holds the gap. zw holds double-computed squared radial clearances for camera rays.
+uniform vec4 uGaps[${RING_SECTION_CAPACITY}];
+uniform highp sampler2D uRingLattices;
 uniform bool uRinged;
 uniform vec3 uPlasmaAxes[3];
 uniform vec2 uPlasmaRadii[3];
@@ -19,12 +41,12 @@ const float BODY_TAU=6.28318530718;
 bool solidArc(vec3 p,vec2 gap){
   return gap.y<=0.||abs(atan(sin(atan(p.z,p.x)-gap.x),cos(atan(p.z,p.x)-gap.x)))>=gap.y;
 }
-void acceptSurface(float t,vec3 p,vec3 n,vec3 ray,bool cameraRay,float minimum,inout float nearest,inout vec3 point,inout vec3 normal){
+void acceptSurface(float t,vec3 p,vec3 n,vec3 ray,bool shadowRay,float minimum,inout float nearest,inout vec3 point,inout vec3 normal){
   // A rounded primary point can leave a sun ray just beneath its source
   // wall. Its outward exit cannot cast a shadow; a later entry still can.
-  if(t>minimum&&t<nearest&&(cameraRay||dot(n,ray)<0.)){nearest=t;point=p;normal=n;}
+  if(t>minimum&&t<nearest&&(!shadowRay||dot(n,ray)<0.)){nearest=t;point=p;normal=n;}
 }
-bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool cameraRay,float minimum,out vec3 point,out vec3 normal,out float nearest){
+bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool useCameraClearance,bool shadowRay,float minimum,out vec3 point,out vec3 normal,out float nearest){
   nearest=1.e25;point=vec3(0.);normal=vec3(0.);
   float planar=dot(ray.xz,ray.xz),along=dot(origin.xz,ray.xz);
   if(planar>1.e-12)for(int wall=0;wall<2;wall++){
@@ -33,7 +55,7 @@ bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool
     // squared radius. Use the camera's double-computed c and the product of
     // the roots to retain both a shallow grazing hit and a short downward hit.
     float c=cameraWallC[wall];
-    bool nearWall=cameraRay&&abs(c)<.25*radius*radius;
+    bool nearWall=useCameraClearance&&abs(c)<.25*radius*radius;
     float crossDistance=origin.x*ray.z-origin.z*ray.x;
     float discriminant=nearWall?along*along-planar*c:planar*radius*radius-crossDistance*crossDistance;
     if(discriminant<0.)continue;
@@ -50,14 +72,14 @@ bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool
     for(int side=0;side<2;side++){
       float t=roots[side];vec3 p=origin+ray*t;
       if(p.y>=bounds.z&&p.y<=bounds.w&&solidArc(p,gap))
-        acceptSurface(t,p,normalize(vec3(p.x,0.,p.z))*(wall==0?-1.:1.),ray,cameraRay,minimum,nearest,point,normal);
+        acceptSurface(t,p,normalize(vec3(p.x,0.,p.z))*(wall==0?-1.:1.),ray,shadowRay,minimum,nearest,point,normal);
     }
   }
   if(abs(ray.y)>1.e-10)for(int side=0;side<2;side++){
     float t=((side==0?bounds.z:bounds.w)-origin.y)/ray.y;vec3 p=origin+ray*t;
     float r=length(p.xz);
     if(r>=bounds.x&&r<=bounds.y&&solidArc(p,gap))
-      acceptSurface(t,p,vec3(0.,side==0?-1.:1.,0.),ray,cameraRay,minimum,nearest,point,normal);
+      acceptSurface(t,p,vec3(0.,side==0?-1.:1.,0.),ray,shadowRay,minimum,nearest,point,normal);
   }
   if(gap.y>0.)for(int end=0;end<2;end++){
     float angle=gap.x+(end==0?-1.:1.)*gap.y;
@@ -65,21 +87,122 @@ bool sectionCast(vec3 origin,vec3 ray,vec4 bounds,vec2 gap,vec2 cameraWallC,bool
     float denominator=dot(ray,tangent);if(abs(denominator)<1.e-10)continue;
     float t=-dot(origin,tangent)/denominator;vec3 p=origin+ray*t;float r=dot(p,radial);
     if(r>=bounds.x&&r<=bounds.y&&p.y>=bounds.z&&p.y<=bounds.w)
-      acceptSurface(t,p,tangent*(end==0?1.:-1.),ray,cameraRay,minimum,nearest,point,normal);
+      acceptSurface(t,p,tangent*(end==0?1.:-1.),ray,shadowRay,minimum,nearest,point,normal);
   }
   return nearest<1.e24;
 }
-bool ringCast(vec3 origin,vec3 ray,bool cameraRay,float minimum,out vec3 point,out vec3 normal,out float nearest){
-  nearest=1.e25;point=vec3(0.);normal=vec3(0.);
-  for(int part=0;part<6;part++){
-    if(part>=uSectionCount)break;
-    vec3 p,n;float t;
-    if(sectionCast(origin,ray,uSections[part],uGaps[part],uCameraWallC[part],cameraRay,minimum,p,n,t)&&t<nearest){nearest=t;point=p;normal=n;}
+${RING_SURFACE_LATTICE_GLSL}
+${RING_HABITAT_GEOMETRY_GLSL}
+bool ringGeometryOverflow=false,ringTerrainHit=false,ringExteriorHit=false;
+vec3 ringTerrainMaterialNormal=vec3(0.);
+float ringTerrainRockCoverage=0.;
+bool rayClearsRingVoid(vec3 origin,vec3 ray,float minimum){
+  if(uHabitatGroupCount>0||abs(ray.y)<1.e-6)return false;
+  // The part catalogue bounds the axial span of every hull surface. If
+  // both endpoints of the ray there are inside the empty inner cylinder,
+  // the entire interval misses by convexity. No geometric detail is dropped.
+  vec2 heights=(uRingVoid.yz-origin.y)/ray.y;
+  float start=max(minimum,min(heights.x,heights.y)),end=max(heights.x,heights.y);
+  if(end<start)return true;
+  vec2 a=origin.xz+start*ray.xz,b=origin.xz+end*ray.xz;
+  return max(dot(a,a),dot(b,b))<uRingVoid.x*uRingVoid.x;
+}
+// The first three habitat courses share the same inner floor cylinder.
+// A ray from the open interior that reaches this cylinder inside its
+// unobstructed axial span cannot have touched an enclosing exterior part.
+bool ringInnerFloor(vec3 origin,vec3 ray,float minimum,bool cameraRay,out vec3 point,out float distance){
+  point=vec3(0.);distance=1.e25;
+  float radius=uRingCore.x;
+  float clearance=cameraRay?-uGaps[0].z:radius*radius-dot(origin.xz,origin.xz);
+  if(uHabitatGroupCount>0||radius<=0.||clearance<=0.
+    ||origin.y<=uRingCore.y||origin.y>=uRingCore.z)return false;
+  float a=dot(ray.xz,ray.xz);
+  if(a<1.e-12)return false;
+  float b=dot(origin.xz,ray.xz), c=clearance;
+  float root=sqrt(b*b+a*c);
+  // The rationalized root avoids subtracting nearly equal positive terms
+  // for an orbit-skimming camera next to the cylinder and looking outward.
+  float hit=b>=0.?c/max(root+b,1.e-20):(root-b)/a;
+  if(hit<=minimum)return false;
+  vec3 p=origin+ray*hit;
+  if(p.y<=uRingCore.y||p.y>=uRingCore.z)return false;
+  for(int i=0;i<3;i++){
+    vec4 section=uSections[i];
+    if (p.y>section.z+.000001 && p.y<section.w-.000001 && solidArc(p,uGaps[i].xy)){
+      point=p;distance=hit;return true;
+    }
   }
+  return false;
+}
+const int RING_CAMERA_RAY=0,RING_SHADOW_RAY=1,RING_REFLECTED_RAY=2;
+bool ringCast(vec3 origin,vec3 ray,float minimum,int rayKind,out vec3 point,out vec3 normal,out float nearest){
+  bool cameraRay=rayKind==RING_CAMERA_RAY,shadowRay=rayKind==RING_SHADOW_RAY;
+  ringTerrainHit=false;ringExteriorHit=false;ringTerrainRockCoverage=0.;nearest=1.e25;point=vec3(0.);normal=vec3(0.);
+  if(rayClearsRingVoid(origin,ray,minimum))return false;
+  if(ringInnerFloor(origin,ray,minimum,cameraRay,point,nearest)){
+    normal=-normalize(vec3(point.x,0.,point.z));return true;
+  }
+  // Wide courses surround the empty interior. Their support sphere includes
+  // that hole, so cull against the entire raised annular slab before visiting
+  // its caps, gap edges and plate lattice. Keep ambiguous grazing rays in the
+  // exact path. The allowance scales with float32 ray reconstruction distance.
+  float shellPad=1.e-5*max(1.,length(origin));
+  bool clipCourses=abs(ray.y)>1.e-6&&dot(ray.xz,ray.xz)>1.e-6;
+  for(int part=0;part<${RING_SECTION_CAPACITY};part++){
+    if(part>=uSectionCount)break;
+    // A short buttress occupies a small part of the full ring. Its catalogue
+    // support sphere rejects rays before the analytic slab intersections;
+    // it never substitutes for the actual curved solid or writes depth.
+    vec4 support=texelFetch(uRingLattices,ivec2(part,1),0);
+    vec3 relative=origin-support.xyz;
+    float along=dot(relative,ray),perp2=dot(cross(relative,ray),cross(relative,ray));
+    float disc=support.w*support.w-perp2;
+    if(disc<0.||-along+sqrt(max(disc,0.))<=minimum)continue;
+    vec3 p,n;float t;
+    vec4 lattice=texelFetch(uRingLattices,ivec2(part,0),0);
+    if(clipCourses&&uGaps[part].y<=1.57079632679){
+      vec4 shell=uSections[part]+vec4(-shellPad,lattice.w+shellPad,-shellPad,shellPad);
+      shell.x=max(0.,shell.x);
+      vec4 intervals;int count;
+      if(!ringLatticeIntervals(origin,ray,shell,vec2(minimum,nearest),intervals,count))continue;
+    }
+    // Negative metadata tags one I-sector: exactly three catalogue-owned
+    // closed slabs inside its unchanged support. No new uniform or mesh.
+    for(int member=0;member<3;member++){
+      if(member>0&&lattice.x>=0.)break;
+      vec4 bounds=uSections[part];vec2 gap=uGaps[part].xy;
+      if(lattice.x<0.){
+        if(member==0)bounds.z=bounds.w-lattice.y;
+        else if(member==1)gap.y=lattice.z;
+        else bounds.w=bounds.z+lattice.y;
+      }
+      if(sectionCast(origin,ray,bounds,gap,uGaps[part].zw,cameraRay,shadowRay,minimum,p,n,t)&&t<nearest){
+        nearest=t;point=p;normal=n;ringExteriorHit=part>=6;
+        if(shadowRay)return true;
+      }
+    }
+    if(lattice.x>0.){
+      int packed=int(lattice.x),columns=packed/128,rows=packed-columns*128;
+      int admitted=int(lattice.z),first=admitted/4096,last=admitted-first*4096;
+      vec4 shell=vec4(uSections[part].y,uSections[part].y+lattice.w,uSections[part].zw);
+      bool overflow,tiered=lattice.y<0.;
+      uint seed=uint(tiered?-lattice.y-1.:lattice.y);
+      if(ringLatticeCast(origin,ray,shell,uGaps[part].xy,ivec2(columns,rows),seed,ivec2(first,last),tiered,shadowRay,minimum,nearest,p,n,t,overflow)&&t<nearest){
+        nearest=t;point=p;normal=n;ringExteriorHit=part>=6;
+        if(shadowRay)return true;
+      }
+      if(overflow){ringGeometryOverflow=true;nearest=max(minimum+1.e-6,min(nearest,1.));point=origin+ray*nearest;normal=-ray;return true;}
+    }
+  }
+  vec3 terrainPoint,terrainNormal;float terrainDistance;
+  if(habitatTerrainCast(origin,ray,shadowRay,minimum,nearest,terrainPoint,terrainNormal,terrainDistance)){
+    nearest=terrainDistance;point=terrainPoint;normal=terrainNormal;ringTerrainHit=true;ringTerrainMaterialNormal=habitatTerrainShadingNormal;ringTerrainRockCoverage=habitatTerrainRockCoverage;
+  }
+  if(habitatTerrainOverflow>.5){ringGeometryOverflow=true;nearest=max(minimum+1.e-6,min(nearest,1.));point=origin+ray*nearest;normal=-ray;return true;}
   return nearest<1.e24;
 }
 bool bodyCast(vec3 origin,vec3 ray,float minimum,out vec3 point,out vec3 normal,out float distance){
-  if(uBodyKind==1)return ringCast(origin,ray,true,minimum,point,normal,distance);
+  if(uBodyKind==1)return ringCast(origin,ray,minimum,RING_CAMERA_RAY,point,normal,distance);
   float along=dot(origin,ray),perpendicular2=dot(cross(origin,ray),cross(origin,ray));
   float discriminant=uSphereRadius*uSphereRadius-perpendicular2;
   point=vec3(0.);normal=vec3(0.);distance=1.e25;
@@ -89,77 +212,103 @@ bool bodyCast(vec3 origin,vec3 ray,float minimum,out vec3 point,out vec3 normal,
   if(distance<=minimum)return false;
   point=origin+ray*distance;normal=point/uSphereRadius;return true;
 }
+${NATURAL_RING_GLSL}
 float gasRingCast(vec3 origin,vec3 ray,out vec3 point,out float distance){
   point=vec3(0.);distance=1.e25;
-  if(!uRinged||abs(ray.y)<1.e-10)return 0.;
-  distance=-origin.y/ray.y;point=origin+ray*distance;
-  if(distance<=uRayMinimum)return 0.;
-  float r=length(point.xz);
-  // The ray-plane derivative diverges at the horizon. It cannot extend the
-  // finite annulus into a false screen-wide line beyond the physical support.
-  if(r<1.25||r>2.1)return 0.;
-  float aa=clamp(fwidth(r),.000002,.02);
-  float support=smoothstep(1.25-aa,1.25+aa,r)*(1.-smoothstep(2.1-aa,2.1+aa,r));
-  float band=.62+.15*sin(r*330.)*(1.-smoothstep(.3,1.2,fwidth(r*330.)));
-  float gap=(r-1.65)/.025;
-  return support*band*(1.-.8*exp(-gap*gap))*.72;
+  if(!uRinged)return 0.;
+  vec3 lit;float alpha=naturalRingColumn(origin,ray,uRayMinimum,1.e15,false,distance,lit);
+  if(alpha>0.)point=origin+ray*distance;
+  return alpha;
 }
-float plasmaCast(vec3 origin,vec3 ray,out float nearest){
-  nearest=1.e25;float opacity=0.;
+float prominenceThread(float offset,float width,float footprint){
+  float band=length(vec2(width,footprint*.55));
+  float d=offset/band;
+  return exp(-d*d)*width/band;
+}
+float plasmaCast(vec3 origin,vec3 ray,float minimum,float maximum,out float nearest,out vec3 spectrum){
+  nearest=1.e25;float emission=0.;spectrum=vec3(0.);
+  float hot=step(uTint.r,uTint.b);
   for(int loop=0;loop<3;loop++){
     vec3 anchor=uPlasmaAxes[loop];if(dot(anchor,anchor)<.5)continue;
-    // Branch only on the fixed anchor. Avoid a degenerate meridian at poles.
     vec3 reference=abs(anchor.y)<.95?vec3(0.,1.,0.):vec3(1.,0.,0.);
-    vec3 tangent=normalize(reference-anchor*dot(reference,anchor)),plane=cross(anchor,tangent);
+    vec3 meridian=normalize(reference-anchor*dot(reference,anchor));
+    float phase=uPhase+float(loop)*2.399963;
+    float twist=.40*sin(phase);
+    vec3 tangent=meridian*cos(twist)+cross(anchor,meridian)*sin(twist);
+    vec3 plane=cross(anchor,tangent);
     float denominator=dot(ray,plane);if(abs(denominator)<1.e-8)continue;
-    vec3 center=anchor*.996;float t=dot(center-origin,plane)/denominator;
-    if(t<=uRayMinimum)continue;
+    vec3 center=anchor*${PROMINENCE_FOOT};float t=dot(center-origin,plane)/denominator;
+    if(t<=minimum||t>=maximum)continue;
     vec3 delta=origin+ray*t-center;
-    vec2 p=vec2(dot(delta,tangent),dot(delta,anchor))/uPlasmaRadii[loop];
-    float angle=dot(p,p)>1.e-12?atan(p.y,p.x):0.,r=length(p),aa=clamp(fwidth(r),.003,.08);
-    float offset=r-1.-sin(angle*7.+uPhase)*.014;
-    float width=.016+aa;
-    float alpha=exp(-offset*offset/(width*width))*.43*smoothstep(0.,.07,p.y);
-    alpha*=.55+.45*sin(angle*11.+uPhase)*sin(angle*11.+uPhase);
-    if(alpha>.002&&t<nearest){nearest=t;opacity=alpha;}
+    vec2 size=uPlasmaRadii[loop];
+    vec2 p=vec2(dot(delta,tangent),dot(delta,anchor))/size;
+    if(abs(p.x)>${PROMINENCE_HALF_SPAN}||p.y<0.||p.y>${PROMINENCE_HEIGHT})continue;
+
+    // Inclined sheets of emission rise from paired feet. The broad spine and
+    // its two finer threads share a bend while opening a dark space between them.
+    float skew=.26*sin(phase*1.3),x=p.x;
+    float dome=sqrt(max(0.,1.-x*x));
+    float ridge=dome*(.85+skew*x+.04*sin(x*8.+phase));
+    float projectedPixel=t*uPixelAngle/(min(size.x,size.y)*max(abs(denominator),.05));
+    float separation=dome*(.085+.045*hot);
+    float core=prominenceThread(p.y-ridge,.019,projectedPixel);
+    float filament=prominenceThread(p.y-ridge+separation,.011,projectedPixel);
+    float skirt=prominenceThread(p.y-ridge+separation*1.8,.035,projectedPixel);
+    float ribbon=(.68*core+.30*filament+.12*skirt)
+      *smoothstep(0.,.08,p.y)*(1.-smoothstep(.94,${PROMINENCE_HALF_SPAN},abs(x)));
+    ribbon*=.56+.44*smoothstep(-.6,.8,sin(x*11.+phase)+.33*sin(x*24.-phase));
+    if(ribbon>.002){
+      nearest=min(nearest,t);
+      emission+=ribbon;
+      vec3 color=mix(mix(vec3(1.,.22,.055),vec3(1.42,.65,.26),core),
+        mix(vec3(.17,.35,1.),vec3(.59,.92,1.4),core),hot);
+      spectrum+=ribbon*color;
+    }
   }
-  return opacity;
+  if(emission>0.)spectrum/=emission;
+  return emission;
 }
 `;
 
-export const cosmicBodySurfaceShader = ({surfaceTexture,cloudTexture,stellarTexture,habitatTexture} = {}) => /* glsl */`
-${surfaceTexture ? 'uniform sampler2D uSurface;' : ''}
-${cloudTexture ? 'uniform sampler2D uClouds;' : ''}
-${stellarTexture ? 'uniform sampler2D uStellar;' : ''}
-uniform bool uHasSurface,uHasClouds,uHasStellar;
-uniform float uPixelAngle,uCloudTime;
-uniform bool uHasHabitatPort;
-uniform float uHabitatTerrainReferenceRadius;
-uniform vec2 uHabitatPort,uHabitatPortAxes,uHabitatSize;
-${habitatTexture ? 'uniform sampler2D uHabitatMap;' : ''}
-uniform bool uHasHabitatMap;
-float bodyHash(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
-float bodyNoise(vec3 p){
-  vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
-  return mix(mix(mix(bodyHash(i),bodyHash(i+vec3(1,0,0)),f.x),mix(bodyHash(i+vec3(0,1,0)),bodyHash(i+vec3(1,1,0)),f.x),f.y),
-    mix(mix(bodyHash(i+vec3(0,0,1)),bodyHash(i+vec3(1,0,1)),f.x),mix(bodyHash(i+vec3(0,1,1)),bodyHash(i+vec3(1,1,1)),f.x),f.y),f.z);
-}
-float filteredBodyNoise(vec3 p,float footprint){return mix(bodyNoise(p),.5,smoothstep(.3,1.1,footprint));}
+
+export const COSMIC_BODY_SURFACE_GLSL = /* glsl */`
+#ifdef GAS_OBSERVED_CLOUDS
+  uniform sampler2D uClouds;
+  uniform vec3 uCloudColorMean;
+#endif
+#ifdef OBSERVED_STELLAR_SURFACE
+  uniform sampler2D uStellar;
+  uniform bool uHasStellar,uHasStellarPhotosphere;
+  uniform vec4 uPhotosphereUV;
+  uniform vec3 uPhotosphereParameters;
+#endif
+#ifdef SCANNED_ROCK_SURFACE
+  uniform sampler2D uHabitatRockColor,uHabitatRockNormal;
+  uniform bool uHasHabitatMaterials;
+  uniform vec2 uHabitatMaterialTileSize;
+  uniform vec3 uHabitatRockColorMean,uHabitatRockPhase;
+#endif
+${COSMIC_BODY_NOISE_GLSL}
 float plateSeam(float p,float footprint){
   float edge=min(fract(p),1.-fract(p));
   return mix(1.-smoothstep(.003,.014+footprint,edge),.018,smoothstep(.12,.6,footprint));
 }
-${surfaceTexture || cloudTexture || stellarTexture ? /* glsl */`vec2 bodyUV(vec3 n){
+vec2 bodyUV(vec3 n){
   float longitude=dot(n.xz,n.xz)>1.e-12?atan(n.z,n.x):0.;
   return vec2(longitude/BODY_TAU+uPhase,.5+asin(clamp(n.y,-1.,1.))/3.14159265359);
 }
 vec3 bodyMap(sampler2D map,vec2 uv){
   vec2 dx=dFdx(uv),dy=dFdy(uv);dx.x-=floor(dx.x+.5);dy.x-=floor(dy.x+.5);
   return textureGrad(map,uv,dx,dy).rgb;
-}` : ''}
-#define noise3 bodyNoise
-${gasCloudGLSL}
-#undef noise3
+}
+#ifdef HABITAT_SURFACE_MAP
+uniform sampler2D uSurface;
+float habitatSurfaceTextureGain(vec3 point){
+  vec2 uv=vec2(atan(point.z,point.x),point.y)*uBodyRadius/6500.+uPhase;
+  float geological=dot(bodyMap(uSurface,uv),vec3(.2126,.7152,.0722));
+  return 1.+(geological-.35)*.2;
+}
+#endif
 // Value and analytic spatial derivative of the same cubic-interpolated field.
 // The height and its material normal therefore cannot invent separate ridges.
 vec4 ringNoiseGradient(vec3 p){
@@ -173,9 +322,8 @@ vec4 ringNoiseGradient(vec3 p){
     mix(x10-x00,x11-x01,s.z)*ds.y,(z1-z0)*ds.z);
 }
 vec4 ringWorldField(vec3 world,float scale,float footprint,bool ridge){
-  // Avoid evaluating fields whose complete footprint is unresolved.
-  float mean=ridge?.55:.5;
-  if(footprint>=scale*1.1)return vec4(mean,0.,0.,0.);
+  float ratio=footprint/scale,mean=ridge?.55:.5;
+  if(ratio>=1.1)return vec4(mean,0.,0.,0.);
   vec4 field=ringNoiseGradient(world/scale);
   if(ridge){
     float crest=1.-abs(field.x*2.-1.);
@@ -184,19 +332,9 @@ vec4 ringWorldField(vec3 world,float scale,float footprint,bool ridge){
   }
   // Fade unresolved *heights and slopes*, without moving the field or changing
   // its phase. The ridge mean is applied after the nonlinear ridge transform.
-  field=mix(field,vec4(mean,0.,0.,0.),smoothstep(.3,1.1,footprint/scale));
+  field=mix(field,vec4(mean,0.,0.,0.),smoothstep(.3,1.1,ratio));
   field.yzw/=scale;
   return field;
-}
-vec4 ringCoastalField(vec3 localWorld,vec3 broadWorld,float scale,float footprint,float broadScale,float weight,vec3 weightGradient){
-  if(weight<=0.)return ringWorldField(localWorld,scale,footprint,false);
-  vec4 broad=ringWorldField(broadWorld,scale,footprint*broadScale,false);
-  broad.yzw*=broadScale;
-  if(weight>=1.)return broad;
-  vec4 local=ringWorldField(localWorld,scale,footprint,false);
-  vec4 blended=mix(local,broad,weight);
-  blended.yzw+=(broad.x-local.x)*weightGradient;
-  return blended;
 }
 vec4 ringRockRidge(vec3 world,float scale,float footprint){
   // One fixed anisotropic geological frame stretches and shears the ranges.
@@ -211,268 +349,93 @@ float ringDirectLight(vec3 point,vec3 geometricNormal,vec3 materialNormal){
   if(dot(geometricNormal,uLight)<=0.)return 0.;
   float diffuse=max(dot(materialNormal,uLight),0.);
   if(diffuse>.02){vec3 blocker,bn;float t;
-    if(ringCast(point+geometricNormal*max(.35/uBodyRadius,1.e-7),uLight,false,max(.2/uBodyRadius,1.e-7),blocker,bn,t))diffuse*=.06;
+    if(ringCast(point+geometricNormal*max(.35/uBodyRadius,1.e-7),uLight,max(.2/uBodyRadius,1.e-7),RING_SHADOW_RAY,blocker,bn,t))diffuse*=.06;
   }
   return diffuse;
 }
+${RING_HABITAT_AIR_GLSL}
+${RING_HABITAT_SHADOW_GLSL}
+${RING_ENGINEERING_MATERIAL_GLSL}
+${RING_HABITAT_SURFACE_GLSL}
+${FLAT_DECK_SURFACE_GLSL}
 vec3 ringSurface(vec3 point,vec3 geometricNormal,vec3 ray,float distance){
-  float radius=length(point.xz),angle=atan(point.z,point.x),pixel=distance*uPixelAngle;
-  vec3 radial=vec3(point.x/radius,0.,point.z/radius),tangent=vec3(-radial.z,0.,radial.x);
-  float inner=step(.5,-dot(geometricNormal,radial));
-  float pixelMetres=pixel*uBodyRadius;
-  // Surface derivatives include the stretched footprint of a grazing view.
-  // This is material filtering only; the analytic solid still owns every hit.
-  float terrainFootprint=max(pixelMetres,max(length(dFdx(point)),length(dFdy(point)))*uBodyRadius);
-  vec3 halfVector=uLight-ray;float halfSquared=dot(halfVector,halfVector);
-  if(inner>.5){
-    float habitatAngle=atan(sin(angle-uPhase-3.14159265359),cos(angle-uPhase-3.14159265359));
-    vec2 habitatPoint=vec2(habitatAngle*uBodyRadius,point.y*uBodyRadius);
-    float portLandscape=uHasHabitatPort?1.-smoothstep(15000.,25000.,length(habitatPoint-uHabitatPort)):0.;
-    vec4 portPicture=vec4(0.);
-    ${habitatTexture ? /* glsl */`if(uHasHabitatPort&&uHasHabitatMap){
-      mat2 mapFrame=mat2(uHabitatPortAxes.x,-uHabitatPortAxes.y,uHabitatPortAxes.y,uHabitatPortAxes.x);
-      vec2 h=mapFrame*(habitatPoint-uHabitatPort);
-      vec2 uv=.5+vec2(h.x,-h.y)/uHabitatSize;
-      vec2 dx=dFdx(uv),dy=dFdy(uv);
-      vec2 edge=min(uv,1.-uv);
-      float feather=smoothstep(0.,.075,min(edge.x,edge.y));
-      if(feather>0.){
-        portPicture=textureGrad(uHabitatMap,uv,dx,dy);
-        portPicture.a*=feather;
-        // Opaque features have baked surface lighting.
-        if(portPicture.a>=1.)return portPicture.rgb;
-      }
-    }` : ''}
-    // The circular embedding is continuous at longitude +/-pi. Every scale is
-    // in world units, with no camera-relative terrain translation or UV zoom.
-    vec3 world=vec3(radial.x,point.y,radial.z)*uBodyRadius+uPhase*vec3(19013.,7301.,11027.);
-    if(uHasHabitatPort){
-      // Keep the authored coast at the port when the physical ring is resized,
-      // while retaining world-metre detail scales and a continuous embedding.
-      float anchorAngle=uPhase+3.14159265359+uHabitatPort.x/uBodyRadius;
-      world.xz+=vec2(cos(anchorAngle),sin(anchorAngle))*(uHabitatTerrainReferenceRadius-uBodyRadius);
-    }
-    // Far from the authored port, preserve the original continent's angular
-    // scale on a larger ring. Blend the fields (including their derivatives)
-    // over a physical distance, leaving the complete local shore unchanged.
-    vec2 portDelta=habitatPoint-uHabitatPort;
-    float portDistance=length(portDelta);
-    float broadMix=uHasHabitatPort?smoothstep(30000.,80000.,portDistance):0.;
-    float broadScale=1.;
-    vec3 broadWorld=world,blendGradient=vec3(0.);
-    if(broadMix>0.){
-      broadScale=uHabitatTerrainReferenceRadius/uBodyRadius;
-      float anchorAngle=uPhase+3.14159265359+uHabitatPort.x/uBodyRadius;
-      vec3 anchorWorld=vec3(cos(anchorAngle)*uHabitatTerrainReferenceRadius,uHabitatPort.y,sin(anchorAngle)*uHabitatTerrainReferenceRadius)
-        +uPhase*vec3(19013.,7301.,11027.);
-      broadWorld=anchorWorld+(world-anchorWorld)*broadScale;
-      if(broadMix<1.){
-        float t=(portDistance-30000.)/50000.;
-        vec2 direction=portDelta/portDistance;
-        blendGradient=(tangent*direction.x+vec3(0.,direction.y,0.))*6.*t*(1.-t)/50000.;
-      }
-    }
-    vec4 continent=ringCoastalField(world,broadWorld,68000.,terrainFootprint,broadScale,broadMix,blendGradient);
-    vec4 region=ringCoastalField(world+vec3(17000.,31000.,11000.),broadWorld+vec3(17000.,31000.,11000.),23000.,terrainFootprint,broadScale,broadMix,blendGradient);
-    vec4 coastDetail=ringCoastalField(world+vec3(4700.,1300.,3100.),broadWorld+vec3(4700.,1300.,3100.),7100.,terrainFootprint,broadScale,broadMix,blendGradient);
-    vec4 coast=continent*.61+region*.27+coastDetail*.12;
-    vec4 broadCoast=coast;
-    vec4 ridge=ringRockRidge(world+vec3(9000.,13000.,7000.),3100.,terrainFootprint);
-    vec4 crag=ringRockRidge(world+vec3(1300.,3700.,2300.),850.,terrainFootprint);
-    vec4 ledge=ringRockRidge(world+vec3(700.,1700.,3100.),170.,terrainFootprint);
-    vec4 ground=ringWorldField(world+vec3(210.,730.,430.),48.,terrainFootprint,false);
-    vec4 stone=ringWorldField(world+vec3(11.,37.,53.),12.,terrainFootprint,false);
-    vec4 canopy=ringWorldField(world+vec3(83.,59.,109.),3.2,terrainFootprint,false);
-    vec4 grit=ringWorldField(world+vec3(71.,17.,43.),.8,terrainFootprint,false);
-    // Reuse the resolved regional rock fields to notch a coast at hundreds of
-    // metres. No new high-frequency field can independently repaint a biome.
-    coast+=vec4((crag.x-.55)*.0024+(ledge.x-.55)*.0012,crag.yzw*.0024+ledge.yzw*.0012);
-    float elevation=coast.x,seaLevel=.47;
-    vec2 coastGradient=vec2(dot(coast.yzw,tangent)/radius,coast.z);
-    float coastSlope=length(coastGradient),shoreAA=max(.00004,coastSlope*terrainFootprint);
-    float land=smoothstep(seaLevel-shoreAA,seaLevel+shoreAA,elevation);
-    float inland=clamp((elevation-.486)/.13,0.,1.);
-    float mountain=inland*inland*(3.-2.*inland);
-    vec3 mountainGradient=coast.yzw*(6.*inland*(1.-inland)/.13);
-    float ridgeHeight=ridge.x*480.+crag.x*80.+ledge.x*12.;
-    vec3 heightGradient=coast.yzw*2600.*step(seaLevel,elevation)
-      +mountain*(ridge.yzw*480.+crag.yzw*80.+ledge.yzw*12.)+mountainGradient*ridgeHeight
-      +ground.yzw*2.4+stone.yzw*1.9+canopy.yzw*.24+grit.yzw*.075;
-    vec2 slope=vec2(dot(heightGradient,tangent)/radius,heightGradient.y);
-    // The inhabited coast has softer material relief. This does not displace
-    // the shared sea-level field or change the analytic collision surface.
-    slope*=mix(1.,.18,portLandscape);
-    vec3 landNormal=normalize(geometricNormal-tangent*slope.x-vec3(0.,slope.y,0.));
-    float steep=length(slope),rock=smoothstep(.1,.55,steep)*(.25+mountain*.75);
-    // Muted fertile lowlands, dry uplands, then exposed stone. Bright mineral
-    // faces are sparse and acquire their shape from the height-field normal.
-    vec3 soil=mix(vec3(.035,.064,.029),vec3(.14,.126,.077),smoothstep(.32,.72,region.x)*(.45+mountain*.55));
-    vec3 coastalForest=mix(vec3(.021,.046,.034),vec3(.048,.063,.045),mountain*.55);
-    soil=mix(soil,coastalForest,portLandscape*.9);
-    float weathering=.67+stone.x*.38+grit.x*.28-pow(1.-grit.x,4.)*.2;
-    // Resolved vegetation patches and canopy texture add smaller spatial
-    // structure without altering the large-scale land/sea boundary.
-    float vegetation=mix(.78,1.18,ground.x)*mix(.87,1.13,canopy.x);
-    soil*=(.88+coastDetail.x*.18)*weathering*vegetation;
-    vec3 bedrock=mix(vec3(.105,.108,.098),vec3(.19,.175,.142),region.x);
-    bedrock=mix(bedrock,vec3(.09,.103,.102),portLandscape*.8);
-    // Thin mineral bedding follows the same height field. Unlike biome paint,
-    // its colour changes are small, resolved and subordinate to face lighting.
-    float visualHeight=max(0.,elevation-seaLevel)*2600.+mountain*ridgeHeight;
-    float bedding=(.5+.5*sin(visualHeight*.095+region.x*3.))
-      *(1.-smoothstep(.4,1.6,terrainFootprint*steep*.095));
-    bedrock*=weathering*(.86+bedding*.17*(1.-portLandscape));
-    soil=mix(soil,bedrock,rock);
-    float beachWidth=max(shoreAA,coastSlope*24.);
-    float beach=1.-smoothstep(shoreAA,shoreAA+beachWidth,abs(elevation-seaLevel));
-    soil=mix(soil,vec3(.19,.174,.129),beach*.65);
-    ${surfaceTexture ? /* glsl */`if(uHasSurface){
-      vec2 uv=vec2(angle*uBodyRadius,point.y*uBodyRadius)/6500.+uPhase;
-      float geological=dot(bodyMap(uSurface,uv),vec3(.2126,.7152,.0722));
-      soil*=1.+(geological-.35)*.2;
-    }` : ''}
-    // Shoreline notches must not make kilometre-wide bathymetric colour bands
-    // flicker with their much finer derivatives. Keep the actual coast above,
-    // and use its original broad field for the inhabited bay's water depth cue.
-    vec2 broadCoastGradient=vec2(dot(broadCoast.yzw,tangent)/radius,broadCoast.z);
-    float waterSlope=mix(coastSlope,length(broadCoastGradient),portLandscape);
-    float waterElevation=mix(elevation,broadCoast.x,portLandscape);
-    float shallow=smoothstep(seaLevel-max(.004,waterSlope*1800.),seaLevel,waterElevation);
-    vec3 deepSea=mix(vec3(.004,.016,.024),vec3(.008,.025,.038),portLandscape);
-    vec3 shallowSea=mix(vec3(.014,.055,.063),vec3(.025,.13,.12),portLandscape);
-    vec3 sea=mix(deepSea,shallowSea,shallow);
-    // Decimetre-height optical ripples are fixed in object/world coordinates.
-    // They supply a sea material normal, not a moving or collidable sea mesh.
-    vec3 waveA=vec3(.18,.12,.09),waveB=vec3(.57,-.31,.38);
-    vec3 waterGradient=waveA*cos(dot(world,waveA))*mix(.3,.025,portLandscape)*(1.-smoothstep(.4,1.6,terrainFootprint*length(waveA)))
-      +waveB*cos(dot(world,waveB))*mix(.05,.006,portLandscape)*(1.-smoothstep(.4,1.6,terrainFootprint*length(waveB)));
-    vec3 waterNormal=normalize(geometricNormal-tangent*dot(waterGradient,tangent)/radius-vec3(0.,waterGradient.y,0.));
-    vec3 normal=normalize(mix(waterNormal,landNormal,land));
-    float diffuse=ringDirectLight(point,geometricNormal,normal);
-    float valley=mountain*(1.-ridge.x),occlusion=1.-valley*.26;
-    vec3 landColor=soil*(.075*occlusion+diffuse*1.22);
-    float facing=clamp(dot(waterNormal,-ray),0.,1.),fresnel=.02+.98*pow(1.-facing,5.);
-    vec3 seaColor=sea*(.055+diffuse*.38)+vec3(.064,.105,.125)*fresnel*.23;
-    if(halfSquared>1.e-12){
-      vec3 halfDirection=halfVector*inversesqrt(halfSquared);
-      float waterGlint=pow(max(dot(waterNormal,halfDirection),0.),180.);
-      seaColor+=vec3(.72,.8,.83)*waterGlint*diffuse*(.08+fresnel*.5);
-      landColor+=bedrock*pow(max(dot(landNormal,halfDirection),0.),38.)*diffuse*rock*.12;
-    }
-    vec3 color=mix(seaColor,landColor,land);
-    float air=(1.-exp(-distance*.6))*.18;
-    air=max(air,portLandscape*(1.-exp(-distance*uBodyRadius/42000.))*.09);
-    color=mix(color,vec3(.063,.095,.12)*(.35+diffuse*.65),air);
-    return mix(color,portPicture.rgb,portPicture.a);
+  vec3 radial=normalize(vec3(point.x,0.,point.z));
+  bool inside=ringTerrainHit||(!ringExteriorHit&&dot(geometricNormal,radial)<-.5);
+  #ifdef HABITAT_PORT_MAP
+  vec4 picture=vec4(0.);
+  if(inside&&uHasHabitatPort&&uHasHabitatMap){
+    picture=habitatPortPicture(habitatDeckPoint(point));
+    if(picture.a>=1.)return picture.rgb;
   }
-  // Steel plate dimensions are world lengths. Close seams and roughness fade
-  // to their area average as their spacing becomes smaller than a pixel.
-  vec2 metres=vec2(angle*uBodyRadius,point.y*uBodyRadius);
-  float radialFace=abs(dot(geometricNormal,radial));
-  if(abs(geometricNormal.y)>.5)metres.y=(radius-1.)*uBodyRadius;
-  else if(radialFace<.5)metres.x=(radius-1.)*uBodyRadius;
-  vec2 plate=metres/vec2(640.,280.);
-  float seams=max(plateSeam(plate.x,pixelMetres/640.),plateSeam(plate.y,pixelMetres/280.));
-  float coarse=filteredBodyNoise(vec3(metres*.00038,uPhase),pixelMetres*.00038);
-  float grain=filteredBodyNoise(point*uBodyRadius*.23,pixelMetres*.23);
-  vec3 steel=mix(vec3(.085,.11,.125),uTint*.25,.32)*(.82+coarse*.28)*(1.-seams*.65);
-  // The outer face of a habitat reads in three scales: service trunks around
-  // the belt, banks of radiator louvers, then the physical plates above.
-  if(uHasHabitatPort && dot(geometricNormal,radial)>.5){
-    float turns=angle/BODY_TAU+.5;
-    vec2 dd=vec2(dFdx(turns),dFdy(turns));
-    float phasePixel=length(dd-floor(dd+.5));
-    float beltY=point.y/uSections[3].w;
-    float yPixel=max(fwidth(beltY),.0001);
-    float module=turns*48.+step(0.,beltY)*.37;
-    float phase=fract(module);
-    float variation=bodyHash(vec3(mod(floor(module),48.),step(0.,beltY),floor(uPhase*46.)));
-    float bankY=abs(beltY)-mix(.49,.61,variation);
-    float frameDistance=max(abs(phase-.5)-(.34+.08*variation),
-      abs(bankY)*1.45-.29+abs(phase-.5)*.19);
-    float edgePixel=max(.003,phasePixel*48.+yPixel*1.45);
-    float bank=(1.-smoothstep(-edgePixel,edgePixel,frameDistance))*
-      (1.-smoothstep(.32,.80,edgePixel));
-    float louverPhase=dot(vec2(phase,bankY),vec2(23.,1.5));
-    float louver=.5+.5*cos(BODY_TAU*louverPhase);
-    louver=mix(louver,.5,smoothstep(.18,.56,phasePixel*1104.+yPixel*1.5));
-    vec3 radiator=mix(vec3(.026,.043,.050),vec3(.070,.102,.111),louver);
-    steel=mix(steel,radiator*(1.-.35*seams),bank*.92);
-    float rail=1.-smoothstep(.022,.042+yPixel,abs(abs(beltY)-.82));
-    float braces=1.-smoothstep(.016,.032+phasePixel*48.,abs(phase-.10));
-    steel=mix(steel,vec3(.22,.22,.18),rail*.72);
-    steel=mix(steel,vec3(.18,.124,.090),braces*step(.70,variation)*.54);
-  }
-  vec3 normal=geometricNormal;
-  float resolved=1.-smoothstep(.5,2.,pixelMetres*.23);
-  normal=normalize(normal+(tangent*(grain-.5)+vec3(0.,filteredBodyNoise(point*uBodyRadius*.19+31.,pixelMetres*.19)-.5,0.))*resolved*.055);
-  float diffuse=ringDirectLight(point,geometricNormal,normal);
-  vec3 color=steel*(.045+diffuse*1.2);
-  float gloss=halfSquared>1.e-12?pow(max(dot(normal,halfVector*inversesqrt(halfSquared)),0.),mix(54.,120.,1.-grain)):0.;
-  color+=steel*.9*gloss*diffuse*.5;
+  #endif
+  vec3 color;
+  if(uFlatHabitatDeck)color=flatDeckSurface(point,geometricNormal,ray,distance);
+  else if(inside)color=habitatSurface(point,geometricNormal,ray,distance,uSections[0].x,ringTerrainHit?ringTerrainMaterialNormal:geometricNormal,ringTerrainRockCoverage);
+  else color=engineeringSurface(point,geometricNormal,ray,distance);
+  #ifdef HABITAT_PORT_MAP
+  color=mix(color,picture.rgb,picture.a);
+  #endif
   return color;
 }
-vec3 sphereSurface(vec3 point,vec3 normal,vec3 ray,float distance){
-  float facing=clamp(dot(normal,-ray),0.,1.),ndl=dot(normal,uLight),pixel=distance*uPixelAngle;
-  vec3 seed=sin(vec3(17.17,31.7,47.1)*uPhase)*31.;
-  float broad=filteredBodyNoise(normal*5.+seed,pixel*5.);
-  if(uBodyKind==5){
-    vec4 basin=ringWorldField(normal*uBodyRadius+seed*170.,1700.,pixel*uBodyRadius,true);
-    vec4 rock=ringWorldField(normal*uBodyRadius+seed*13.,130.,pixel*uBodyRadius,true);
-    vec4 grain=ringWorldField(normal*uBodyRadius+seed,3.,pixel*uBodyRadius,false);
-    vec3 gradient=basin.yzw*130.+rock.yzw*11.+grain.yzw*.09;
-    vec3 materialNormal=normalize(normal-(gradient-normal*dot(normal,gradient)));
-    vec3 albedo=uTint*(.65+basin.x*.22+rock.x*.2+grain.x*.13);
-    return albedo*(.018+max(dot(materialNormal,uLight),0.)*1.05);
-  }
-  if(uBodyKind==4){
-    float granule=filteredBodyNoise(normal*340.+seed,pixel*340.);
-    float fine=filteredBodyNoise(normal*920.+seed,pixel*920.);
-    float activeRegion=smoothstep(.74,.88,filteredBodyNoise(normal*13.+seed,pixel*13.));
-    float textureDetail=1.;
-    ${stellarTexture ? /* glsl */`if(uHasStellar){
-      // Chromospheric source supplies restrained luminance only. Its false
-      // colour never becomes the visible photosphere's red/yellow marbling.
-      vec3 observed=bodyMap(uStellar,bodyUV(normal));
-      textureDetail=.94+dot(observed,vec3(.2126,.7152,.0722))*.12;
-    }` : ''}
-    float hot=step(uTint.r,uTint.b);
-    vec3 white=mix(vec3(1.03,.86,.64),vec3(.72,.86,1.06),hot);
-    return white*(.88+granule*.16+fine*.045-activeRegion*.19)*textureDetail*(.27+.73*pow(facing,.43));
-  }
-  if(uBodyKind==2){
-    vec3 albedo=gasClouds(normal,seed,uTint*vec3(.32,.29,.26),mix(uTint*.73,vec3(.57,.52,.46),.42),1,uCloudTime,pixel);
-    ${cloudTexture ? /* glsl */`if(uHasClouds){
-      vec3 observed=bodyMap(uClouds,bodyUV(normal));
-      albedo=mix(albedo,observed*.48,.54);
-    }` : ''}
-    float shadow=0.;
-    if(uRinged){vec3 hit;float t;shadow=gasRingCast(point+normal*.000001,uLight,hit,t);}
-    return albedo*(.014+pow(max(ndl,0.),.9)*1.12)*(1.-shadow*.8)+uTint*pow(1.-facing,5.)*max(ndl,0.)*.025;
-  }
-  float relief=filteredBodyNoise(normal*19.+seed,pixel*19.)*.7+filteredBodyNoise(normal*83.+seed,pixel*83.)*.3;
-  vec3 albedo=uTint*(.17+relief*.12+broad*.04);
-  return albedo*(.018+max(ndl,0.)*.7)+uTint*pow(1.-facing,7.)*smoothstep(-.1,.25,ndl)*.035;
-}
+${COSMIC_SPHERE_SURFACE_GLSL}
 `;
 
-export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null, stellarTexture = null, habitatTexture = null } = {}) {
+// cloudColorMean is copied numeric metadata, validated at createCosmicBodies.
+// Its unit default preserves low-level callers with uncalibrated modulation maps.
+export function cosmicBodyUniforms({ surfaceTexture = null, cloudTexture = null, cloudColorMean = [1,1,1], stellarTexture = null, photosphereMaterial = null, habitatTexture = null, habitatMaterials = null } = {}) {
+  // This optional set is borrowed from the embedding app. The public engine
+  // retains its procedural material path without game-owned image assets.
+  // The slot owns this numeric metadata texture. Its three materials share it;
+  // image maps remain borrowed. Row 0 stores catalogue lattice integers/depth;
+  // row 1 stores normalized support spheres, outside uniform-vector storage.
+  const habitatTerrain=createEmptyRingHabitatGeometryTexture();
+  const ringLattices = new THREE.DataTexture(new Float32Array(RING_SECTION_CAPACITY * 2 * 4), RING_SECTION_CAPACITY, 2, THREE.RGBAFormat, THREE.FloatType);
+  ringLattices.name = 'Cosmic ring lattice metadata';
+  ringLattices.minFilter = THREE.NearestFilter;
+  ringLattices.magFilter = THREE.NearestFilter;
+  ringLattices.generateMipmaps = false;
+  ringLattices.needsUpdate = true;
   return {
-    uCloudTime: {value: 0}, uBodyKind: { value: 0 }, uBodyRadius: { value: 1 }, uSphereRadius: { value: 1 }, uPhase: { value: 0 }, uRayMinimum: { value: 0 }, uVisibility: { value: 1 },
-    uBodyOrigin: { value: new THREE.Vector3() }, uBodyFrame: { value: new THREE.Matrix3() },
-    uLight: { value: new THREE.Vector3() }, uTint: { value: new THREE.Color() }, uRinged: { value: false },
-    uCameraWallC: { value: Array.from({ length: 6 }, () => new THREE.Vector2()) },
-    uSectionCount: { value: 0 }, uSections: { value: Array.from({ length: 6 }, () => new THREE.Vector4()) }, uGaps: { value: Array.from({ length: 6 }, () => new THREE.Vector2()) },
-    uPlasmaAxes: { value: Array.from({ length: 3 }, () => new THREE.Vector3()) }, uPlasmaRadii: { value: Array.from({ length: 3 }, () => new THREE.Vector2(1, 1)) },
-    uSurface: { value: surfaceTexture }, uHasSurface: { value: Boolean(surfaceTexture) },
-    uClouds: { value: cloudTexture }, uHasClouds: { value: Boolean(cloudTexture) },
-    uStellar: { value: stellarTexture }, uHasStellar: { value: Boolean(stellarTexture) },
+    ...createRingHabitatShadowUniforms(),
+    uFlatHabitatDeck:{value:false},
     uHasHabitatPort: { value: false }, uHabitatTerrainReferenceRadius: { value: 1 }, uHabitatPort: { value: new THREE.Vector2() }, uHabitatPortAxes: { value: new THREE.Vector2(1, 0) },
     uHabitatSize: { value: new THREE.Vector2() }, uHabitatMap: { value: habitatTexture }, uHasHabitatMap: { value: false },
+
+    uHaloNearDepth:{value:null},uHaloNearDepthEnabled:{value:0},uHaloNearDepthSize:{value:new THREE.Vector2(1,1)},uHaloNearDepthCamera:{value:new THREE.Vector2(.5,220000)},
+    uHabitatWind:{value:new THREE.Vector3()},
+    uRingVoid:{value:new THREE.Vector3()},
+    uRingCore:{value:new THREE.Vector3()},
+    uHabitatSampleIndex:{value:0},
+    uHasHabitatMaterials:{value:habitatMaterials!==null},
+    uHabitatRockColor:{value:habitatMaterials===null?null:habitatMaterials.rockColor},
+    uHabitatRockNormal:{value:habitatMaterials===null?null:habitatMaterials.rockNormal},
+    uHabitatGroundColor:{value:habitatMaterials?.groundColor??null},
+    uHabitatGroundNormal:{value:habitatMaterials?.groundNormal??null},
+    uHabitatMaterialTileSize:{value:new THREE.Vector2(habitatMaterials===null?1:habitatMaterials.rockTileSize,habitatMaterials?.groundTileSize??1)},
+    uHabitatRockPhase:{value:new THREE.Vector3()},uHabitatGroundPhase:{value:new THREE.Vector3()},
+    uHabitatRockColorMean:{value:new THREE.Vector3().fromArray(habitatMaterials===null?[1,1,1]:habitatMaterials.rockColorMean)},
+    uHabitatGroundColorMean:{value:new THREE.Vector3().fromArray(habitatMaterials?.groundColorMean??[1,1,1])},
+    uHabitatClimate: {value:0}, uHabitatEcology:{value:new THREE.Vector3(RING_HABITAT_ECOLOGY[0].forestCeiling,RING_HABITAT_ECOLOGY[0].snowLine,RING_HABITAT_ECOLOGY[0].treeDensity)}, uHabitatTerrain:{value:habitatTerrain},uHabitatGroupCount:{value:0},
+    uBodyKind: { value: 0 }, uBodyRadius: { value: 1 }, uSphereRadius: { value: 1 }, uPhase: { value: 0 }, uRayMinimum: { value: 0 }, uVisibility: { value: 1 },
+    uBodyOrigin: {value:new THREE.Vector3()}, uBodyCenter: { value: new THREE.Vector3() }, uBodyFrame: { value: new THREE.Matrix3() },
+    ...gasMacroUniforms(),
+    uGasNoiseCells:{value:GAS_CLOUD_MATERIAL_SCALES.map(()=>new THREE.Vector3())},
+    uGasNoiseFractions:{value:GAS_CLOUD_MATERIAL_SCALES.map(()=>new THREE.Vector3())},
+    uNaturalRingGrainResolved:{value:false},
+    uLight: { value: new THREE.Vector3() }, uTint: { value: new THREE.Color() }, uRinged: { value: false },
+    uRingLattices: { value: ringLattices }, uSectionCount: { value: 0 }, uSections: { value: Array.from({ length: RING_SECTION_CAPACITY }, () => new THREE.Vector4()) }, uGaps: { value: Array.from({ length: RING_SECTION_CAPACITY }, () => new THREE.Vector4()) },
+    uPlasmaAxes: { value: Array.from({ length: 3 }, () => new THREE.Vector3()) }, uPlasmaRadii: { value: Array.from({ length: 3 }, () => new THREE.Vector2(1, 1)) },
+    uSurface: { value: surfaceTexture }, uHasSurface: { value: Boolean(surfaceTexture) },
+    uClouds: { value: cloudTexture },
+    uCloudColorMean: { value: new THREE.Vector3().fromArray(cloudColorMean) },
+    uStellar: { value: stellarTexture }, uHasStellar: { value: Boolean(stellarTexture) },
+    uHasStellarPhotosphere:{value:photosphereMaterial!==null},
+    uPhotosphereUV:{value:new THREE.Vector4().fromArray(photosphereMaterial===null?[0,0,1,1]:photosphereMaterial.uvRect)},
+    uPhotosphereParameters:{value:new THREE.Vector3(photosphereMaterial===null?1:photosphereMaterial.linearLumaMean,photosphereMaterial===null?1:photosphereMaterial.tileGranules,photosphereMaterial===null?0:photosphereMaterial.maxLod)},
   };
 }
 
-export function setCosmicBody(uniforms, body) {
+export function setCosmicBody(uniforms, body, gasWeatherTime = 0, gasVelocity = null) {
   const habitatImage = uniforms.uHabitatMap.value?.image;
   uniforms.uHasHabitatMap.value = Boolean(habitatImage && habitatImage.width > 0 && habitatImage.height > 0);
   uniforms.uHasHabitatPort.value = Boolean(body.habitatPort);
@@ -484,26 +447,136 @@ export function setCosmicBody(uniforms, body) {
     uniforms.uHabitatPortAxes.value.set(Math.cos(angle), Math.sin(angle));
   }
   const radius = body.radius;
-  uniforms.uBodyKind.value = BODY_KINDS[body.kind];
+  uniforms.uHabitatClimate.value=body.habitat?.climate??0; // Legacy bare rings use the temperate palette.
+  const ecology=body.habitat?body.habitat.ecology:RING_HABITAT_ECOLOGY[0];
+  uniforms.uHabitatEcology.value.set(ecology.forestCeiling,ecology.snowLine,ecology.treeDensity);
+  const groups=body.shape.type==='compound'?body.shape.terrainGroups:undefined;
+  const needsTerrain=Boolean(groups?.length),previousTerrain=uniforms.uHabitatTerrain.value;
+  if(previousTerrain.userData.isHabitatFull!==needsTerrain){
+    uniforms.uHabitatTerrain.value=needsTerrain?createRingHabitatGeometryTexture():createEmptyRingHabitatGeometryTexture();
+    previousTerrain.dispose();
+  }
+  uniforms.uHabitatGroupCount.value=setRingHabitatGeometry(uniforms.uHabitatTerrain.value,groups,radius);
+  const ringLattices = uniforms.uRingLattices.value, latticeData = ringLattices.image.data;
+  const previousSectionCount = uniforms.uSectionCount.value;
+  let latticeChanged = false;
+  uniforms.uBodyKind.value = BODY_KINDS[body.kind === 'moon' && body.family === 'ice' ? 'icy-moon' : body.kind];
   uniforms.uBodyRadius.value = radius;
-  const frame = uniforms.uBodyFrame.value.fromArray(body.frame);
-  const origin = uniforms.uBodyOrigin.value.fromArray(body.center).applyMatrix3(frame).multiplyScalar(-1 / radius);
+  uniforms.uBodyCenter.value.fromArray(body.center).divideScalar(radius);
+  const frame=uniforms.uBodyFrame.value.fromArray(body.frame);
+  const origin=uniforms.uBodyOrigin.value.fromArray(body.center).applyMatrix3(frame).multiplyScalar(-1/radius);
+  uniforms.uFlatHabitatDeck.value=body.kind==='ring' && !body.habitat && !groups && body.shape.parts.length<=6;
+  if(uniforms.uHasHabitatMaterials.value){
+    // Reduce the camera origin to a tile phase before float32 upload. The
+    // shader adds the ray hit offset, retaining the same body-fixed texture.
+    const c=body.center,f=body.frame,phase=body.phase;
+    const x=-(f[0]*c[0]+f[3]*c[1]+f[6]*c[2])+phase*19013;
+    const y=-(f[1]*c[0]+f[4]*c[1]+f[7]*c[2])+phase*7301;
+    const z=-(f[2]*c[0]+f[5]*c[1]+f[8]*c[2])+phase*11027;
+    const tiles=uniforms.uHabitatMaterialTileSize.value,rx=x/tiles.x,ry=y/tiles.x,rz=z/tiles.x;
+    const gx=x/tiles.y,gy=y/tiles.y,gz=z/tiles.y;
+    uniforms.uHabitatRockPhase.value.set(rx-Math.floor(rx),ry-Math.floor(ry),rz-Math.floor(rz));
+    uniforms.uHabitatGroundPhase.value.set(gx-Math.floor(gx),gy-Math.floor(gy),gz-Math.floor(gz));
+  }
+  if(body.kind==='gas-giant'){
+    const f=body.frame,c=body.center;
+    const x=-(f[0]*c[0]+f[3]*c[1]+f[6]*c[2]);
+    const y=-(f[1]*c[0]+f[4]*c[1]+f[7]*c[2]);
+    const z=-(f[2]*c[0]+f[5]*c[1]+f[8]*c[2]);
+    const sx=Math.sin(17.17*body.phase)*31,sy=Math.sin(31.7*body.phase)*31,sz=Math.sin(47.1*body.phase)*31;
+    const driftX=gasVelocity===null?0:-gasVelocity[0]*gasWeatherTime;
+    const driftY=gasVelocity===null?0:-gasVelocity[1]*gasWeatherTime;
+    const driftZ=gasVelocity===null?0:-gasVelocity[2]*gasWeatherTime;
+    for(let i=0;i<GAS_CLOUD_MATERIAL_SCALES.length;i++){
+      const scale=GAS_CLOUD_MATERIAL_SCALES[i];
+      const phase=1.7*64000/scale+.31+(i+1)*.17;
+      const period=scale*256;
+      const px=(x+driftX%period)/scale+sx*phase;
+      const py=(y+driftY%period)/scale+sy*phase;
+      const pz=(z+driftZ%period)/scale+sz*phase;
+      const ix=Math.floor(px),iy=Math.floor(py),iz=Math.floor(pz);
+      uniforms.uGasNoiseCells.value[i].set(((ix%256)+256)%256,((iy%256)+256)%256,((iz%256)+256)%256);
+      uniforms.uGasNoiseFractions.value[i].set(px-ix,py-iy,pz-iz);
+    }
+  }
   uniforms.uLight.value.fromArray(body.light).normalize();
   uniforms.uTint.value.fromArray(body.tint);
   uniforms.uPhase.value = body.phase;
   uniforms.uVisibility.value = body.visibility ?? 1;
   uniforms.uRinged.value = body.ringed === true;
   uniforms.uSectionCount.value = body.shape.type === 'compound' ? body.shape.parts.length : 0;
+  let minRadius=Infinity,minAxial=Infinity,maxAxial=-Infinity;
+  const parts=body.shape.parts;
+  const floor=parts?.[0]?.innerRadius??0;
+  const sharedFloor=parts?.length>=3 && parts[1].innerRadius===floor && parts[2].innerRadius===floor;
+  let coreMin=sharedFloor?parts[0].minY:0,coreMax=sharedFloor?parts[2].maxY:0;
   if (body.shape.type === 'sphere') uniforms.uSphereRadius.value = body.shape.radius / radius;
-  else {
-    const rho = Math.hypot(origin.x, origin.z);
-    for (let i = 0; i < body.shape.parts.length; i++) {
-      const part = body.shape.parts[i], inner = part.innerRadius / radius, outer = part.outerRadius / radius;
-      uniforms.uSections.value[i].set(inner, outer, part.minY / radius, part.maxY / radius);
-      uniforms.uGaps.value[i].set(part.gapCenter, part.gapHalfAngle);
-      uniforms.uCameraWallC.value[i].set((rho - inner) * (rho + inner), (rho - outer) * (rho + outer));
+  const rho=uniforms.uSectionCount.value?Math.hypot(origin.x,origin.z):0;
+  for (let i = 0; i < uniforms.uSectionCount.value; i++) {
+    const part = body.shape.parts[i];
+    uniforms.uSections.value[i].set(part.innerRadius / radius, part.outerRadius / radius, part.minY / radius, part.maxY / radius);
+    minRadius=Math.min(minRadius,part.innerRadius);
+    minAxial=Math.min(minAxial,part.minY);
+    maxAxial=Math.max(maxAxial,part.maxY);
+    if(sharedFloor&&i>=3&&part.innerRadius<=floor){
+      if(part.maxY<=0)coreMin=Math.max(coreMin,part.maxY);
+      else if(part.minY>=0)coreMax=Math.min(coreMax,part.minY);
+      else coreMin=coreMax=0;
+    }
+    const lattice=part.surfaceLattice;
+    const bounds=uniforms.uSections.value[i];
+    uniforms.uGaps.value[i].set(part.gapCenter,part.gapHalfAngle,(rho-bounds.x)*(rho+bounds.x),(rho-bounds.y)*(rho+bounds.y));
+    // Generated rings use <4096 columns, <128 rows and 24-bit seeds. Both
+    // packed integers therefore survive float32 upload exactly. In particular
+    // the admitted endpoints must not be recomputed from the rounded gap.
+    const sections=part.sections;
+    const offset = i * 4, counts = sections ? -1 : lattice ? lattice.columns * 128 + lattice.rows : 0;
+    // A negative seed word carries the tier bit. -seed-1 also represents a
+    // tiered zero seed; both ends of the 24-bit range remain exact float32.
+    const seed = sections ? Math.fround((sections[0].maxY-sections[0].minY)/radius) : lattice ? (lattice.tiered ? -lattice.seed-1 : lattice.seed) : 0;
+    const admitted = sections ? Math.fround(sections[1].gapHalfAngle) : lattice ? lattice.firstColumn * 4096 + lattice.lastColumn : 0;
+    const depth = lattice ? Math.fround((lattice.outerRadius - lattice.innerRadius) / radius) : 0;
+    if (latticeData[offset] !== counts || latticeData[offset + 1] !== seed || latticeData[offset + 2] !== admitted || latticeData[offset + 3] !== depth) {
+      latticeData[offset] = counts; latticeData[offset + 1] = seed; latticeData[offset + 2] = admitted; latticeData[offset + 3] = depth;
+      latticeChanged = true;
+    }
+    const outerRadius=lattice?lattice.outerRadius:part.outerRadius;
+    const middleY = (part.minY + part.maxY) * .5;
+    let supportX=0,supportZ=0,supportRadius;
+    if (part.gapHalfAngle > Math.PI * .5) {
+      const angle = part.gapCenter + Math.PI, halfAngle = Math.PI - part.gapHalfAngle;
+      const middleRadius = (part.innerRadius + outerRadius) * .5;
+      const radialReach = (outerRadius - part.innerRadius) * .5 + outerRadius * (1 - Math.cos(halfAngle));
+      const tangentReach = outerRadius * Math.sin(halfAngle);
+      supportX=Math.cos(angle)*middleRadius/radius;supportZ=Math.sin(angle)*middleRadius/radius;
+      supportRadius=Math.hypot(radialReach,tangentReach,(part.maxY-part.minY)*.5)/radius;
+    } else {
+      supportRadius=Math.hypot(outerRadius,(part.maxY-part.minY)*.5)/radius;
+    }
+    // Match the former uniform upload's float32 values. Comparing the rounded
+    // values avoids scheduling another texture upload for unchanged doubles.
+    supportX=Math.fround(supportX);supportZ=Math.fround(supportZ);
+    const supportY=Math.fround(middleY/radius);supportRadius=Math.fround(supportRadius);
+    const supportOffset=RING_SECTION_CAPACITY*4+offset;
+    if(latticeData[supportOffset]!==supportX||latticeData[supportOffset+1]!==supportY||
+      latticeData[supportOffset+2]!==supportZ||latticeData[supportOffset+3]!==supportRadius){
+      latticeData[supportOffset]=supportX;latticeData[supportOffset+1]=supportY;
+      latticeData[supportOffset+2]=supportZ;latticeData[supportOffset+3]=supportRadius;latticeChanged=true;
     }
   }
+  if(uniforms.uSectionCount.value>0){
+    const pad=Math.max(.25,radius*1.e-6);
+    uniforms.uRingVoid.value.set(Math.max(0,minRadius-pad)/radius,(minAxial-pad)/radius,(maxAxial+pad)/radius);
+    uniforms.uRingCore.value.set(floor/radius,(coreMin+pad)/radius,(coreMax-pad)/radius);
+  }
+  // Clear only retired sections when a slot changes shape, rather than
+  // scanning every texel or uploading an unchanged recipe on every frame.
+  for (let i = uniforms.uSectionCount.value * 4; i < previousSectionCount * 4; i++) {
+    if(latticeData[i]!==0){latticeData[i]=0;latticeChanged=true;}
+    const supportOffset=RING_SECTION_CAPACITY*4+i;
+    if(latticeData[supportOffset]!==0){latticeData[supportOffset]=0;latticeChanged=true;}
+  }
+  if (latticeChanged) ringLattices.needsUpdate = true;
   for (let i = 0; i < 3; i++) {
     const prominence = body.prominences?.[i];
     if (prominence) {

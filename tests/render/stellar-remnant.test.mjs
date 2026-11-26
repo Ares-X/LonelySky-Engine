@@ -37,7 +37,12 @@ test('pulsar beams are antipodal and sweep an inclined magnetic axis while neutr
     const opticalSnapshot=Object.fromEntries(Object.entries(beamUniforms).map(([key,uniform])=>[key,uniform.value?.clone?.()??uniform.value]));
     const point=new THREE.Vector3();
     const direction=time=>{pulsar.userData.update(time,camera,1,'high',false);pulsar.updateMatrixWorld(true);return beams[0].getWorldPosition(point).clone().normalize();};
-    const first=direction(0),second=direction(2);
+    const core=pulsar.getObjectByName('stellar-core');
+    const poleDirection=()=>new THREE.Vector3(0,1,0).transformDirection(core.matrixWorld);
+    const first=direction(0);
+    assert.ok(Math.abs(first.dot(poleDirection()))>.999999);
+    const second=direction(2);
+    assert.ok(Math.abs(second.dot(poleDirection()))>.999999);
     assert.ok(first.distanceTo(second)>.1);
     const opposing=beams[1].getWorldPosition(new THREE.Vector3()).normalize();
     assert.ok(second.dot(opposing)<-.999999);

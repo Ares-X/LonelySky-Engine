@@ -29,6 +29,11 @@ import map. There is no AI service, account requirement, or runtime backend.
 | Streaming | 125 neighboring cells, continuous distance fading, floating-origin coordinates, quality levels |
 | Simulation | Elliptic Kepler orbits, sampled gravity, continuous moving-sphere collision and safe-pose recovery |
 
+Version 0.14.0 adds optional spatial galactic media and paged ring-habitat
+terrain. It updates procedural nebulae, gas-giant weather and stellar surfaces.
+Regional catalogues and image maps are supplied through the host integration
+APIs. The minimal example uses the built-in generator.
+
 ## Live showcase
 
 **[Enter LonelySky →](https://lonelysky.app/)**
@@ -177,102 +182,9 @@ Three.js 渲染层显示行星、光环、星云、黑洞和三维星系。也�
 
 ## License
 
-Source code: [Apache-2.0](LICENSE), with attribution in [NOTICE](NOTICE).
+Source code is licensed under [Apache-2.0](LICENSE), with attribution in
+[NOTICE](NOTICE). The adapted webgl-noise simplex code carries its own
+[MIT license](licenses/webgl-noise.MIT.txt).
 The gameplay screenshots depict separately credited artwork; see
 [showcase credits](docs/showcase-credits.md). Game textures are not distributed
 as engine runtime assets.
-
-Version 0.3.2 keeps the planet limb and atmosphere powers inside their defined
-floating-point domains, and removes undefined negative-base powers and the
-undefined central angular phase from galaxy haze. Generation seeds and saved
-coordinates are unchanged. Numerical shader tests cover float32 facing extrema,
-vertical disk symmetry and the finite axis limit; they are not a GPU emulator.
-
-Version 0.4 adds six seeded galaxy appearance families: open spirals, barred
-spirals, dusty edge-on disks, old stellar halos, tidal islands and compact young
-clusters. They share the existing volume and particle renderer. Appearance uses
-its own random stream, leaving galaxy addresses and particle prefixes unchanged.
-`describeGalaxyAppearance` exposes the structural controls and suggested local
-view offset/FOV; the application owns destinations, names and navigation.
-
-The unreleased V3 open-cluster particle sampler uses a narrower vertical Gaussian
-and a smooth outer tail within the existing support. This removes the dense
-spherical rim caused by clipping Gaussian outliers onto one radius. The cluster
-becomes thinner and more concentrated while retaining a 3D population; individual
-V3 open-cluster tracer positions change. Descriptor identity, radius, orientation,
-colors, sizes and exact quality prefixes are retained. Legacy revision 1 and other
-structure families retain their existing samples. These tracers are scenery;
-body placement, gravity, collision and application bookmarks have separate owners.
-
-The legacy cosmic sampler prepares descriptor rotation and linear colors once,
-then writes directly into its typed buffers. This preserves exact generated
-positions, colors, sizes and quality prefixes while removing repeated conversion
-work and short-lived arrays. Cold batches are still synchronous; this change
-does not establish a browser frame-time budget or remove first-visit stalls.
-
-`createCosmos({incremental: true, preparationBudgetMs: 2})` optionally prepares
-one complete particle batch in CPU work slices before publishing it at an
-actual matching `group.userData.update(frame)` boundary. The default update
-remains synchronous. Call `await group.userData.prepare(frame, {signal})` before
-revealing a cold scene or discontinuous jump; it yields through host tasks and
-rejects when cancelled or superseded. `requestPopulation({sectorIndex, quality})`
-prepares one target ahead while normal updates retain the active population;
-`isReady({sectorIndex, quality})` becomes true only after exact origin and batch
-publication. `cancelPreparation()` keeps the active scene; `dispose()` also
-settles waiters and releases pending and active resources.
-
-The preparation budget covers legacy particle sampling and buffer assembly,
-not catalogue/haze construction, shader compilation or GPU upload. Exact RNG
-streams, Float32 output, quality counts, view distances and the 8 MiB sample
-cache ceiling are retained. Custom providers keep their previous uncapped
-catalogue semantics; only the canonical V3 support contract uses the fixed
-108-entry support-weight array. Hosts own ahead-target selection, covered
-travel handoff and visibility safety during ordinary flight. The V3 omission
-margin is 7.8748 million units, not a hard deadline for arbitrary velocities.
-CPU tests do not establish browser frame tails, GPU memory or target-device
-performance. The bundled view and consuming applications must explicitly opt
-in and wire preparation/readiness/cancellation before claiming those benefits.
-
-Version 0.5 adds optional astronomy-inspired appearance adapters. Natural planets
-with stable IDs can use ten seeded surface families through
-`describePlanetAppearance` / `PLANET_APPEARANCE_FAMILIES`; explicit texture maps,
-explicit procedural surfaces and home descriptors keep their existing behavior.
-`describeNebulaAppearance` selects emission, reflection, dark dust, planetary
-shell or supernova-remnant treatments. Pass its result as `appearance` to
-`createNebula`; omitting it retains the existing volume treatment.
-
-`createStellarRemnant(body)` renders a `stellarFamily` of `brown-dwarf`,
-`white-dwarf`, `neutron-star`, `pulsar` or `red-giant`. Supply a positive `radius`
-and optionally a `seed`, `color`, `phase`, `spinTilt` and `magneticTilt`. Place the
-returned group in your floating-origin scene, call
-`group.userData.update(celestialTime, camera, visibility, quality, reducedMotion)`
-each frame, and call `group.userData.dispose()` when removing it. The core uses
-the supplied body radius; coronae and beam illustrations are
-non-solid. The application owns world placement, encounters, catalogs and safety.
-These are bounded artistic shaders, not stellar evolution or radiation simulations.
-
-Version 0.10.4 reduces temporary allocations in cosmic bounds queries. Cached
-body lookups no longer allocate a cell array, queries reuse their own candidate
-address, and discarded bodies do not allocate result positions. Public queries
-still return independent result arrays and positions; descriptor seeds, wrapped
-coordinates, query order and the existing 4096-entry descriptor cache are unchanged.
-
-Version 0.10.1 sets the canonical V3 structure support fade interval to
-125–150 million world units (previously 80–100 million). The fixed 5³ streaming neighborhood, catalogue, particle
-counts and quality levels are unchanged. Even at cell and torus seams, omitted
-parent supports remain at least 157.8748 million units away; their children fit
-inside those supports. This changes visibility only, preserving generated
-descriptors, seeds, coordinates and physics. Legacy cosmos fade is unchanged;
-custom/wrapped providers retain per-sample fading instead of canonical support
-weights (with the shared V3 horizon when `structures: true`). These bounds assume
-a rebased camera within half a cell of its sector origin.
-
-`createCosmos().userData.update(frame)` optionally accepts a current Three.js
-`PerspectiveCamera` as `frame.camera`. V3 haze then skips volumes wholly outside
-the four viewport sides, using the world-space ellipsoid support of the actual
-unit-sphere proxy, including ancestor translation, rotation, scale and shear. Physical
-near/far planes are excluded because radial depth compression preserves
-directions rather than true distances. Camera rotation, FOV changes and rebases
-re-evaluate admission without changing optical weights, integration or buffers.
-Omitting the camera, using a non-perspective camera, or using the legacy cosmos
-path retains the previous behavior. The bundled view supplies its actual camera.

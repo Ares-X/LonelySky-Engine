@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
+import {WebGLUniforms} from 'three/src/renderers/webgl/WebGLUniforms.js';
 import {createGalaxyHaze} from '../../src/render/galaxy-haze.js';
 import {randomFromSeed} from '../../src/random.js';
 import {noiseEvaluator,hullInterval,fixedGrid,absorptionRule,functionBody} from '../helpers/nebula-optics.mjs';
@@ -13,26 +14,61 @@ function fixture(seed='nebula-optics-regression',descriptors=[descriptor('a')]){
   return{group,material:group.children[0].material,uniforms:group.children[0].material.uniforms};
 }
 const dot=(a,b)=>a.reduce((s,v,k)=>s+v*b[k],0);
-test('dust complexes preserve world and descriptor seeds across streaming and camera updates',()=>{
+
+test('dust complex domains and seed survive descriptor replacement and camera motion',()=>{
   const descriptors=Array.from({length:27},(_,i)=>descriptor(`body-${i}`,i%2?'old-gold':'blue-nursery'));
-  const f=fixture(undefined,descriptors);
-  const phases=mesh=>mesh.material.uniforms.nebulaNoisePhase.value.map(v=>v.toArray());
-  const key=f.uniforms.nebulaSeed.value;
-  const different=fixture('another-nebula-world');
-  try{
-    assert.notEqual(different.uniforms.nebulaSeed.value,key);
-    const domains=f.group.children.map(phases);
-    assert.equal(new Set(domains.map(domain=>JSON.stringify(domain))).size,27);
-    for(const mesh of f.group.children){
-      assert.equal(mesh.material.uniforms.nebulaSeed.value,key);
-      assert.equal(mesh.material.blending,THREE.NormalBlending);assert.equal(mesh.material.depthWrite,false);
-      const samplers=[...mesh.material.fragmentShader.matchAll(/uniform\s+(?:highp\s+)?[iu]?sampler\w+\s+(\w+)/g)].map(match=>match[1]);
+  const f=fixture(undefined,descriptors), different=fixture('another-nebula-world');
+  const seed=f.uniforms.nebulaCornerSeed.value;
+  const phases=mesh=>mesh.material.uniforms.nebulaNoisePhase.value.map(value=>value.toArray());
+  try {
+    assert.notEqual(different.uniforms.nebulaCornerSeed.value,seed);
+    const initial=f.group.children.map(phases);
+    assert.equal(new Set(initial.map(JSON.stringify)).size,descriptors.length);
+    for(const {material} of f.group.children){
+      assert.equal(material.uniforms.nebulaCornerSeed.value,seed);
+      assert.equal(material.blending,THREE.NormalBlending);
+      assert.equal(material.depthWrite,false);
+      const samplers=[...material.fragmentShader.matchAll(/uniform\s+(?:highp\s+)?[iu]?sampler\w+\s+(\w+)/g)].map(match=>match[1]);
       assert.deepEqual(samplers,['uSceneDepth']);
     }
-    f.group.userData.setDescriptors([]);f.group.userData.setDescriptors(descriptors.slice(0,2));
-    f.group.userData.update({centers:[[100,0,0],[-100,0,0]],cameraPosition:[200,30,40],quality:'high',brightness:1,home:false});
-    assert.deepEqual(f.group.children.map(phases),domains.slice(0,2));
-  }finally{f.group.userData.dispose();different.group.userData.dispose();}
+    f.group.userData.setDescriptors([]);
+    f.group.userData.setDescriptors(descriptors.slice(0,2));
+    for (const cameraPosition of [[2,3,4],[200,30,40]]) {
+      f.group.userData.update({centers:[[100,0,0],[-100,0,0]],cameraPosition,quality:'high',brightness:1,home:false});
+      assert.deepEqual(f.group.children.map(phases),initial.slice(0,2));
+      assert.ok(f.group.children.every(mesh=>mesh.material.uniforms.nebulaCornerSeed.value===seed));
+    }
+  } finally {
+    f.group.userData.dispose();
+    different.group.userData.dispose();
+  }
+});
+
+test('the first structural upload preserves unsigned seeds and binds only the current scene depth',()=>{
+  const descriptors=['galaxy','cluster','nebula'].map(kind=>({...descriptor(kind),kind,morphology:kind==='galaxy'?'spiral':'irregular'}));
+  const f=fixture(undefined,descriptors);
+  const depth=new THREE.DepthTexture(32,32),camera=new THREE.PerspectiveCamera();
+  try {
+    const expected=randomFromSeed('nebula-optics-regression:nebula-shared-lattice-v1')()*2**32;
+    for(const mesh of f.group.children){
+      mesh.userData.setSceneDepth(depth,32,32,camera);
+      const values=mesh.material.uniforms;
+      assert.deepEqual(Object.entries(values).filter(([,uniform])=>uniform.value?.isTexture).map(([name])=>name),['uSceneDepth']);
+      const active=[{name:'hazeSeed',type:0x1405,size:1},{name:'nebulaCornerSeed',type:0x1405,size:1},{name:'uSceneDepth',type:0x8b5e,size:1}];
+      const uploaded=new Map(),bindings=[];
+      const gl={getProgramParameter:()=>active.length,getActiveUniform:(_,i)=>active[i],getUniformLocation:(_,name)=>name,
+        uniform1i:(name,value)=>uploaded.set(name,value),uniform1ui:(name,value)=>uploaded.set(name,value)};
+      const textures={allocateTextureUnit:()=>0,setTexture2D:(texture,unit)=>bindings.push({texture,unit})};
+      const uniforms=new WebGLUniforms(gl,{});
+      WebGLUniforms.upload(gl,WebGLUniforms.seqWithValue(uniforms.seq,values),values,textures);
+      assert.equal(uploaded.get('nebulaCornerSeed'),expected);
+      assert.equal(uploaded.get('hazeSeed'),values.hazeSeed.value);
+      assert.deepEqual(bindings,[{texture:depth,unit:0}]);
+    }
+  } finally {
+    f.group.userData.dispose();
+    depth.dispose();
+  }
 });
 
 test('uploaded noise derivatives follow the same corners, domain transform and filtered value',()=>{

@@ -80,18 +80,38 @@ export function setPlanetRingShadow(material, { normal, texture = null, seed = 0
   validateOffset(normal);
   if (Math.hypot(normal[0], normal[1], normal[2]) < 1e-12 || !Number.isFinite(seed)) throw new TypeError('Ring shadow needs a nonzero normal and finite seed');
   uniforms.ringShadowNormal.value.fromArray(normal).normalize();
-  if (Boolean(texture) !== Boolean(material.defines.RING_SHADOW_MAP)) {
-    if (texture) material.defines.RING_SHADOW_MAP = 1;
+  const mapped = Boolean(texture) && !material.defines?.PROCEDURAL_RING_DENSITY;
+  if (mapped !== Boolean(material.defines?.RING_SHADOW_MAP)) {
+    if (mapped) (material.defines ??= {}).RING_SHADOW_MAP = 1;
     else delete material.defines.RING_SHADOW_MAP;
     material.needsUpdate = true;
   }
   uniforms.ringShadowMap.value = texture;
   uniforms.ringShadowUseMap.value = Boolean(texture);
-  uniforms.ringShadowSeed.value = seed % 100;
+  uniforms.ringShadowSeed.value = material.defines?.PROCEDURAL_RING_DENSITY ? seed % 16777213 : seed % 100;
   uniforms.ringShadowEnabled.value = Boolean(enabled);
 }
 
 export const ringDensityGLSL = /* glsl */`
+#ifdef PROCEDURAL_RING_DENSITY
+float ringPattern(float id,float channel){
+  return fract(sin(mod(id,4093.)*.1197+floor(id/4093.)*.745+channel*23.71)*43758.5453);
+}
+float proceduralRingDensity(float r,float id,float footprint){
+  float v=(r-1.18)/1.08;
+  float a=ringPattern(id,1.),b=ringPattern(id,2.),c=ringPattern(id,3.),d=ringPattern(id,4.);
+  float inside=smoothstep(.028+.09*a,.047+.09*a,v)*(1.-smoothstep(.81+.12*b,.99,v));
+  float family=ringPattern(id,5.);
+  float broad=.52+.19*sin(v*(13.+10.*b)+a*6.2831853);
+  if(family<.32)broad=.18+.66*smoothstep(.22,.76,.5+.5*sin(v*(21.+8.*d)+3.*b));
+  if(family>.67)broad=.15+.64*exp(-pow((v-(.29+.13*a))/(.18+.12*c),2.));
+  float gapA=1.-smoothstep(.013+.013*b,.026+.019*b,abs(v-(.28+.22*c)));
+  float gapB=1.-smoothstep(.022,.048,abs(v-(.62+.18*d)));
+  float fade=1.-smoothstep(.011,.044,footprint);
+  float tracks=(.061*sin(v*(152.+95.*d)+a*11.)+.042*sin(v*(317.+148.*b)+c*14.))*fade;
+  return clamp((broad+tracks)*inside*(1.-.82*max(gapA,gapB*.87))*.80,0.,.85);
+}
+#else
 float ringDensity(float r,float ringSeed,float footprint){
   float v=(r-1.18)/1.08;
   float denseRing=smoothstep(.22,.29,v)*(1.-smoothstep(.64,.68,v));
@@ -106,6 +126,7 @@ float ringDensity(float r,float ringSeed,float footprint){
   float support=smoothstep(0.,.012,v)*(1.-smoothstep(.96,1.,v));
   return clamp(band*support*(1.-cassini*.92)*(1.-encke*.68)*(1.-innerGap*.52),0.,1.);
 }
+#endif
 `;
 
 export const stellarLightingGLSL = /* glsl */`
@@ -170,11 +191,15 @@ float ringRayTransmission(vec3 point,vec3 direction,float sourceDistance,float r
   vec3 hit=point+direction*travel;
   float ratio=length(hit)/max(radius,1e-8);
   if(ratio<1.18||ratio>2.26)return 1.;
-  float density=ringDensity(ratio,ringShadowSeed,footprint/abs(denominator));
-  #ifdef RING_SHADOW_MAP
-    density*=texture2D(ringShadowMap,vec2((ratio-1.18)/1.08,.5)).a;
+  #ifdef PROCEDURAL_RING_DENSITY
+    return 1.-proceduralRingDensity(ratio,ringShadowSeed,0.);
+  #else
+    float density=ringDensity(ratio,ringShadowSeed,footprint/abs(denominator));
+    #ifdef RING_SHADOW_MAP
+      density*=texture2D(ringShadowMap,vec2((ratio-1.18)/1.08,.5)).a;
+    #endif
+    return 1.-density;
   #endif
-  return 1.-density;
 }
 float planetRingTransmission(vec3 point,int index,float radius,float footprint){
   if(!ringShadowEnabled)return 1.;
@@ -187,5 +212,9 @@ float planetRingTransmission(vec3 point,int index,float radius,float footprint){
   if(dot(axis,axis)<1e-8)axis=cross(direction,vec3(.734,.459,.5));
   axis=safeDirection(axis);
   return (ringRayTransmission(point,direction,distance,radius,footprint)*2.+ringRayTransmission(point,safeDirection(direction+axis*spread),distance,radius,footprint)+ringRayTransmission(point,safeDirection(direction-axis*spread),distance,radius,footprint))*.25;
+}
+// Procedural surface and cloud receivers use the exact radial density.
+float planetRingTransmission(vec3 point,int index,float radius){
+  return planetRingTransmission(point,index,radius,0.);
 }
 `;

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { createNebula } from '../../src/render/nebula.js';
 import { NebulaRenderPass } from '../../src/render/nebula-render-pass.js';
+import { planetMaterial,atmosphereMaterial } from '../../src/render/materials.js';
 
 function fixture(options) {
   const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(55, 1, .5, 220000);
@@ -73,6 +74,25 @@ function fixture(options) {
       if (o.material) for (const material of [o.material].flat()) material.dispose();
     }); } };
 }
+
+test('streaming planets retain opaque depth coverage in front of optical volumes',()=>{
+  const f=fixture(),material=planetMaterial({kind:'rock',seed:1,radius:100,colorA:0x668899,colorB:0xaabbcc});
+  const air=atmosphereMaterial(0x668899);
+  f.add('fading planet',material);f.add('translucent air',air);
+  try{
+    assert.equal(material.alphaHash,true);assert.equal(material.transparent,false);
+    for(const visibility of [.9999091460814943,.5,.0001]){
+      material.uniforms.visibility.value=visibility;f.draws.length=0;
+      f.pass.render(f.renderer,null,f.target,.016,false);
+      assert.equal(material.depthWrite,true);
+      assert.ok(f.draws[0].visible.includes('fading planet'));
+      assert.ok(!f.draws[1].visible.includes('fading planet'));
+      assert.ok(!f.draws[0].visible.includes('translucent air'));
+      assert.ok(f.draws[1].visible.includes('translucent air'));
+      assert.equal(material.uniforms.visibility.value,visibility);
+    }
+  }finally{f.dispose();}
+});
 
 test('depth composition shades surfaces and sorted transparencies once and samples a separate depth snapshot', () => {
   const f = fixture();
@@ -316,7 +336,7 @@ test('depth unprojection follows translated, rotated and rebased nebula transfor
     volume.userData.setSceneDepth(new THREE.DepthTexture(64, 32), 64, 32, f.camera);
     const actual = ndc.clone().applyMatrix4(volume.material.uniforms.uClipToLocal.value);
     assert.ok(actual.distanceTo(point) < 1e-8);
-    assert.equal(f.nebula.userData.stats.steps, 48);
+    assert.equal(f.nebula.userData.stats.steps, 96);
     assert.equal(f.nebula.userData.isInView(f.camera), true);
     f.camera.position.addScalar(1e5); f.nebula.position.addScalar(1e5);
     assert.equal(f.nebula.userData.isInView(f.camera), true);
@@ -341,3 +361,59 @@ test('pass scratch retains capacity while releasing scene and material reference
     assert.equal(records.length, 0);
   } finally {f.dispose();}
 });
+
+test('every optical prepare consumes the current opaque snapshot before translucent filtering and draw', () => {
+  const f = fixture(), volume = f.nebula.children[0], originalVolume = volume.material, events = [];
+  const opaque = f.add('opaque', new THREE.MeshBasicMaterial()), transparent = f.add('transparent', new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }));
+  const surfaceMaterial = opaque.material, transparentMaterial = transparent.material;
+  const second = f.add('second volume', new THREE.ShaderMaterial({ uniforms: { uVisibility: { value: 1 }, uDensity: { value: 1 } }, transparent: true, depthWrite: false }));
+  const secondMaterial = second.material, setDepth = volume.userData.setSceneDepth, render = f.renderer.render, copy = f.renderer.copyTextureToTexture;
+  let secondDepth = null;
+  volume.userData.setSceneDepth = (...args) => { setDepth(...args);events.push(args[0] ? 'first depth' : 'first clear'); };
+  second.userData.setSceneDepth = texture => { secondDepth = texture;events.push(texture ? 'second depth' : 'second clear'); };
+  const prepared = label => (renderer, width, height, camera) => {
+    events.push(label);assert.equal(renderer, f.renderer);assert.deepEqual([width, height], [64, 32]);assert.equal(camera, f.camera);
+    assert.equal(f.renderer.getRenderTarget(), f.target);
+    assert.equal(originalVolume.uniforms.uSceneDepth.value, f.copies.at(-1)[1]);assert.equal(secondDepth, f.copies.at(-1)[1]);
+    assert.equal(opaque.material, surfaceMaterial);assert.equal(transparent.material.visible, false);
+    assert.equal(volume.material.visible, false);assert.equal(second.material.visible, false);
+  };
+  volume.userData.prepareVolume = prepared('first prepare');second.userData.prepareVolume = prepared('second prepare');
+  f.renderer.copyTextureToTexture = (...args) => { const result = copy(...args);events.push('snapshot');return result; };
+  f.renderer.render = (...args) => { events.push(events.at(-1) === 'second prepare' ? 'translucent draw' : 'opaque draw');return render(...args); };
+  try {
+    for (let frame = 0; frame < 2; frame++) {
+      events.length = 0;f.pass.render(f.renderer, null, f.target);
+      assert.deepEqual(events, ['opaque draw', 'snapshot', 'first depth', 'second depth', 'first prepare', 'second prepare', 'translucent draw', 'first clear', 'second clear']);
+      assert.equal(volume.material, originalVolume);assert.equal(second.material, secondMaterial);assert.equal(transparent.material, transparentMaterial);
+      assert.equal(originalVolume.uniforms.uSceneDepth.value, null);assert.equal(secondDepth, null);
+    }
+  } finally { f.dispose(); }
+});
+
+for (const reuseWorldMatrices of [false, true]) {
+  test(`optical prepare failure restores borrowed materials, depth bindings and pass state (matrix reuse ${reuseWorldMatrices})`, () => {
+    const f = fixture({ reuseWorldMatrices }), prior = new THREE.WebGLRenderTarget(8, 8), volume = f.nebula.children[0], failure = new Error('optical prepare failed');
+    const materials = [new THREE.MeshBasicMaterial(), new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false })], mixed = f.add('mixed', materials);
+    const originalVolume = volume.material, background = new THREE.Color(0x193847), override = new THREE.MeshBasicMaterial();
+    f.scene.background = background;f.scene.overrideMaterial = override;f.renderer.setRenderTarget(prior);
+    const color = f.renderer.getClearColor(new THREE.Color()), alpha = f.renderer.getClearAlpha(), storeDepth = f.target.storeMultisampledDepthBuffer;
+    f.pass.clearColor = new THREE.Color(0xff3344);f.pass.clearAlpha = .13;
+    let borrowedDisposals = 0;for (const material of [...materials, originalVolume]) material.addEventListener('dispose', () => borrowedDisposals++);
+    volume.userData.prepareVolume = () => {
+      assert.equal(f.draws.length, 1);assert.ok(originalVolume.uniforms.uSceneDepth.value);
+      assert.equal(mixed.material[0], materials[0]);assert.equal(mixed.material[1].visible, false);throw failure;
+    };
+    try {
+      assert.throws(() => f.pass.render(f.renderer, null, f.target), error => error === failure);
+      assert.equal(f.draws.length, 1);assert.equal(mixed.material, materials);assert.equal(volume.material, originalVolume);
+      assert.equal(originalVolume.uniforms.uSceneDepth.value, null);assert.equal(originalVolume.uniforms.uHasSceneDepth.value, false);
+      assert.equal(f.scene.background, background);assert.equal(f.scene.overrideMaterial, override);assert.equal(f.scene.matrixWorldAutoUpdate, true);
+      assert.equal(f.renderer.getRenderTarget(), prior);assert.equal(f.renderer.autoClear, true);
+      assert.ok(f.renderer.getClearColor(new THREE.Color()).equals(color));assert.equal(f.renderer.getClearAlpha(), alpha);
+      assert.equal(f.target.resolveDepthBuffer, false);assert.equal(f.target.storeMultisampledDepthBuffer, storeDepth);
+      assert.equal(borrowedDisposals, 0);
+      assert.ok(f.pass._objects.every(record => record.object === null && record.original === null && record.filtered.every(material => material === null)));
+    } finally { f.dispose();prior.dispose();override.dispose(); }
+  });
+}

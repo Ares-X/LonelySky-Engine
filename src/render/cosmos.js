@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { CELL_SIZE, decodeCell } from '../coordinates.js';
 import { randomFromSeed } from '../random.js';
 import {samplePortraitNode} from './galaxy-portrait.js';
-import { createGalaxyHaze } from './galaxy-haze.js';
+import { createGalaxyHaze,isGeneratedOpenCluster,createOpenClusterProfile } from './galaxy-haze.js';
+import {sampleGalacticStars} from '../galactic-medium.js';
 import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_GRID_CELLS, COSMIC_MAX_STRUCTURES, COSMIC_DEPTH_GLSL, describeCosmicStructures } from '../cosmic-structures.js';
 
 // Additive scenery has an independent revision from caller-owned bodies and addresses.
@@ -14,6 +15,8 @@ export const COSMOS_FADE_START = 420000;
 export const COSMOS_VIEW_FAR = 520000;
 export const GALAXY_MAX_RADIUS = MACRO_SIZE * .3;
 export const PARTICLES_PER_GALAXY = 4096;
+export const OPEN_CLUSTER_HIGH_PARTICLES = 16384;
+const sampleCountFor=(descriptor,count,structures)=>structures&&isGeneratedOpenCluster(descriptor)&&count===PARTICLES_PER_GALAXY?OPEN_CLUSTER_HIGH_PARTICLES:count;
 export const COSMOS_QUALITY_COUNTS = Object.freeze({ low: 512, auto: 2048, high: PARTICLES_PER_GALAXY });
 export const MAX_COSMOS_PARTICLES = 27 * PARTICLES_PER_GALAXY;
 const AXES = ['x', 'y', 'z'];
@@ -55,17 +58,41 @@ export function describeMacro(coordinate, seed = 'lonelysky') {
 }
 
 /** Local 3D positions; every quality level is an exact prefix of the same stream. */
-export function sampleGalaxy(descriptor, count = PARTICLES_PER_GALAXY) {
-  if (!Number.isInteger(count) || count < 0 || count > PARTICLES_PER_GALAXY) throw new RangeError('Invalid galaxy sample count');
-  const sampler = createLegacyGalaxySampler(descriptor, count);
+export function sampleGalaxy(descriptor, count = PARTICLES_PER_GALAXY, stellarPopulation = null) {
+  if (!Number.isInteger(count) || count < 0 || count > (isGeneratedOpenCluster(descriptor)?OPEN_CLUSTER_HIGH_PARTICLES:PARTICLES_PER_GALAXY)) throw new RangeError('Invalid galaxy sample count');
+  if(descriptor.medium){
+    if(stellarPopulation) throw new TypeError('A galactic medium owns its stellar population');
+    const sample=sampleGalacticStars(descriptor.medium,descriptor.seed,count),sizes=new Float32Array(count);
+    const rotation=new THREE.Euler(...descriptor.orientation),point=new THREE.Vector3();
+    for(let i=0;i<count;i++){
+      point.fromArray(sample.positions,i*3).multiplyScalar(descriptor.radius).applyEuler(rotation).toArray(sample.positions,i*3);
+      sizes[i]=descriptor.radius*.0001;
+    }
+    return {...sample,sizes};
+  }
+  const sampler = createLegacyGalaxySampler(descriptor, count, stellarPopulation);
   sampler.step(Math.max(1, count));
   return sampler.result;
 }
 
 /** A resumable legacy stream. Partial buffers stay private until complete. */
-export function createLegacyGalaxySampler(descriptor, count = PARTICLES_PER_GALAXY) {
-  if (!Number.isInteger(count) || count < 0 || count > PARTICLES_PER_GALAXY) throw new RangeError('Invalid galaxy sample count');
-  const openClusterV3 = descriptor.revision === 3 && descriptor.kind === 'cluster' && descriptor.family === 'open' && descriptor.morphology === 'irregular';
+export function createLegacyGalaxySampler(descriptor, count = PARTICLES_PER_GALAXY, stellarPopulation = null) {
+  if (!Number.isInteger(count) || count < 0 || count > (isGeneratedOpenCluster(descriptor)?OPEN_CLUSTER_HIGH_PARTICLES:PARTICLES_PER_GALAXY)) throw new RangeError('Invalid galaxy sample count');
+  if (descriptor.medium) throw new TypeError('Galactic media own their separate stellar sampler');
+  // Optional caller-owned immutable population, validated at sampler creation.
+  // Full-stream colors preserve exact quality prefixes and chunked preparation.
+  if(stellarPopulation){
+    const {colors, coreRadius, cumulativeExponent} = stellarPopulation;
+    if(descriptor.morphology !== 'elliptical' || !(colors instanceof Float32Array) || colors.length !== PARTICLES_PER_GALAXY * 3 || !Number.isFinite(coreRadius) || coreRadius <= 0 || coreRadius >= .95 || !Number.isFinite(cumulativeExponent) || cumulativeExponent <= 0 || cumulativeExponent >= 3) throw new TypeError('Invalid stellar population');
+    for(let i=0;i<colors.length;i++) if(!Number.isFinite(colors[i]) || colors[i] < 0) throw new TypeError('Invalid stellar population color');
+  }
+  const populationColors = stellarPopulation?.colors;
+  const stellarTint = descriptor.stellarTint;
+  const coreRadius = stellarPopulation?.coreRadius ?? 0;
+  const exponent = stellarPopulation?.cumulativeExponent ?? 0;
+  const coreCubic = (5 - exponent) / 2, coreQuintic = (3 - exponent) / 2;
+  const openClusterV3 = isGeneratedOpenCluster(descriptor);
+  const openProfile=createOpenClusterProfile(descriptor);
   const random = randomFromSeed(`${descriptor.seed}:particles-v1`);
   const positions = new Float32Array(count * 3), colors = new Float32Array(count * 3), sizes = new Float32Array(count);
   const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(...descriptor.orientation));
@@ -73,9 +100,9 @@ export function createLegacyGalaxySampler(descriptor, count = PARTICLES_PER_GALA
   const youngColor = new THREE.Color(0xa2b4ca);
   const oldColor = new THREE.Color(descriptor.morphology === 'elliptical' ? 0xc8b99d : 0xc5c2b8);
   const gaussian = () => Math.sqrt(-2 * Math.log(Math.max(1e-9, random()))) * Math.cos(random() * Math.PI * 2);
-  const stellarTint=descriptor.stellarTint,portrait=descriptor.portrait;
-  const source=portrait&&randomFromSeed(descriptor.seed+':portrait-stars-v1');
-  const sourceGaussian=portrait&&(()=>Math.sqrt(-2*Math.log(Math.max(1e-9,source())))*Math.cos(source()*Math.PI*2));
+  const portrait = descriptor.portrait;
+  const source = portrait && randomFromSeed(descriptor.seed + ':portrait-stars-v1');
+  const sourceGaussian = portrait && (() => Math.sqrt(-2*Math.log(Math.max(1e-9,source())))*Math.cos(source()*Math.PI*2));
   let cursor = 0;
   const sample = { positions, colors, sizes };
   function step(limit) {
@@ -84,7 +111,11 @@ export function createLegacyGalaxySampler(descriptor, count = PARTICLES_PER_GALA
     for (let i = cursor; i < end; i++) {
       const component = random(), angle = random() * Math.PI * 2;
       let x, y, z, young = false;
-      if (descriptor.morphology === 'spiral' && component > .18) {
+      if(openProfile){
+        if(component<openProfile.haloFraction)point.set(gaussian()*openProfile.haloAxes[0],gaussian()*openProfile.haloAxes[1],gaussian()*openProfile.haloAxes[2]);
+        else samplePortraitNode(openProfile,random,gaussian,point);
+        x=point.x;y=point.y;z=point.z;young=random()<.2;
+      } else if (descriptor.morphology === 'spiral' && component > .18) {
         const radius = .08 + Math.pow(random(), .7) * .9;
         const arm = Math.floor(random() * descriptor.arms);
         const theta = arm * Math.PI * 2 / descriptor.arms + Math.log(radius + .06) / descriptor.pitch + gaussian() * .12;
@@ -98,15 +129,27 @@ export function createLegacyGalaxySampler(descriptor, count = PARTICLES_PER_GALA
         y = (knot - 1) * .12 + gaussian() * descriptor.thickness * (openClusterV3 ? 1 / 3 : 1);
         young = random() < .1;
       } else {
-        const radius = Math.pow(random(), 1.7) * .95, vertical = random() * 2 - 1;
+        let radius = Math.pow(random(), 1.7) * .95;
+        const vertical = random() * 2 - 1;
+        if(populationColors && radius < coreRadius){
+          // Finite density matched to the original cumulative count and density
+          // at the core boundary. Bounded, creation-time scalar inversion only.
+          const mass = Math.pow(radius / coreRadius, exponent);
+          let lower = 0, upper = 1;
+          for(let iteration=0;iteration<24;iteration++){
+            const t=(lower+upper)/2, square=t*t;
+            if(t*square*(coreCubic-coreQuintic*square)<mass) lower=t; else upper=t;
+          }
+          radius=coreRadius*(lower+upper)/2;
+        }
         const planar = Math.sqrt(1 - vertical * vertical);
         x = Math.cos(angle) * planar * radius; z = Math.sin(angle) * planar * radius * .8;
         y = vertical * radius * (descriptor.morphology === 'spiral' ? .52 : descriptor.thickness);
       }
       // Hard support is required by the stream-coverage proof, including Gaussian tails.
       point.set(x, y, z);
-      const accent=portrait&&source()<portrait.fraction;
-      const knot=accent?samplePortraitNode(portrait,source,sourceGaussian,point):null;
+      const accent = portrait && source() < portrait.fraction;
+      const knot=accent ? samplePortraitNode(portrait,source,sourceGaussian,point) : null;
       if (openClusterV3) {
         const r = point.length();
         // Only the outer tail bends; value and first derivative join at .8.
@@ -141,7 +184,13 @@ export function createLegacyGalaxySampler(descriptor, count = PARTICLES_PER_GALA
         colors[i*3+1]*=portrait.tint[1]*gain;
         colors[i*3+2]*=portrait.tint[2]*gain*(knot?1-knot.warmth:1);
       }
-      if(stellarTint)for(let k=0;k<3;k++)colors[i*3+k]*=stellarTint[k];
+      if(populationColors){
+        colors[i*3]=populationColors[i*3];
+        colors[i*3+1]=populationColors[i*3+1];
+        colors[i*3+2]=populationColors[i*3+2];
+      } else if (stellarTint) {
+        for(let k=0;k<3;k++)colors[i*3+k]*=stellarTint[k];
+      }
     }
     cursor = end;
     return cursor === count;
@@ -180,21 +229,29 @@ export function loadedMacros(sectorIndex, seed = 'lonelysky', { descriptorProvid
  * The budget covers legacy sampling/assembly, not catalogue or haze creation,
  * renderer compilation or GPU upload. Default update remains synchronous.
  */
-export function createCosmos({ seed = 'lonelysky', descriptorProvider = describeMacro, gridCells = MACRO_CELLS, structures = false, catalogue = null, incremental = false, preparationBudgetMs = 2 } = {}) {
+export function createCosmos({ seed = 'lonelysky', descriptorProvider = describeMacro, gridCells = MACRO_CELLS, structures = false, catalogue = null, incremental = false, preparationBudgetMs = 2, galacticMediumOptions, stellarPopulation = null, coreRadiometry = null } = {}) {
   if (!Number.isInteger(gridCells) || gridCells <= 0 || 32768 % gridCells !== 0 || typeof descriptorProvider !== 'function') throw new TypeError('Invalid cosmos grid or descriptor provider');
+  if (stellarPopulation !== null && typeof stellarPopulation !== 'function') throw new TypeError('Invalid stellar population provider');
   if (typeof incremental !== 'boolean' || !Number.isFinite(preparationBudgetMs) || preparationBudgetMs <= 0) throw new TypeError('Invalid cosmos preparation options');
   const catalogueOptions = { descriptorProvider, gridCells };
-  // Immutable wrapped catalogues opt into the same bounded support contract.
-  const canonical=descriptorProvider===describeCosmicStructures&&gridCells===COSMIC_GRID_CELLS;
-  const capacity=catalogue?.capacity??COSMIC_MAX_STRUCTURES;
-  if(!Number.isInteger(capacity)||capacity<=0||capacity%4!==0)throw new RangeError('Cosmos catalogue capacity must be a positive multiple of four');
-  const supportFade=structures&&(catalogue?.supportFade??canonical);
-  let supportVisibility=supportFade?new Float32Array(capacity):null;
+  // Wrapped immutable catalogues declare their actual resource/visibility
+  // contract. Existing producers keep their previous defaults and samples.
+  const canonical = descriptorProvider === describeCosmicStructures && gridCells === COSMIC_GRID_CELLS;
+  const capacity = catalogue?.capacity ?? COSMIC_MAX_STRUCTURES;
+  if (!Number.isInteger(capacity) || capacity <= 0 || capacity % 4 !== 0) throw new RangeError('Cosmos catalogue capacity must be a positive multiple of four');
+  const supportFade = structures && (catalogue?.supportFade ?? canonical);
+  const maximumCommonPointsPerDescriptor=structures?OPEN_CLUSTER_HIGH_PARTICLES:PARTICLES_PER_GALAXY;
+  const commonPointCapacity=structures||catalogue?.capacity!==undefined
+    ?capacity*maximumCommonPointsPerDescriptor:MAX_COSMOS_PARTICLES;
+  if(coreRadiometry !== null && (typeof coreRadiometry !== 'function' || !supportFade)) throw new TypeError('Core radiometry requires a provider and descriptor support indices');
+  const radiometryMatrix=coreRadiometry?new THREE.Matrix4():null,radiometryShape=coreRadiometry?new THREE.Matrix3():null,radiometryCamera=coreRadiometry?new THREE.Vector3():null;
+  let radiometryIndex=-1,radiometryConfig=null;
+  let supportVisibility = supportFade ? new Float32Array(capacity) : null;
   const fadeStart = structures ? COSMIC_VIEW_FADE_START : COSMOS_FADE_START, viewFar = structures ? COSMIC_VIEW_FAR : COSMOS_VIEW_FAR;
   const group = new THREE.Group(); group.name = 'macrocosmos';
   const geometry = new THREE.BufferGeometry();
   const material = new THREE.ShaderMaterial({
-    defines: { FADE_START: `${fadeStart}.`, FADE_FAR: `${viewFar}.`, ...(structures ? { COSMIC_STRUCTURES: 1 } : {}), ...(supportFade ? { COSMIC_SUPPORT_FADE: 1 } : {}) },
+    defines: { FADE_START: `${fadeStart}.`, FADE_FAR: `${viewFar}.`, ...(structures ? { COSMIC_STRUCTURES: 1 } : {}), ...(supportFade ? { COSMIC_SUPPORT_FADE: 1 } : {}), ...(coreRadiometry ? { CORE_RADIOMETRY: 1 } : {}) },
     uniforms: { cameraLocal: { value: new THREE.Vector3() }, pixelHeight: { value: 1 }, brightness: { value: 1 }, sampleWeight: { value: 1 }, minimumPointSize: { value: 4 } },
     vertexShader: /* glsl */`
       ${COSMIC_DEPTH_GLSL}
@@ -203,6 +260,10 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
       #ifdef COSMIC_SUPPORT_FADE
         attribute float descriptorIndex;
         uniform vec4 structureWeights[${capacity / 4}],portraitHosts[${capacity / 4}];
+      #endif
+      #ifdef CORE_RADIOMETRY
+        uniform float coreIndex;uniform vec3 coreCenter;uniform mat3 coreInverseShape;
+        uniform float coreRadius;uniform float coreLOD;uniform float coreMaxExtraGain;
       #endif
       varying vec3 tint;varying float alpha;varying float rasterWeight;
       void main(){
@@ -237,6 +298,17 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
         // integrated light rather than letting small stars brighten as they grow.
         gl_PointSize=max(apparentSize,minimumPointSize);
         rasterWeight=pow(apparentSize/gl_PointSize,2.);
+        #ifdef CORE_RADIOMETRY
+          if(descriptorIndex==coreIndex && coreLOD>0.){
+            vec3 corePoint=coreInverseShape*(position-coreCenter);
+            if(length(corePoint)<coreRadius){
+              float rawPixels=angularSize*.45;
+              float extra=max(0.,rawPixels*rawPixels/(apparentSize*apparentSize)-1.);
+              float boundedExtra=extra/(1.+extra/coreMaxExtraGain);
+              tint*=1.+coreLOD*boundedExtra;
+            }
+          }
+        #endif
       }
     `,
     fragmentShader: /* glsl */`
@@ -251,20 +323,24 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     `,
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true,
   });
-  if(supportFade){material.uniforms.structureWeights={value:supportVisibility};material.uniforms.portraitHosts={value:new Float32Array(capacity)};}
+  if (supportFade) {
+    material.uniforms.structureWeights = { value: supportVisibility };
+    material.uniforms.portraitHosts = {value:new Float32Array(capacity)};
+  }
+  if(coreRadiometry) Object.assign(material.uniforms,{coreIndex:{value:-1},coreCenter:{value:new THREE.Vector3()},coreInverseShape:{value:radiometryShape},coreRadius:{value:1},coreLOD:{value:0},coreMaxExtraGain:{value:1}});
   const points = new THREE.Points(geometry, material); points.frustumCulled = false; group.add(points);
-  const haze = createGalaxyHaze({ seed, structures, supportVisibility }); group.add(haze);
+  const haze = createGalaxyHaze({ seed, structures, supportVisibility, galacticMediumOptions }); group.add(haze);
   // Only these producers guarantee that an ID has the same sampling inputs
   // for this instance's fixed seed. Custom providers may change a shape at
   // the same ID; they retain the uncached path and public snapshot contract.
-  const cacheSamples = descriptorProvider === describeMacro || descriptorProvider === describeCosmicStructures || catalogue?.immutable === true;
+  const cacheSamples = catalogue?.immutable ?? (descriptorProvider === describeMacro || descriptorProvider === describeCosmicStructures);
   const sampleCache = new Map();
   let sampleGeneration = 0;
   let lastCell = '', lastMacro = '', lastCount = 0, lastQuality = 'auto', descriptors = [], samples = [], centers = [], disposed = false;
   let pending = null, failure = null;
   let currentIndex = -1, currentCell, key = '', macroKey = '';
-  const hazeFrame = { centers: null, cameraPosition: null, camera: null, quality: 'auto', brightness: 1, home: false };
-  const stats = { revision: structures ? 3 : COSMOS_VERSION, galaxies: 0, clusters: 0, nebulae: 0, structures: 0, particles: 0, maxParticles: (structures ? capacity * PARTICLES_PER_GALAXY : MAX_COSMOS_PARTICLES), batches: 0, visible: true, rebuilds: 0,
+  const hazeFrame = { centers: null, cameraPosition: null, camera: null, quality: 'auto', brightness: 1, home: false, viewportHeight: 1, pixelRatio: 1 };
+  const stats = { revision: structures ? 3 : COSMOS_VERSION, galaxies: 0, clusters: 0, nebulae: 0, structures: 0, particles: 0, maxParticles: commonPointCapacity, batches: 0, visible: true, rebuilds: 0,
     sampleCacheLimit: cacheSamples ? SAMPLE_CACHE_BYTE_LIMIT : 0, sampleCacheBytes: 0, sampleCacheHits: 0, sampleGenerations: 0 };
   Object.defineProperty(group.userData, 'stats', { get: () => ({ ...stats, sampleCacheEntries: sampleCache.size }) });
   const abortError = message => new DOMException(message, 'AbortError');
@@ -272,7 +348,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
   const macroFor = cell => `${Math.floor(cell.x / gridCells)},${Math.floor(cell.y / gridCells)},${Math.floor(cell.z / gridCells)}`;
   const cellKey = cell => `${cell.x},${cell.y},${cell.z}`;
   const sampleBytes = sample => sample.positions.byteLength + sample.colors.byteLength + sample.sizes.byteLength;
-  Object.assign(stats, { activeSampleBytes: 0, activeGeometryBytes: 0, pendingSampleBytes: 0, pendingGeometryBytes: 0,
+  Object.assign(stats, { starBufferBytes: 0, activeSampleBytes: 0, activeGeometryBytes: 0, pendingSampleBytes: 0, pendingGeometryBytes: 0,
     preparationStage: 'idle', preparationSlices: 0, preparationWorkMs: 0, maxPreparationSliceMs: 0,
     preparationTotalMs: 0, peakPendingSampleBytes: 0, peakPendingGeometryBytes: 0, requestMs: 0, hazePublishMs: 0, publishMs: 0 });
 
@@ -313,20 +389,30 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     cancelPreparation(abortError('Cosmos preparation superseded'));
     if (lastMacro === macro && lastCount === count) return null;
     const next = loadedMacros(sectorIndex, seed, catalogueOptions);
-    if ((supportFade||catalogue?.capacity!==undefined) && next.length > capacity) throw new RangeError('Cosmos catalogue exceeds its declared structure capacity');
-    const cacheBatch = cacheSamples && next.length * count * 7 * Float32Array.BYTES_PER_ELEMENT <= SAMPLE_CACHE_BYTE_LIMIT;
-    const job = { macro, count, quality, descriptors: next, samples: new Array(next.length).fill(null),
+    if ((supportFade || catalogue?.capacity !== undefined) && next.length > capacity) throw new RangeError('Cosmos catalogue exceeds its declared structure capacity');
+    let commonPointCount = 0;
+    for (const descriptor of next) if (!descriptor.medium) commonPointCount+=sampleCountFor(descriptor,count,structures);
+    const cacheBatch = cacheSamples && commonPointCount * 7 * Float32Array.BYTES_PER_ELEMENT <= SAMPLE_CACHE_BYTE_LIMIT;
+    let selectedIndex=-1,selectedConfig=null;
+    if(coreRadiometry) for(let i=0;i<next.length;i++){
+      const config=coreRadiometry(next[i]);if(config===null)continue;
+      if(selectedIndex!==-1 || next[i].medium || !Number.isFinite(config.maximumExtraGain) || config.maximumExtraGain<=0 || !Number.isFinite(config.coreRadius) || config.coreRadius<=0 || config.coreRadius>=1 || !Array.isArray(config.axes) || config.axes.length!==3 || !config.axes.every(v=>Number.isFinite(v)&&v>0)) throw new TypeError('Core radiometry requires one finite ellipsoidal point population');
+      selectedIndex=i;selectedConfig=config;
+    }
+    const job = { radiometryIndex:selectedIndex,radiometryConfig:selectedConfig,macro, count, quality, descriptors: next, samples: new Array(next.length).fill(null),
       cell, cellKey: cellKey(cell), centers: null, cacheBatch, generation: ++sampleGeneration, explicit: true,
-      stage: 'samples', sampleIndex: 0, sampler: null, pointCount: next.length * count,
+      stage: 'samples', sampleIndex: 0, sampler: null, commonPointCount,
       sampleBytes: 0, geometryBytes: 0, attributes: null, descriptorIndex: 0, pointIndex: 0, pointOffset: 0,
       createdAt: performance.now(), slices: 0, workMs: 0, maxSliceMs: 0,
       timer: null, waiters: [], prepareFrame: null };
     // Pin every incoming hit before any miss can evict a later descriptor.
     if (cacheBatch) for (const descriptor of next) {
+      if (descriptor.medium) continue;
       const entry = sampleCache.get(`${count}:${descriptor.id}`);
       if (entry) entry.generation = job.generation;
     }
     if (cacheBatch) for (let i = 0; i < next.length; i++) {
+      if (next[i].medium) continue;
       const sampleKey = `${count}:${next[i].id}`, entry = sampleCache.get(sampleKey);
       if (!entry) continue;
       job.samples[i] = entry.sample; job.sampleBytes += entry.bytes; stats.sampleCacheHits++;
@@ -355,8 +441,8 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
       if (job.stage === 'samples') {
         while (job.sampleIndex < job.descriptors.length) {
           const descriptor = job.descriptors[job.sampleIndex];
-          if (!job.samples[job.sampleIndex]) break;
-          if (job.cacheBatch) {
+          if (!descriptor.medium && !job.samples[job.sampleIndex]) break;
+          if (!descriptor.medium && job.cacheBatch) {
             // Touch hits when their original descriptor order is consumed,
             // interleaved with misses just as in the synchronous LRU.
             const sampleKey = `${job.count}:${descriptor.id}`, entry = sampleCache.get(sampleKey);
@@ -366,8 +452,8 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
         }
         if (job.sampleIndex === job.descriptors.length) { job.stage = 'attributes'; continue; }
         if (!job.sampler) {
-          job.sampler = createLegacyGalaxySampler(job.descriptors[job.sampleIndex], job.count);
-          job.sampleBytes += job.count * 7 * Float32Array.BYTES_PER_ELEMENT;
+          job.sampler = createLegacyGalaxySampler(job.descriptors[job.sampleIndex], sampleCountFor(job.descriptors[job.sampleIndex],job.count,structures), stellarPopulation ? stellarPopulation(job.descriptors[job.sampleIndex]) : null);
+          job.sampleBytes += sampleCountFor(job.descriptors[job.sampleIndex],job.count,structures) * 7 * Float32Array.BYTES_PER_ELEMENT;
         }
         if (job.sampler.step(64)) {
           const sample = job.sampler.result;
@@ -377,7 +463,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
         }
       } else if (job.stage === 'attributes') {
         if (!job.attributes) {
-          const n = job.pointCount;
+          const n = job.commonPointCount;
           job.attributes = {
             position: new THREE.BufferAttribute(new Float32Array(n * 3), 3).setUsage(THREE.DynamicDrawUsage),
             color: new THREE.BufferAttribute(new Float32Array(n * 3), 3),
@@ -387,28 +473,31 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
           job.geometryBytes = n * (supportFade ? 8 : 7) * Float32Array.BYTES_PER_ELEMENT;
           continue;
         }
+        while (job.descriptorIndex < job.samples.length && !job.samples[job.descriptorIndex]) job.descriptorIndex++;
         if (job.descriptorIndex === job.samples.length) {
           job.stage = 'positions'; job.descriptorIndex = job.pointIndex = job.pointOffset = 0; continue;
         }
-        const sample = job.samples[job.descriptorIndex], end = Math.min(job.count, job.pointIndex + 64);
+        const sample = job.samples[job.descriptorIndex], end = Math.min(sample.sizes.length, job.pointIndex + 64);
+        const representationWeight=job.count/sample.sizes.length;
         const colors = job.attributes.color.array, sizes = job.attributes.pointRadius.array;
         const indices = job.attributes.descriptorIndex?.array;
         for (let i = job.pointIndex; i < end; i++) {
           const out = job.pointOffset + i, out3 = out * 3, in3 = i * 3;
-          colors[out3] = sample.colors[in3]; colors[out3 + 1] = sample.colors[in3 + 1]; colors[out3 + 2] = sample.colors[in3 + 2];
+          colors[out3] = sample.colors[in3]*representationWeight; colors[out3 + 1] = sample.colors[in3 + 1]*representationWeight; colors[out3 + 2] = sample.colors[in3 + 2]*representationWeight;
           sizes[out] = sample.sizes[i];
           if (indices) indices[out] = job.descriptorIndex;
         }
         job.pointIndex = end;
-        if (end === job.count) { job.pointOffset += job.count; job.descriptorIndex++; job.pointIndex = 0; }
+        if (end === sample.sizes.length) { job.pointOffset += sample.sizes.length; job.descriptorIndex++; job.pointIndex = 0; }
       } else if (job.stage === 'positions') {
         if (!job.centers) job.centers = job.descriptors.map(descriptor => galaxyRelativeCenter(descriptor, job.cell, gridCells));
+        while (job.descriptorIndex < job.samples.length && !job.samples[job.descriptorIndex]) job.descriptorIndex++;
         if (job.descriptorIndex === job.samples.length) { job.stage = 'ready'; break; }
         const sample = job.samples[job.descriptorIndex], center = job.centers[job.descriptorIndex];
-        const end = Math.min(job.count, job.pointIndex + 64), positions = job.attributes.position.array;
+        const end = Math.min(sample.sizes.length, job.pointIndex + 64), positions = job.attributes.position.array;
         for (let i = job.pointIndex * 3; i < end * 3; i++) positions[job.pointOffset * 3 + i] = sample.positions[i] + center[i % 3];
         job.pointIndex = end;
-        if (end === job.count) { job.pointOffset += job.count; job.descriptorIndex++; job.pointIndex = 0; }
+        if (end === sample.sizes.length) { job.pointOffset += sample.sizes.length; job.descriptorIndex++; job.pointIndex = 0; }
       }
     } while (performance.now() < deadline);
     const elapsed = performance.now() - start;
@@ -440,12 +529,28 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     const start = performance.now(), hazeStart = start;
     // Haze creation is deliberately still measured at its existing owner. It
     // is not included in the sliced legacy sampler/assembly budget.
-    if(job.macro!==lastMacro){haze.userData.setDescriptors(job.descriptors);if(supportFade)for(let i=0;i<job.descriptors.length;i++)material.uniforms.portraitHosts.value[i]=job.descriptors[i].portrait?1:0;}
+    if (job.macro !== lastMacro) {
+      haze.userData.setDescriptors(job.descriptors);
+      if(supportFade) for(let i=0;i<job.descriptors.length;i++) material.uniforms.portraitHosts.value[i]=job.descriptors[i].portrait?1:0;
+    }
     stats.hazePublishMs = performance.now() - hazeStart;
     geometry.dispose();
     for (const name in job.attributes) geometry.setAttribute(name, job.attributes[name]);
-    geometry.setDrawRange(0, job.pointCount);
+    geometry.setDrawRange(0, job.commonPointCount);
     descriptors = job.descriptors; samples = job.samples; centers = job.centers;
+    radiometryIndex=job.radiometryIndex;radiometryConfig=job.radiometryConfig;
+    if(coreRadiometry){
+      material.uniforms.coreIndex.value=radiometryIndex;
+      if(radiometryIndex>=0){
+        const descriptor=descriptors[radiometryIndex],axes=radiometryConfig.axes;
+        radiometryMatrix.makeRotationFromEuler(new THREE.Euler(...descriptor.orientation));
+        radiometryShape.setFromMatrix4(radiometryMatrix).transpose();
+        const e=radiometryShape.elements;
+        for(let col=0;col<3;col++)for(let row=0;row<3;row++)e[col*3+row]/=axes[row];
+        material.uniforms.coreRadius.value=descriptor.radius*radiometryConfig.coreRadius;
+        material.uniforms.coreMaxExtraGain.value=radiometryConfig.maximumExtraGain;
+      }
+    }
     lastMacro = job.macro; lastCount = job.count; lastQuality = job.quality; lastCell = job.cellKey;
     stats.activeSampleBytes = job.sampleBytes; stats.activeGeometryBytes = job.geometryBytes;
     stats.pendingSampleBytes = stats.pendingGeometryBytes = 0; stats.preparationStage = 'idle';
@@ -521,8 +626,9 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
       let pointOffset = 0;
       for (let j = 0; j < descriptors.length; j++) {
         const sample = samples[j], center = centers[j];
-        for (let i = 0; i < lastCount * 3; i++) positions[pointOffset * 3 + i] = sample.positions[i] + center[i % 3];
-        pointOffset += lastCount;
+        if (!sample) continue;
+        for (let i = 0; i < sample.sizes.length * 3; i++) positions[pointOffset * 3 + i] = sample.positions[i] + center[i % 3];
+        pointOffset += sample.sizes.length;
       }
       geometry.attributes.position.needsUpdate = true; lastCell = key; stats.rebuilds++;
     }
@@ -530,8 +636,15 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
       for (let i = 0; i < descriptors.length; i++) {
         const center = centers[i];
         const distance = Math.hypot(center[0] - cameraPosition[0], center[1] - cameraPosition[1], center[2] - cameraPosition[2]);
-        supportVisibility[i] = 1 - smoothstep(COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, Math.max(0, distance - descriptors[i].radius));
+        const supportRadius = descriptors[i].radius * (descriptors[i].medium?.supportRadius ?? 1);
+        supportVisibility[i] = 1 - smoothstep(COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, Math.max(0, distance - supportRadius));
       }
+    }
+    if(coreRadiometry && radiometryIndex>=0){
+      const u=material.uniforms;u.coreCenter.value.fromArray(centers[radiometryIndex]);
+      radiometryCamera.fromArray(cameraPosition).sub(u.coreCenter.value).applyMatrix3(radiometryShape);
+      const metric=radiometryCamera.length()/u.coreRadius.value;
+      u.coreLOD.value=1-smoothstep(1,4,metric);
     }
     material.uniforms.cameraLocal.value.fromArray(cameraPosition);
     material.uniforms.pixelHeight.value = Math.max(1, viewportHeight * pixelRatio);
@@ -541,12 +654,16 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     hazeFrame.centers = centers; hazeFrame.cameraPosition = cameraPosition; hazeFrame.quality = lastQuality;
     hazeFrame.camera = camera;
     hazeFrame.brightness = material.uniforms.brightness.value; hazeFrame.home = home;
+    hazeFrame.viewportHeight=viewportHeight;hazeFrame.pixelRatio=pixelRatio;
     const volumes = haze.userData.update(hazeFrame);
     const activePoints = lastCount ? geometry.attributes.position.count : 0;
-    stats.particles = activePoints;
+    stats.particles=activePoints+haze.userData.stats.stars;
+    stats.starBufferBytes=haze.userData.stats.starBufferBytes;
+    stats.maxParticles=commonPointCapacity
+      +haze.userData.stats.starCapacity-haze.userData.stats.media*maximumCommonPointsPerDescriptor;
     stats.batches = home ? 0 : Number(activePoints > 0) + volumes;
     if (publishedJob) settleJob(publishedJob, null, true);
   };
-  group.userData.dispose = () => { if (disposed) return; disposed = true; cancelPreparation(abortError('Cosmos disposed')); failure = null; geometry.dispose(); for (const name in geometry.attributes) geometry.deleteAttribute(name); material.dispose(); haze.userData.dispose(); if(supportFade){material.uniforms.structureWeights.value=null;material.uniforms.portraitHosts.value=null;} supportVisibility = null; group.clear(); samples = []; descriptors = []; centers = []; sampleCache.clear(); stats.sampleCacheBytes = stats.activeSampleBytes = stats.activeGeometryBytes = 0; stats.visible = false; stats.batches = 0; };
+  group.userData.dispose = () => { if (disposed) return; disposed = true; cancelPreparation(abortError('Cosmos disposed')); failure = null; geometry.dispose(); for (const name in geometry.attributes) geometry.deleteAttribute(name); material.dispose(); haze.userData.dispose(); if (supportFade) {material.uniforms.structureWeights.value = null;material.uniforms.portraitHosts.value = null;} supportVisibility = null; group.clear(); samples = []; descriptors = []; centers = []; sampleCache.clear(); stats.sampleCacheBytes = stats.activeSampleBytes = stats.activeGeometryBytes = stats.starBufferBytes = 0; stats.visible = false; stats.batches = 0; };
   return group;
 }

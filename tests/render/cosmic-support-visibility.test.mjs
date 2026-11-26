@@ -34,9 +34,15 @@ function weights(cosmos) {
 }
 function indices(cosmos, quality) {
   const { points, haze } = parts(cosmos), attribute = points.geometry.attributes.descriptorIndex;
-  const count = COSMOS_QUALITY_COUNTS[quality];
-  assert.equal(attribute.count, haze.children.length * count);
-  for (let i = 0; i < attribute.count; i++) assert.equal(attribute.array[i], Math.floor(i / count));
+  // The canonical catalogue owns one open child at :cluster-1 per parent.
+  // Assert its public High tier independently of the renderer's count helper.
+  const counts=haze.children.map(mesh=>quality==='high'&&mesh.name.endsWith(':cluster-1')?16384:COSMOS_QUALITY_COUNTS[quality]);
+  assert.equal(attribute.count,counts.reduce((sum,n)=>sum+n,0));
+  let offset=0;
+  for(let descriptor=0;descriptor<counts.length;descriptor++){
+    for(let point=0;point<counts[descriptor];point++)assert.equal(attribute.array[offset+point],descriptor);
+    offset+=counts[descriptor];
+  }
   return attribute;
 }
 

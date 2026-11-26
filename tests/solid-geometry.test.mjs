@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSolidWorkspace, solidDistance, sweepSolid } from '../src/solid-geometry.js';
+import { describeCosmicBody, cosmicBodyCenter } from '../src/cosmic-bodies.js';
+import { frameToWorld3 } from '../src/frame.js';
 
 const near = (actual, expected, tolerance = 2e-6) => assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} != ${expected}`);
 const part = (extra = {}) => ({ type: 'annular-sector-slab', innerRadius: 100, outerRadius: 200, minY: -10, maxY: 10, gapCenter: 0, gapHalfAngle: 0, ...extra });
@@ -25,6 +27,38 @@ test('gap distance uses finite cut segments and their endpoints', () => {
   near(solidDistance(solid, [radius, 0, 0]).distance, expected);
   const corner = solidDistance(solid, [radius, 14, 0]);
   near(corner.distance, Math.hypot(expected, 4));
+});
+
+test('actual shoulder angular-face point contact keeps its analytic normal at world scale', () => {
+  const body=describeCosmicBody({x:-28,y:30,z:-22},'lonely-universe-v2','regions');
+  const solid={...body,position:cosmicBodyCenter(body,32909267108293)},cut=solid.shape.parts[34],angle=cut.gapCenter+cut.gapHalfAngle;
+  const expected=frameToWorld3(solid.frame,[Math.sin(angle),0,-Math.cos(angle)]);
+  // Fixed ordinary corner ray: its point root previously normalized a~1e-10L
+  // coordinate-subtraction residual, giving normal dot plane only0.52353.
+  const start=[-3608.8885796666145,-8099.790174841881,4974.5245642066],end=[-3595.805676377502,-8737.11443230118,5055.845700696142];
+  const fractions=[.9968877635988637,.9844266665537941,.9532739239411199],workspace=createSolidWorkspace();
+  for(const [i,radius] of [0,2,7].entries()){
+    const hit=sweepSolid(solid,start,end,radius,{},workspace.result,workspace);
+    assert.equal(hit.status,'hit');assert.equal(hit.part,34);assert.equal(hit.feature,'gap-plus');near(hit.fraction,fractions[i],2e-12);
+    assert.ok(hit.normal.reduce((sum,n,axis)=>sum+n*expected[axis],0)>1-1e-12);
+    const safe=start.map((n,axis)=>n+(end[axis]-n)*hit.safeFraction);
+    assert.ok(solidDistance(solid,safe,workspace.distance,workspace).distance>=radius-1e-8);
+  }
+});
+
+test('finite angular planes retain signed normals while radial endpoints keep their rounded direction', () => {
+  const gapCenter=.7,gapHalfAngle=.5,solid=ring({shape:{type:'compound',parts:[part({gapCenter,gapHalfAngle})]}});
+  for(const side of [-1,1]){
+    const a=gapCenter+side*gapHalfAngle,radial=[Math.cos(a),0,Math.sin(a)],normal=[Math.sin(a)*side,0,-Math.cos(a)*side];
+    for(const d of [-2,0,2]){
+      const p=radial.map((n,i)=>150*n+normal[i]*d),result=solidDistance(solid,p);
+      near(result.distance,d);assert.ok(result.normal.reduce((sum,n,i)=>sum+n*normal[i],0)>1-1e-12);
+    }
+    const endpointNormal=normal.map((n,i)=>(n-radial[i])/Math.sqrt(2)),p=radial.map((n,i)=>100*n+endpointNormal[i]*5),result=solidDistance(solid,p);
+    near(result.distance,5);assert.ok(result.normal.reduce((sum,n,i)=>sum+n*endpointNormal[i],0)>1-1e-12);
+  }
+  const major=ring({boundsRadius:1001,shape:{type:'compound',parts:[part({innerRadius:0,outerRadius:1000,minY:-100,maxY:100,gapHalfAngle:.4})]}});
+  const originEnd=solidDistance(major,[-20,0,0]);near(originEnd.distance,-20);near(originEnd.normal[0],1);near(originEnd.normal[2],0);
 });
 
 test('sphere sweep has the same analytic time of impact at high speed', () => {
@@ -95,9 +129,11 @@ test('a gap three-face corner keeps the spherical ship corner instead of a box i
   const corner = [200 * c, 10, 200 * s], normal = [(c + s) / Math.sqrt(3), 1 / Math.sqrt(3), (s - c) / Math.sqrt(3)];
   const start = corner.map((n, i) => n + normal[i] * 100), end = [...corner];
   near(solidDistance(solid, start).distance, 100);
-  const sweep = sweepSolid(solid, start, end, 8);
-  assert.equal(sweep.status, 'hit'); near(sweep.fraction, .92, 1e-9);
-  for (let axis = 0; axis < 3; axis++) near(sweep.normal[axis], normal[axis], 1e-7);
+  for(const radius of [2,7,8]){
+    const sweep=sweepSolid(solid,start,end,radius);
+    assert.equal(sweep.status,'hit');near(sweep.fraction,1-radius/100,1e-9);
+    for(let axis=0;axis<3;axis++)near(sweep.normal[axis],normal[axis],1e-7);
+  }
 });
 
 test('seeded oblique sweeps agree with an independent dense penetration oracle', () => {

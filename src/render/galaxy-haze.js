@@ -1,8 +1,36 @@
-import {COSMIC_SCENE_DEPTH_GLSL} from './cosmic-scene-depth.js';
 import * as THREE from 'three';
-import { hashSeed, randomFromSeed } from '../random.js';
+import { randomFromSeed } from '../random.js';
+import {createAppearanceRandom} from './appearance-random.js';
+import {createGalaxyPortrait} from './galaxy-portrait.js';
 import { describeGalaxyAppearance } from './galaxy-appearance.js';
+import {createGalacticMediumVolume} from './galactic-medium.js';
+import {COSMIC_SCENE_DEPTH_GLSL} from './cosmic-scene-depth.js';
 import { COSMIC_VIEW_FADE_START, COSMIC_VIEW_FAR, COSMIC_DEPTH_GLSL } from '../cosmic-structures.js';
+
+
+export function isGeneratedOpenCluster(descriptor) {
+  return descriptor.revision===3&&descriptor.kind==='cluster'&&descriptor.family==='open'&&descriptor.morphology==='irregular';
+}
+
+/** One immutable display distribution shared by fine tracers and unresolved light. */
+export function createOpenClusterProfile(descriptor) {
+  if(!isGeneratedOpenCluster(descriptor))return null;
+  const random=createAppearanceRandom(descriptor.id,descriptor.seed);
+  const family=descriptor.childAppearance?.family??'tidal-islands';
+  const parent=createGalaxyPortrait(descriptor,family,random);
+  const count=4+Math.floor(random()*5),nodes=[],cdf=[];
+  let mass=0;
+  for(let i=0;i<count;i++){
+    const source=parent.nodes[Math.floor(i*parent.nodes.length/count)];
+    const center=Object.freeze(source.center.map((v,k)=>v+(random()-.5)*(k===1?.10:.07)));
+    const width=source.width*(1.7+random()*.65),long=Math.max(width*1.5,source.long*(.85+random()*.35));
+    const weight=source.weight*(.4+random()*.95);
+    mass+=weight*long*width*width;cdf.push(mass);
+    nodes.push(Object.freeze({center,axis:source.axis,width,long,weight,knotChance:0,knotCenter:center,knotWidth:width}));
+  }
+  return Object.freeze({family,haloFraction:.18,haloAxes:Object.freeze([.38,.17,.34]),nodes:Object.freeze(nodes),
+    cdf:Object.freeze(cdf.map(v=>v/mass))});
+}
 
 // A bounded emission integral through a real ellipsoid, not a camera-facing
 // painted galaxy. All materials share the same shader program and geometry.
@@ -46,36 +74,8 @@ const fragmentShader = /* glsl */`
   uniform float morphology;uniform float asymmetry;uniform float bar;uniform float brightness;
   uniform float armStrength;uniform float coreStrength;uniform float dustStrength;uniform float haloStrength;
   uniform float bridgeStrength;uniform float knotScale;uniform float youngStrength;uniform float emissionStrength;
-  uniform highp uint dustSeed;uniform vec2 noiseOffset;
-  // Jump directly to each corner of the seeded 64-wide random sequence.
-  // Four lanes follow randomFromSeed's uint32 operations for the old field.
-  float broadDust(vec2 uv){
-    vec2 point=uv*4.,f=fract(point);
-    uvec2 cell=uvec2(point),next=(cell+1u)&3u;
-    uvec4 index=uvec4(cell.x,next.x,cell.x,next.x)+64u*uvec4(cell.yy,next.yy);
-    uvec4 state=dustSeed+(index+1u)*0x6d2b79f5u;
-    uvec4 h=(state^(state>>15u))*(state|1u);
-    h^=h+(h^(h>>7u))*(h|61u);
-    vec4 corners=vec4(h^(h>>14u))*(1./4294967296.)-.5;
-    f=f*f*(3.-2.*f);
-    vec2 row=mix(corners.xz,corners.yw,f.x);
-    return mix(row.x,row.y,f.y);
-  }
-  mediump vec2 dustWave(mediump vec2 turns){
-    mediump vec2 x=1.-4.*abs(fract(turns)-.5);
-    return x*(1.5-.5*x*x);
-  }
-  float dustField(vec2 p,float footprint){
-    if(footprint>=.25)return .5;
-    vec2 uv=fract(p-vec2(1./128.));
-    mediump vec4 weight=(1.-smoothstep(vec4(.25),vec4(1.),footprint*vec4(4.,8.,16.,32.)))*vec4(.52,.28,.14,.06);
-    float broad=broadDust(uv);
-    mediump vec2 mid=dustWave(vec2(dot(uv,vec2(3.,-2.)),dot(uv,vec2(1.,4.)))+broad*1.7);
-    mediump vec2 fine=dustWave(vec2(dot(uv,vec2(-3.,5.)),dot(uv,vec2(6.,2.)))+.33*mid.yx);
-    mediump vec2 grain=dustWave(vec2(dot(uv,vec2(11.,4.)),dot(uv,vec2(-7.,13.)))+.35*fine.yx);
-    mediump vec4 bands=vec4(broad,dot(mid,vec2(.23,.19)),dot(fine,vec2(.19,.23)),dot(grain,vec2(.23,.19)));
-    return clamp(.5+1.65*dot(bands,weight),0.,1.);
-  }
+  uniform highp uint hazeSeed;
+  uniform vec2 noiseOffset;
   #ifdef COSMIC_STRUCTURES
     ${COSMIC_SCENE_DEPTH_GLSL}
   #endif
@@ -83,6 +83,28 @@ const fragmentShader = /* glsl */`
     uniform float structureVisibility;
   #endif
   uniform int steps;uniform vec2 quadrature[48];uniform vec2 coreQuadrature[48];
+  // Four integer lattice corners are evaluated together in object space.
+  // Fade contrast around the known mean when a ray or pixel cannot resolve a band.
+  uvec4 hazeAvalanche(uvec4 h){
+    h=(h^(h>>16u))*0x7feb352du;
+    h=(h^(h>>15u))*0x846ca68bu;
+    return h^(h>>16u);
+  }
+  float hazeLattice(vec2 coordinate){
+    ivec2 cell=ivec2(floor(coordinate));
+    vec2 t=fract(coordinate);
+    t=t*t*(3.-2.*t);
+    uvec4 x=uvec4(uint(cell.x))+uvec4(0u,1u,0u,1u);
+    uvec4 y=uvec4(uint(cell.y))+uvec4(0u,0u,1u,1u);
+    uvec4 h=hazeAvalanche((x*0x9e3779b9u)^(y*0x85ebca6bu)^uvec4(hazeSeed));
+    vec4 corner=vec4(h>>8u)*(1./16777216.)-.5;
+    return mix(mix(corner.x,corner.y,t.x),mix(corner.z,corner.w,t.x),t.y);
+  }
+  float hazeNoise(vec2 coordinate,float footprint){
+    float weight=1.-smoothstep(.25,1.,footprint*5.);
+    if(weight<=0.)return .5;
+    return clamp(.5+1.05*weight*hazeLattice(coordinate*5.),0.,1.);
+  }
   float armLobe(float angularOffset,float width,float angularVariance,float period){
     float sigma=sqrt(width*width+angularVariance);
     // Adjacent periods keep the convolution continuous at the phase seam.
@@ -101,6 +123,7 @@ const fragmentShader = /* glsl */`
     // Exact centre phase used by sampleGalaxy: theta=arm*TAU/arms+log(r+.06)/pitch.
     float phase=(theta-log(r+.06)/pitch)*arms;
     float angularOffset=atan(sin(phase),cos(phase))/arms;
+    // The analytic atan/log phase has its own footprint filter.
     // Approximate the ray/pixel box footprint by a Gaussian of equal variance.
     // The logarithmic radial and angular gradients are orthogonal.
     float radialSlope=pitch*(r+.06);
@@ -122,7 +145,7 @@ const fragmentShader = /* glsl */`
       // column created an opaque ruler across every V3 edge-on stellar disc.
       vec3 p=q*shapeScale;
       vec2 dustPlane=p.xz+p.y*vec2(.37,.71);
-      float cloud=dustField(dustPlane*1.43+noiseOffset,footprint*1.43);
+      float cloud=hazeNoise(dustPlane*1.43+noiseOffset,footprint*1.43);
       float warpedHeight=p.y/thickness+(cloud-.5)*1.7;
       float pocketVertical=exp(-.5*warpedHeight*warpedHeight);
       float r=length(p.xz);
@@ -145,7 +168,7 @@ const fragmentShader = /* glsl */`
     float crossing=abs(direction.y)<.0001?reach*.5:clamp(-p.y/direction.y,0.,reach);
     vec3 sheetPoint=p+direction*crossing;
     float radial=exp(-length(sheetPoint.xz)*2.2);
-    float dustCloud=dustField(sheetPoint.xz*.73+noiseOffset,footprint*.73);
+    float dustCloud=hazeNoise(sheetPoint.xz*.73+noiseOffset,footprint*.73);
     radial*=.22+2.8*smoothstep(.32,.69,dustCloud);
     return exp(-clamp(max(0.,column)*radial*dustStrength*6.,0.,12.));
     #endif
@@ -157,7 +180,7 @@ const fragmentShader = /* glsl */`
   #ifdef COSMIC_STRUCTURES
   uniform vec4 nebulaBranchRoot[12],nebulaBranchTip[12],nebulaBranchBend[12];
   uniform vec4 nebulaBoundsMin[14],nebulaBoundsMax[14];
-  uniform highp uint nebulaSeed;
+  uniform highp uint nebulaCornerSeed;
   uniform vec3 nebulaWarm,nebulaCool,nebulaAmbient,nebulaLight;
   uniform vec3 nebulaMatter;
   uniform mat3 nebulaNoiseDomain[3];uniform ivec3 nebulaNoisePhase[3];
@@ -168,10 +191,7 @@ const fragmentShader = /* glsl */`
   // Keep the 96-cell periodic field, including its corner bits and gradients.
   // Adjacent XY products feed both Z planes without per-sample table reads.
   uvec4 nebulaCornerPlane(uvec4 xy,uint z){
-    uvec4 h=xy^(z*0xcb1ab31fu)^nebulaSeed;
-    h=(h^(h>>16u))*0x7feb352du;
-    h=(h^(h>>15u))*0x846ca68bu;
-    return h^(h>>16u);
+    return hazeAvalanche(xy^(z*0xcb1ab31fu)^nebulaCornerSeed);
   }
   void nebulaCorners(ivec3 cell,out uvec4 lower,out uvec4 upper){
     uvec3 c=uvec3(mod(vec3(cell),96.)),n=(c+1u)*uvec3(lessThan(c,uvec3(95u)));
@@ -235,9 +255,14 @@ const fragmentShader = /* glsl */`
   vec4 nebulaDust(vec3 q,float footprint,vec3 rayDirection,float raySpan){
     float qlength=length(q),edge=1.-smoothstep(.8,1.,qlength);if(edge<=0.)return vec4(0.);
     vec3 p=q*shapeScale,voidCenter=vec3((noiseOffset.x-.5)*.45,.025,(noiseOffset.y-.5)*.45);
-    vec3 boundPoint=p-voidCenter;bool dustPointPossible=false;
-    for(int box=0;box<13;box++)if(nebulaPointBoxGap(box,boundPoint)<=footprint*nebulaBoundsMin[box].w){dustPointPossible=true;break;}
-    if(!dustPointPossible)return vec4(0.); // rho=0: even noncompact skin tails have zero transfer.
+    vec3 boundPoint=p-voidCenter;
+    // The broad wall covers much of the emitting volume. Test it before
+    // scanning the twelve narrower branch bounds at each integration node.
+    if(nebulaPointBoxGap(12,boundPoint)>footprint*nebulaBoundsMin[12].w){
+      bool inBranch=false;
+      for(int box=0;box<12;box++)if(nebulaPointBoxGap(box,boundPoint)<=footprint*nebulaBoundsMin[box].w){inBranch=true;break;}
+      if(!inBranch)return vec4(0.);
+    } // rho=0: even noncompact skin tails have zero transfer.
     // Value pass: no matrices or branch gradients until a source can contribute.
     mat3 coarseGradient;vec3 midGradient,fineGradient;
     vec3 coarse=nebulaNoiseVector(p,6.8,0,footprint,coarseGradient);
@@ -276,8 +301,8 @@ const fragmentShader = /* glsl */`
     float content=1.5*pillar+.85*nebulaMatter.y*wall*(1.-.7*pillar),rho=edge*content*nebulaMatter.x;
     if(rho<=0.)return vec4(0.);
     vec2 detailPlane=p.xz+p.y*vec2(.37,.71);
-    float detail=dustField(detailPlane*5.3+noiseOffset,footprint*5.3*1.3)*2.-1.;
-    float fine=dustField(detailPlane*11.7+noiseOffset.yx,footprint*11.7*1.3)*2.-1.;
+    float detail=hazeNoise(detailPlane*5.3+noiseOffset,footprint*5.3*1.3)*2.-1.;
+    float fine=hazeNoise(detailPlane*11.7+noiseOffset.yx,footprint*11.7*1.3)*2.-1.;
     float crag=.72+.18*detail+.10*fine;vec3 coreSource=crag*nebulaAmbient;
     float wallWeight=.85*nebulaMatter.y*wall*(1.-.7*pillar);
     if(wallWeight>0.){
@@ -324,19 +349,39 @@ const fragmentShader = /* glsl */`
     return vec2(first,last);
   }
   #endif
+  #ifdef COSMIC_STRUCTURES
+  uniform int openClusterCount;
+  uniform vec4 openClusterCenters[8],openClusterAxes[8];
+  uniform float openClusterMasses[8],openClusterEmissionMass,openClusterHaloFraction;
+  uniform vec3 openClusterHaloAxes;
+  float openClusterDensity(vec3 p){
+    vec3 halo=p/openClusterHaloAxes;
+    float rho=openClusterHaloFraction*exp(-.5*dot(halo,halo))/(15.74961*openClusterHaloAxes.x*openClusterHaloAxes.y*openClusterHaloAxes.z);
+    for(int i=0;i<8;i++)if(i<openClusterCount){
+      vec3 delta=p-openClusterCenters[i].xyz,axis=openClusterAxes[i].xyz;
+      float along=dot(delta,axis),width=openClusterCenters[i].w,longAxis=openClusterAxes[i].w;
+      vec3 transverse=(delta-axis*along)/width;
+      float distance=dot(transverse,transverse)+along*along/(longAxis*longAxis);
+      rho+=(1.-openClusterHaloFraction)*openClusterMasses[i]*exp(-.5*distance)/(15.74961*longAxis*width*width);
+    }
+    return rho*openClusterEmissionMass;
+  }
+  #endif
   vec4 density(vec3 q,float footprint,float dustFootprint){
     float edge=1.-smoothstep(.8,1.,length(q));
     if(edge<=0.) return vec4(0.);
     vec3 p=q*shapeScale;
 
+    #ifdef COSMIC_STRUCTURES
+      if(openClusterCount>0)return vec4(tint,edge*openClusterDensity(p));
+    #endif
     if(morphology<.5){
       float r=length(p.xz);
       // Resolved stellar mottling lies inside a continuous arm envelope. The
       // former low-frequency multiplicative gates broke arms into large beads.
-      // Each field is filtered in world coordinates.
-      float coarse=dustField(p.xz*.31+noiseOffset,footprint*.31);
-      float fine=dustField(p.xz*1.71+noiseOffset.yx+vec2(.37,.19),footprint*1.71);
-      float grain=dustField(p.xz*6.1+noiseOffset+vec2(.13,.47),footprint*6.1);
+      float coarse=hazeNoise(p.xz*.31+noiseOffset,footprint*.31);
+      float fine=hazeNoise(p.xz*1.71+noiseOffset.yx+vec2(.37,.19),footprint*1.71);
+      float grain=hazeNoise(p.xz*6.1+noiseOffset+vec2(.13,.47),footprint*6.1);
       // Correlated structure bends the arm spine gently; resolved star particles
       // still sit in the same arm envelope and retain their original positions.
       float angleWarp=(coarse-.5)*.13,radialWarp=1.+(fine-.5)*.045;
@@ -366,7 +411,7 @@ const fragmentShader = /* glsl */`
       #ifdef COSMIC_STRUCTURES
         // Sparse arms and real black inter-arm gaps; no uniform glowing disk.
         interarm*=.035;
-        armLight*=smoothstep(.28,.61,coarse*.65+fine*.35);
+        armLight*=.55+.45*smoothstep(.28,.61,coarse*.65+fine*.35);
       #endif
       // Dust complexes absorb starlight within the arms at several scales.
       // Keep a positive transmission floor through optical depth rather than
@@ -389,10 +434,11 @@ const fragmentShader = /* glsl */`
       return vec4(tint*population,amount);
     }
     if(morphology<1.5) return vec4(0.);
-    // Project physical height into the dust plane to vary pockets off the midplane.
+    // Two filtered procedural layers resolve dusty pockets within the
+    // separately placed emission envelopes.
     vec2 dustPlane=p.xz+p.y*vec2(.37,.71);
-    float cloud=dustField(dustPlane*.9+noiseOffset,footprint*.9);
-    float grain=dustField(dustPlane*2.7+noiseOffset.yx+vec2(.23,.61),footprint*2.7);
+    float cloud=hazeNoise(dustPlane*.9+noiseOffset,footprint*.9);
+    float grain=hazeNoise(dustPlane*2.7+noiseOffset.yx+vec2(.23,.61),footprint*2.7);
     cloud=clamp((cloud-.5)*2.8+.5,0.,1.);
     grain=clamp((grain-.5)*4.+.5,0.,1.);
     float structure=.2+1.25*smoothstep(.35,.65,cloud*.55+grain*.45);
@@ -430,7 +476,7 @@ const fragmentShader = /* glsl */`
     if(morphology>.5){
       float stellarRadius=length(q);
       vec2 stellarPlane=q.xz+q.y*vec2(.41,.63);
-      float stellarGrain=dustField(stellarPlane*1.1+noiseOffset,footprint*1.1);
+      float stellarGrain=hazeNoise(stellarPlane*1.1+noiseOffset,footprint*1.1);
       #ifdef COSMIC_STRUCTURES
         if(structureKind>.5&&structureKind<1.5){
           // Resolved cluster stars own the halo. Retain only the compact,
@@ -465,12 +511,11 @@ const fragmentShader = /* glsl */`
   uniform float portraitWeights[10];
   uniform vec3 portraitTint;
   uniform vec2 portraitLight;
-  // Two offset Z slices of the periodic multiscale field. A
-  // physical cloud retains variation seen along the plane as well as above it.
+  // Interpolate two procedural slices so the cloud also varies along the plane.
   float portraitCloud(vec3 p,float footprint,vec2 phase){
     float z=floor(p.z),f=fract(p.z);
     vec2 uv=p.xy*.25+z*vec2(.317,.261)+phase;
-    return mix(dustField(uv,footprint*.25),dustField(uv+vec2(.317,.261),footprint*.25),f*f*(3.-2.*f));
+    return mix(hazeNoise(uv,footprint*.25),hazeNoise(uv+vec2(.317,.261),footprint*.25),f*f*(3.-2.*f));
   }
   float gaussianCDF(float x){
     // Standard normal CDF, error < .0002. Symmetric saturating tails.
@@ -489,20 +534,21 @@ const fragmentShader = /* glsl */`
       float peak=-dot(o,unitV);
       vec3 perpendicular=o+unitV*peak;float transverse=dot(perpendicular,perpendicular);
       if(transverse>16. || peak < -4. || peak > reach*speed+4.)continue;
-      float cloudWeight=portraitLight.x;
+      float weight=portraitLight.x;
       if(portraitLight.y>0.){
         // Patchy natal/dust emission belongs only to the gas-rich families.
-        // Address the field on a bounded physical depth plane. At grazing
-        // incidence the anisotropic optical maximum sweeps along the major axis.
+        // Use a bounded physical depth plane through this cell for noise
+        // addressing: the anisotropic optical maximum sweeps along the major
+        // axis at grazing incidence and stretches the detail into wires.
         float t=clamp(-dot(d,ray),0.,reach);
         vec3 p=origin+ray*t;
         float cloud=portraitCloud(p*14.,angularFootprint*14.,noiseOffset);
         float detail=portraitCloud(p.yzx*49.+vec3(cloud*.95,0.,0.),angularFootprint*49.,noiseOffset.yx);
         float pockets=smoothstep(.35,.72,cloud*.65+detail*.35);
-        cloudWeight+=portraitLight.y*pockets*pockets*(.30+.74*detail);
+        weight+=portraitLight.y*pockets*pockets*(.30+.74*detail);
       }
       float column=2.506628/speed*exp(-.5*transverse)*(gaussianCDF(reach*speed-peak)-gaussianCDF(-peak));
-      light+=portraitWeights[i]*cloudWeight*column;
+      light+=portraitWeights[i]*weight*column;
     }
     return portraitTint*light;
   }
@@ -510,7 +556,7 @@ const fragmentShader = /* glsl */`
   void main(){
     vec3 direction=normalize(localExit-localCamera);
     // Evaluate derivatives before divergent ray/support branches. This footprint
-    // filters both pixel aliasing and density detail unresolved along the ray.
+    // filters both pixel aliasing and detail unresolved along the ray.
     float angularFootprint=max(length(dFdx(direction).xz*shapeScale.xz),length(dFdy(direction).xz*shapeScale.xz));
     #ifdef COSMIC_STRUCTURES
       // Include Y for the nebula's three planes; the stellar disk footprint
@@ -649,6 +695,7 @@ const fragmentShader = /* glsl */`
 
 /** Shape scales remain inside the existing galaxy support radius. */
 export function galaxyHazeScale(descriptor) {
+  if (descriptor.medium) return [1, 1, 1];
   if (descriptor.morphology === 'spiral') return [1, Math.min(.28, descriptor.thickness * 3.2), 1];
   if (descriptor.morphology === 'elliptical') return [1, descriptor.thickness, .8];
   return [1, 1, 1];
@@ -744,11 +791,12 @@ function nebulaNoiseDomains(seed){
   return{domains,phases};
 }
 
-export function createGalaxyHaze({ seed = 'lonelysky', structures = false, supportVisibility = null } = {}) {
+export function createGalaxyHaze({ seed = 'lonelysky', structures = false, supportVisibility = null, galacticMediumOptions } = {}) {
+  if(galacticMediumOptions!==undefined&&typeof galacticMediumOptions!=='function')throw new TypeError('Galactic medium options must be a descriptor resolver');
   const group = new THREE.Group(); group.name = 'galaxy-emission-volumes';
+  const stats={stars:0,starCapacity:0,starBufferBytes:0,media:0};group.userData.stats=stats;
   const geometry = new THREE.SphereGeometry(1, 40, 24);
-  const dustSeed = hashSeed(`${seed}:galaxy-dust-texture-v1`);
-  const nebulaSeed = Math.floor(randomFromSeed(`${seed}:nebula-shared-lattice-v1`)() * 4294967296);
+  const nebulaCornerSeed = Math.floor(randomFromSeed(`${seed}:nebula-shared-lattice-v1`)()*2**32);
   const camera = new THREE.Vector3(), inverse = new THREE.Quaternion();
   const viewProjection = new THREE.Matrix4(), viewFrustum = new THREE.Frustum(), orientationMatrix = new THREE.Matrix4();
   let descriptors = [], disposed = false;
@@ -756,7 +804,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
     // Descriptor values are installed before this slot enters the scene.
     const material = new THREE.ShaderMaterial({
       uniforms: { localCamera: { value: new THREE.Vector3() }, shapeScale: { value: new THREE.Vector3() },
-        tint: { value: new THREE.Color() }, dustSeed: { value: dustSeed }, noiseOffset: { value: new THREE.Vector2() },
+        tint: { value: new THREE.Color() }, hazeSeed: { value: 0 }, noiseOffset: { value: new THREE.Vector2() },
         radius: { value: 0 }, thickness: { value: 0 }, arms: { value: 0 }, pitch: { value: 0 }, morphology: { value: 0 },
         asymmetry: { value: 0 }, bar: { value: 0 }, brightness: { value: 1 }, steps: { value: 32 },
         quadrature: { value: integrationRules[32] }, coreQuadrature: { value: integrationRules[16] } },
@@ -765,7 +813,14 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       blending: THREE.AdditiveBlending, depthWrite: false, depthTest: !structures,
     });
     if(structures){
-      material.uniforms.nebulaSeed={value:nebulaSeed};
+      material.uniforms.nebulaCornerSeed={value:nebulaCornerSeed};
+      material.uniforms.openClusterCount={value:0};
+      material.uniforms.openClusterCenters={value:Array.from({length:8},()=>new THREE.Vector4())};
+      material.uniforms.openClusterAxes={value:Array.from({length:8},()=>new THREE.Vector4())};
+      material.uniforms.openClusterMasses={value:new Float32Array(8)};
+      material.uniforms.openClusterHaloFraction={value:0};
+      material.uniforms.openClusterHaloAxes={value:new THREE.Vector3(1,1,1)};
+      material.uniforms.openClusterEmissionMass={value:0};
       material.uniforms.portraitCenters={value:Array.from({length:10},()=>new THREE.Vector4())};
       material.uniforms.portraitAxes={value:Array.from({length:10},()=>new THREE.Vector4())};
       material.uniforms.portraitWeights={value:new Float32Array(10)};
@@ -809,6 +864,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       : structures && descriptor.theme === 'blue-nursery' ? 0x9aaeba
       : descriptor.morphology === 'elliptical' ? 0xc7bba5 : 0xc4c2b9);
     uniforms.noiseOffset.value.set(detail(), detail());
+    uniforms.hazeSeed.value = Math.floor(createAppearanceRandom(descriptor.id, [seed, descriptor.seed])() * 2**32);
     // Separate the large filament integrator from stellar programs. Keeping
     // its 128-node path live raises register pressure on spiral galaxy draws.
     const isComplex=structures&&descriptor.kind==='nebula';
@@ -837,19 +893,19 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       for(const v of uniforms.nebulaNoisePhase.value)v.set(0,0,0);
     }
     mesh.material.blending=structures&&descriptor.kind==='nebula'?THREE.NormalBlending:THREE.AdditiveBlending;
-      if(structures&&descriptor.kind==='nebula'){
-        const profile=descriptor.childAppearance;
-        const branches=nebulaBranches(uniforms.noiseOffset.value,profile);
-        uniforms.nebulaWarm.value.fromArray(profile?.warm??[1,.52,.18]);
-        uniforms.nebulaCool.value.fromArray(profile?.cool??[.10,.32,.60]);
-        uniforms.nebulaAmbient.value.fromArray(profile?.ambient??[.008,.004,.002]);
-        uniforms.nebulaLight.value.fromArray(profile?.light??[.15,-.45,.72]);
-        uniforms.nebulaMatter.value.set(profile?.dust??1,profile?.wall??1,profile?.ion??1);
-        for(let i=0;i<12;i++){uniforms.nebulaBranchRoot.value[i].copy(branches.roots[i]);uniforms.nebulaBranchTip.value[i].copy(branches.tips[i]);uniforms.nebulaBranchBend.value[i].copy(branches.bends[i]);}
-        const domains=nebulaNoiseDomains(descriptor.seed);
-        for(let i=0;i<3;i++){uniforms.nebulaNoiseDomain.value[i].copy(domains.domains[i]);uniforms.nebulaNoisePhase.value[i].copy(domains.phases[i]);}
-        const bounds=nebulaBounds(branches);for(let i=0;i<14;i++){uniforms.nebulaBoundsMin.value[i].copy(bounds.lower[i]);uniforms.nebulaBoundsMax.value[i].copy(bounds.upper[i]);}
-      }
+    if(structures&&descriptor.kind==='nebula'){
+      const profile=descriptor.childAppearance;
+      const branches=nebulaBranches(uniforms.noiseOffset.value,profile);
+      uniforms.nebulaWarm.value.fromArray(profile?.warm??[1,.52,.18]);
+      uniforms.nebulaCool.value.fromArray(profile?.cool??[.10,.32,.60]);
+      uniforms.nebulaAmbient.value.fromArray(profile?.ambient??[.008,.004,.002]);
+      uniforms.nebulaLight.value.fromArray(profile?.light??[.15,-.45,.72]);
+      uniforms.nebulaMatter.value.set(profile?.dust??1,profile?.wall??1,profile?.ion??1);
+      for(let i=0;i<12;i++){uniforms.nebulaBranchRoot.value[i].copy(branches.roots[i]);uniforms.nebulaBranchTip.value[i].copy(branches.tips[i]);uniforms.nebulaBranchBend.value[i].copy(branches.bends[i]);}
+      const domains=nebulaNoiseDomains(descriptor.seed);
+      for(let i=0;i<3;i++){uniforms.nebulaNoiseDomain.value[i].copy(domains.domains[i]);uniforms.nebulaNoisePhase.value[i].copy(domains.phases[i]);}
+      const bounds=nebulaBounds(branches);for(let i=0;i<14;i++){uniforms.nebulaBoundsMin.value[i].copy(bounds.lower[i]);uniforms.nebulaBoundsMax.value[i].copy(bounds.upper[i]);}
+    }
 
     if(descriptor.childAppearance&&descriptor.kind==='cluster')uniforms.tint.value.multiply(new THREE.Color(...descriptor.stellarTint));
 
@@ -864,6 +920,22 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
     mesh.rotation.order = 'XYZ'; mesh.rotation.fromArray(descriptor.orientation);
     mesh.scale.copy(uniforms.shapeScale.value).multiplyScalar(descriptor.radius);
     if (structures) {
+      const profile = createOpenClusterProfile(descriptor);
+      mesh.userData.openClusterProfile = profile;
+      uniforms.openClusterCount.value = profile ? profile.nodes.length : 0;
+      if (profile) {
+        for (let i = 0; i < profile.nodes.length; i++) {
+          const node = profile.nodes[i];
+          uniforms.openClusterCenters.value[i].set(...node.center, node.width);
+          uniforms.openClusterAxes.value[i].set(...node.axis, node.long);
+          uniforms.openClusterMasses.value[i] = profile.cdf[i] - (profile.cdf[i - 1] ?? 0);
+        }
+        uniforms.openClusterHaloFraction.value = profile.haloFraction;
+        uniforms.openClusterHaloAxes.value.fromArray(profile.haloAxes);
+        // Retain the broad unresolved-light scale of the three-node envelope.
+        uniforms.openClusterEmissionMass.value = 3 * 15.74961 * .17 * (descriptor.thickness * .5) * .19
+          * Math.pow(appearance.knotScale, 3) * .85 * .65 * .06;
+      }
       uniforms.continuumWeight.value = 1;
       uniforms.structureKind.value = descriptor.kind === 'nebula' ? 2 : descriptor.kind === 'cluster' ? 1 : 0;
       uniforms.uVisibility.value = uniforms.uDensity.value = 1;
@@ -874,25 +946,62 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
     for (const name of ['armStrength', 'coreStrength', 'dustStrength', 'haloStrength', 'bridgeStrength', 'knotScale', 'youngStrength', 'emissionStrength']) uniforms[name].value = appearance[name];
     mesh.userData.appearance = appearance;
   }
+  function disposeVolume(mesh) {
+    if (mesh.userData.isGalacticMedium) mesh.userData.dispose();
+    else mesh.material.dispose();
+  }
   group.userData.setDescriptors = (next) => {
     if (disposed) return;
-    // Keep current material/program owners across a catalogue handoff. Slots
-    // follow catalogue order, not identity; custom providers may change an ID.
-    // There is no spare pool: removed slots release their materials immediately.
-    while (group.children.length > next.length) {
-      const mesh = group.children[group.children.length - 1];
-      mesh.removeFromParent(); mesh.material.dispose();
+    if (!supportVisibility && next.some(descriptor => descriptor.medium)) throw new TypeError('Galactic media require shared support visibility');
+
+    // Legacy volume slots retain their material owners across catalogue changes.
+    // Media own descriptor-specific geometry and textures.
+    const volumes = new Array(next.length);
+    const created = [];
+    try {
+      for (let i = 0; i < next.length; i++) {
+        const descriptor = next[i], current = group.children[i];
+        if (descriptor.medium) {
+          volumes[i] = createGalacticMediumVolume(descriptor, galacticMediumOptions?.(descriptor));
+          created.push(volumes[i]);
+        } else if (current && !current.userData.isGalacticMedium) {
+          volumes[i] = current;
+        } else {
+          volumes[i] = createVolume();
+          created.push(volumes[i]);
+        }
+      }
+    } catch (error) {
+      for (const mesh of created) disposeVolume(mesh);
+      throw error;
     }
-    for (let i = 0; i < next.length; i++) {
-      const mesh = group.children[i] ?? createVolume();
-      configureVolume(mesh, next[i]);
-      if (mesh.parent !== group) group.add(mesh);
+
+    let ownersChanged = volumes.length !== group.children.length;
+    for (let i = 0; i < group.children.length; i++) {
+      if (group.children[i] !== volumes[i]) {
+        disposeVolume(group.children[i]);
+        ownersChanged = true;
+      }
+    }
+    if (ownersChanged) group.clear();
+    stats.stars = stats.starCapacity = stats.starBufferBytes = stats.media = 0;
+    for (let i = 0; i < volumes.length; i++) {
+      const mesh = volumes[i];
+      if (mesh.userData.isGalacticMedium) {
+        stats.stars += mesh.userData.stats.stars;
+        stats.starCapacity += mesh.children[0].geometry.attributes.position.count;
+        stats.starBufferBytes += mesh.userData.stats.starBufferBytes;
+        stats.media++;
+      } else {
+        configureVolume(mesh, next[i]);
+      }
+      if (ownersChanged) group.add(mesh);
     }
     descriptors = next;
   };
-  group.userData.update = ({ centers, cameraPosition, camera: viewCamera, quality, brightness, home }) => {
+  group.userData.update = ({ centers, cameraPosition, camera: viewCamera, quality, brightness, home, viewportHeight = 1, pixelRatio = 1 }) => {
     if (disposed) return 0;
-    camera.fromArray(cameraPosition); let visible = 0;
+    camera.fromArray(cameraPosition); let visible = 0;stats.stars=0;
     const cullToView = structures && viewCamera?.isPerspectiveCamera === true;
     if (cullToView) {
       viewCamera.updateWorldMatrix(true, false);
@@ -906,7 +1015,8 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
       const distance = mesh.position.distanceTo(camera);
       mesh.visible = !home && (supportVisibility ? supportVisibility[i] > 0 : distance - descriptors[i].radius < (structures ? COSMIC_VIEW_FAR : 520000));
       if (mesh.visible && cullToView) {
-        // All proxy vertices lie in the unit sphere. Transform its support
+        // Legacy proxies use unit support; media own a finite physical hull.
+        // Transform that support
         // into the same world space as the planes, including parent scale,
         // rotation and shear, without allocating a per-frame bounding object.
         mesh.updateWorldMatrix(false, false);
@@ -915,7 +1025,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
         // Only the four viewport sides apply; true-space near/far planes do not.
         for (let side = 0; side < 4; side++) {
           const plane = viewFrustum.planes[side], n = plane.normal;
-          const supportRadius = Math.hypot(n.x * e[0] + n.y * e[1] + n.z * e[2],
+          const supportRadius = (mesh.userData.isGalacticMedium ? mesh.geometry.boundingSphere.radius : 1) * Math.hypot(n.x * e[0] + n.y * e[1] + n.z * e[2],
             n.x * e[4] + n.y * e[5] + n.z * e[6], n.x * e[8] + n.y * e[9] + n.z * e[10]);
           const centerDistance = n.x * e[12] + n.y * e[13] + n.z * e[14] + plane.constant;
           const tolerance = 64 * Number.EPSILON * (Math.abs(e[12]) + Math.abs(e[13])
@@ -932,11 +1042,16 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
         // A statistical stellar continuum is appropriate at exterior scales.
         // Resolve it into the unchanged 3D tracers on entry, retaining only
         // low-density nearby dust instead of a screen-filling luminous fog.
-        mesh.material.uniforms.continuumWeight.value = descriptors[i].kind==='nebula'?1:.004 + .996 * THREE.MathUtils.smoothstep(distance / descriptors[i].radius, .6, 1.8);
+        if(!mesh.userData.isGalacticMedium)mesh.material.uniforms.continuumWeight.value = descriptors[i].kind === 'nebula' ? 1 : .004 + .996 * THREE.MathUtils.smoothstep(distance / descriptors[i].radius, .6, 1.8);
       }
-      if (!mesh.visible) continue;
+      if (!mesh.visible) {if(mesh.userData.isGalacticMedium)stats.stars+=mesh.userData.stats.stars;continue;}
       inverse.copy(mesh.quaternion).invert();
       mesh.material.uniforms.localCamera.value.copy(camera).sub(mesh.position).applyQuaternion(inverse).divide(mesh.scale);
+      if(mesh.userData.isGalacticMedium){
+        mesh.userData.setQuality(quality,Math.max(1,viewportHeight*pixelRatio),pixelRatio);
+        stats.stars+=mesh.userData.stats.stars;
+        mesh.material.uniforms.brightness.value=brightness;visible+=2;continue;
+      }
       const steps = quality === 'low' ? 16 : quality === 'high' ? 48 : 32;
       mesh.material.uniforms.steps.value = steps;
       mesh.material.uniforms.quadrature.value = integrationRules[steps];
@@ -948,8 +1063,9 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
   };
   group.userData.dispose = () => {
     if (disposed) return; disposed = true;
-    for (const mesh of group.children) mesh.material.dispose();
+    for (const mesh of group.children) disposeVolume(mesh);
     geometry.dispose(); group.clear(); descriptors = []; supportVisibility = null;
+    stats.stars=stats.starCapacity=stats.starBufferBytes=stats.media=0;
   };
   return group;
 }

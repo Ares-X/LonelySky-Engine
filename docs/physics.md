@@ -77,7 +77,7 @@ an array of spheres. A sphere has:
 | `id`, `name` | Optional caller metadata, passed through in source/contact records |
 | `influence` | Optional positive gravity cutoff in world units |
 | `mu` | Optional positive gravitational parameter, in world units³/s² |
-| `orbit` | Optional elliptic two-body elements about the fixed `position` focus |
+| `orbit` | Elliptic elements with an optional moving focus described by `orbit.parentOrbit`; `position` is the fixed system anchor |
 | `collisionClearance` | Optional finite envelope radius that can widen the default clearance |
 
 The provider is a trusted simulation-data boundary: it must return valid,
@@ -250,6 +250,27 @@ in `[0, π)`. `boundsRadius` must enclose the actual geometry: for a compound us
 at least `max(hypot(part.outerRadius, max(abs(part.minY), abs(part.maxY))))` over
 all parts. It is a spatial-query/CCD bound, never the solid collision surface.
 
+An exterior slab may own a `surfaceLattice` built by
+`createRingSurfaceLattice(part, {pitch, rowPitch, depth, seed, tiered})`.
+The lattice describes raised annular plates, with optional smaller equipment
+plates on each foundation. The engine evaluates admitted cells into owned
+scratch storage. Cells crossing the original gap are omitted. Include the
+lattice's `outerRadius` in the compound bound. Structural beam profiles can
+supply three closed slab `sections` (two flanges and a narrower web). Solid
+distance, continuous sweeps and analytic render rays use the actual union of
+sections, so an open channel remains open wherever surrounding solids allow it.
+
+An inner-ring habitat uses closed triangle terrain. Legacy descriptors carry
+the finite `terrainGroups` directly. Regional descriptors use a shared
+[terrain registry](api.md#regional-ring-habitats) to prepare pages for rendering
+and collision. Each mesh owns a body-local center and conservative radius,
+center-relative vertices, outward faces, normals and a static BVH. Queries
+reuse owner scratch. Signed distance combines nearest triangles with half-open
+shared-edge parity. Continuous sphere sweeps use admitted triangle faces, edges
+and vertices. Smooth normals serve lighting and ecology. The contact normal
+comes from the physical feature. Foliage, river shading, clouds and material
+normals add appearance without creating collision geometry.
+
 `shipRadius` expands only these new solids. Legacy `safeRadius` and
 `collisionClearance` retain their historical meanings and receive no additional
 ship-radius margin. `collision.setShipRadius(radius)` changes the current solid
@@ -326,6 +347,19 @@ throws/reports `solid-recovery-scan-limit`. Recovery is a pose correction with
 zero flown distance; it is not collision-free travel through the correction
 path. It does not change world coordinates, seeds, or existing save contracts.
 
+Implicit plate sweeps clip the original segment to the raised shell (at most
+two radial intervals), enumerate conservative cell candidates and submit their
+finite features to the same exact-root solver. A consumer workspace admits 256
+plate candidates per sweep and 512 cells per nearest-lattice query. Exhaustion
+is explicit (`ring-surface-cell-budget` or `ring-surface-visitor-budget`), never
+a clear sweep; a standalone nearest query throws on work exhaustion. Generated
+ring fixtures exercise these limits, including high-speed complete crossings.
+The shader traverses angular/Y cells in increasing ray time, rejects the
+opposite radial half-plane, and marks an exhausted 80-cell traversal visibly
+invalid instead of presenting an incomplete smooth hull. Its float32 surface
+intersections retain the renderer's precision limits; this is not arbitrary
+precision physical geometry or a terrain landing system.
+
 ## Macro spheres and orbital phase rates
 
 `createCollisionWorld` also accepts `bodyProvider(index, bounds)`, defaulting to
@@ -373,9 +407,14 @@ The reference plane is right-handed XY with +Z normal, rotated by
 `Rz(ascendingNode) Rx(inclination) Rz(argumentOfPeriapsis)`. The result includes
 relative position, velocity, acceleration and the conservative periapsis
 acceleration maximum. This does not solve perturbations, precession or N-body
-interactions. `evaluateBodyState(body, timeSeconds)` adds the fixed focus in
-`body.position`; a missing/null orbit denotes a stationary body. Returned states
-are independent snapshots.
+interactions. `evaluateBodyState(body, timeSeconds)` translates by the fixed system
+anchor in `body.position`. A moon can additionally specify `body.orbit.parentOrbit`,
+the planet's own elements. Both ellipses are expressed in the same inertial axes
+and sampled at the same time. Their positions, velocities and accelerations add.
+The acceleration bound sums their periapsis bounds. Radius, anomalies and period
+refer to the orbit about the immediate parent. `orbitExtent(orbit)` bounds displacement
+from the system anchor by summing apoapsis distances. A missing/null orbit denotes
+a stationary body. Returned states are independent snapshots.
 
 For a repeated consumer, `createBodyStateSampler(body)` validates and snapshots
 the descriptor once and prepares its invariant orbital rates/orientation. Its

@@ -11,15 +11,22 @@ const arrays = cosmos => {
   const a = cosmos.children[0].geometry.attributes;
   return { position: a.position.array.slice(), color: a.color.array.slice(), pointRadius: a.pointRadius.array.slice() };
 };
+// Canonical V3 :cluster-1 is the generated open child. This oracle names the
+// published tier contract; it does not import the renderer's selection helper.
+const expectedCount=(descriptor,options,quality)=>options.structures&&quality==='high'&&descriptor.id.endsWith(':cluster-1')?16384:COSMOS_QUALITY_COUNTS[quality];
+const entryBytes=(descriptor,options,quality)=>expectedCount(descriptor,options,quality)*7*Float32Array.BYTES_PER_ELEMENT;
 function matchesSamples(cosmos, options, cell, quality) {
-  const count = COSMOS_QUALITY_COUNTS[quality], catalogue = loadedMacros(encodeCell(cell), options.seed, options);
-  const attributes = cosmos.children[0].geometry.attributes;
-  assert.equal(attributes.position.count, catalogue.length * count);
-  for (let j = 0; j < catalogue.length; j++) {
-    const d = catalogue[j], sample = sampleGalaxy(d, count), center = galaxyRelativeCenter(d, cell, options.gridCells);
-    assert.deepEqual(attributes.position.array.slice(j * count * 3, (j + 1) * count * 3), Float32Array.from(sample.positions, (n, i) => n + center[i % 3]));
-    assert.deepEqual(attributes.color.array.slice(j * count * 3, (j + 1) * count * 3), sample.colors);
-    assert.deepEqual(attributes.pointRadius.array.slice(j * count, (j + 1) * count), sample.sizes);
+  const baseCount=COSMOS_QUALITY_COUNTS[quality],catalogue=loadedMacros(encodeCell(cell),options.seed,options);
+  const attributes=cosmos.children[0].geometry.attributes;
+  assert.equal(attributes.position.count,catalogue.reduce((sum,d)=>sum+expectedCount(d,options,quality),0));
+  let offset=0;
+  for(const d of catalogue){
+    const count=expectedCount(d,options,quality),sample=sampleGalaxy(d,count),center=galaxyRelativeCenter(d,cell,options.gridCells);
+    assert.deepEqual(attributes.position.array.slice(offset*3,(offset+count)*3),Float32Array.from(sample.positions,(value,i)=>value+center[i%3]));
+    const represented=count===baseCount?sample.colors:Float32Array.from(sample.colors,value=>value*.25);
+    assert.deepEqual(attributes.color.array.slice(offset*3,(offset+count)*3),represented);
+    assert.deepEqual(attributes.pointRadius.array.slice(offset,offset+count),sample.sizes);
+    offset+=count;
   }
   return catalogue;
 }
@@ -117,15 +124,25 @@ test('custom and wrapped providers stay uncached when the same ID changes shape'
 });
 
 test('byte-budget eviction preserves every surviving hit needed later in the same batch', () => {
-  const a = { x: -16384, y: 0, z: 0 }, b = { x: -16384, y: -12288, z: -8192 }, cosmos = createCosmos(v3);
+  const a = { x: -16384, y: -16384, z: 0 }, b = { x: -16384, y: -12288, z: -8192 }, cosmos = createCosmos(v3);
   const A = loadedMacros(encodeCell(a), seed, v3), B = loadedMacros(encodeCell(b), seed, v3);
   const overlap = A.filter(d => B.some(other => other.id === d.id)).length;
   try {
+    const limit=cosmos.userData.stats.sampleCacheLimit;
+    const bytes=list=>list.reduce((sum,d)=>sum+entryBytes(d,v3,'high'),0);
+    assert.ok(bytes(A)<=limit&&bytes(B)<=limit,'each incoming heterogeneous batch must be admitted');
+    const union=[...new Map([...A,...B].map(d=>[d.id,d])).values()];
+    assert.ok(bytes(union)>limit,'their union must exercise real byte eviction');
     cosmos.userData.update(frame(a)); cosmos.userData.update(frame(b));
     const before = cosmos.userData.stats;
-    const bytesPerEntry = COSMOS_QUALITY_COUNTS.high * 7 * Float32Array.BYTES_PER_ELEMENT;
     assert.ok(before.sampleCacheEntries < new Set([...A, ...B].map(d => d.id)).size, 'fixture exceeds the cache budget');
-    assert.equal(before.sampleCacheBytes, before.sampleCacheEntries * bytesPerEntry);
+    // All B entries fit and are pinned; retained A-only entries form the suffix
+    // left by byte eviction. Unequal entry sizes must still add up exactly.
+    assert.ok(B.reduce((sum,d)=>sum+entryBytes(d,v3,'high'),0)<=before.sampleCacheLimit);
+    const aOnly=A.filter(d=>!B.some(other=>other.id===d.id)),extraCount=before.sampleCacheEntries-B.length;
+    assert.ok(extraCount>=0);
+    const retained=[...B,...(extraCount?aOnly.slice(-extraCount):[])];
+    assert.equal(before.sampleCacheBytes,retained.reduce((sum,d)=>sum+entryBytes(d,v3,'high'),0));
     assert.ok(before.sampleCacheBytes <= before.sampleCacheLimit);
     // All B keys are present; the other retained keys came only from A. Every
     // one of these available hits must survive the incoming batch's misses.
@@ -147,7 +164,8 @@ test('a catalogue batch larger than the byte budget renders uncached without par
   const count = loadedMacros(encodeCell(cell), options.seed, options).length;
   try {
     cosmos.userData.update(frame(cell, 'auto')); const before = cosmos.userData.stats, original = arrays(cosmos);
-    assert.ok(count * COSMOS_QUALITY_COUNTS.high * 7 * 4 > before.sampleCacheLimit);
+    const catalogue=loadedMacros(encodeCell(cell),options.seed,options);
+    assert.ok(catalogue.reduce((sum,d)=>sum+entryBytes(d,options,'high'),0)>before.sampleCacheLimit);
     cosmos.userData.update(frame(cell, 'high')); const after = cosmos.userData.stats;
     assert.equal(after.sampleGenerations - before.sampleGenerations, count);
     assert.equal(after.sampleCacheEntries, before.sampleCacheEntries);

@@ -34,10 +34,10 @@ test('reusing caller bounds across sectors preserves retained query results and 
   assert.equal(repeat.radius, body.radius);
 });
 
-test('query validation preserves sparse arrays, error order and invalid-address failures', () => {
+test('query validation rejects missing coordinates and preserves invalid-address failures', () => {
   const sparse = { min: [, 0, 0], max: [0, 0, 0] };
   for (const query of queries) {
-    assert.deepEqual(query({ sectorIndex: 0, bounds: sparse, seed }), []);
+    assert.throws(()=>query({sectorIndex:0,bounds:sparse,seed}),TypeError,'a missing bound is unknown space, not an empty safe query');
     assert.throws(() => query({ sectorIndex: -1, bounds: { min: [NaN, 0, 0], max: [0, 0, 0] } }), TypeError);
     assert.throws(() => query({ sectorIndex: 0, bounds: { min: [1, 0, 0], max: [0, 0, 0] } }), RangeError);
     assert.throws(() => query({ sectorIndex: 0, bounds: { min: [-1e308, 0, 0], max: [1e308, 0, 0] } }), /one world period/);

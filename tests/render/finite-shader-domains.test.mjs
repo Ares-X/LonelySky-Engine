@@ -50,7 +50,7 @@ test('stellar spiral emission stays finite at float cosine extrema', () => {
 test('stellar Gaussian profiles stay finite on both sides of their signed centres', () => {
   const squareBody=DEEP_SKY_GLSL.match(/float seaSquare\(float value\)\s*\{([^}]+)\}/)?.[1];
   const seaSquare=squareBody?Function('value',squareBody):undefined;
-  const sources=['dustLane','bulge','braid'].map(name=>expression(DEEP_SKY_GLSL,name));
+  const sources=['dustLane','bulge','fingerA','fingerB','tips','coreTail'].map(name=>expression(DEEP_SKY_GLSL,name));
   sources.push(...[...DEEP_SKY_GLSL.matchAll(/float (?:rim|bridge)=([^;]+);/g)].map(match=>match[1]));
   const lens=DEEP_SKY_GLSL.match(/mass\+=uSeaMorphD\.y\*([^;]+);/)?.[1];
   assert.ok(lens);sources.push(lens);
@@ -58,7 +58,9 @@ test('stellar Gaussian profiles stay finite on both sides of their signed centre
   for(const value of [-2,-.9,-.3,0,.3,.9,2]) for(const source of sources) {
     const amount=evaluate(source,{seaSquare,smoothstep,max:Math.max,cos:Math.cos,
       warped:value,uSeaDust:{y:.04,x:1},d:{z:value},asymmetry:.2,core:.4,
-      latitude:value,sideFront:1,p:{x:.1,y:value},wave:.3,side:{x:value,y:value},
+      latitude:value,sideFront:1,p:{x:.1,y:value},side:{x:value,y:value},
+      xA:value,xB:-value,wA:.026,wB:.021,hA:value,hB:-value,across:value,width:.05,
+      facingLight:.8,porosity:.6,
       shell:value,stretch:1,middle:.5,eye:Math.abs(value),lens:Math.abs(value),front:1,cloud:.4});
     assert.ok(Number.isFinite(amount)&&amount>=0,`${source} at ${value}`);
   }

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createSolidWorkspace,solidDistance,sweepSolid} from '../src/solid-geometry.js';
+import {cosmicRingParts} from '../src/cosmic-bodies.js';
 import {buildTerrainMesh} from '../src/mesh-terrain.js';
+import {createRingHabitat} from '../src/ring-habitat.js';
 
 const near=(a,b,e=1e-7)=>assert.ok(Math.abs(a-b)<=e,`${a} != ${b}`);
 function box(center,half){
@@ -36,3 +38,17 @@ test('terrain normals share the compound frame and distant culling preserves par
   const hit=sweep(s,world([0,0,0]),world([150,0,0]));assert.equal(hit.status,'hit',hit.reason);assert.equal(hit.part,2);near(hit.fraction,86/150,1e-8);near(hit.normal[2],-1);
 });
 
+test('generated mountain summit is collidable before the unraised habitat floor',()=>{
+  const options={radius:900000,halfWidth:.022,thickness:.0005,phase:1.3,broken:false,theme:'silver-dust',seed:'habitat-fixture'};
+  const parts=cosmicRingParts(options),habitat=createRingHabitat({...options,parts});
+  assert.ok(habitat.terrainGroups.length>0);
+  const s={position:[0,0,0],boundsRadius:1000000,shape:{type:'compound',parts,terrainGroups:habitat.terrainGroups}};
+  let tested=0;
+  outer:for(const hull of s.shape.terrainGroups){
+    const peak=hull.vertices.reduce((a,b)=>Math.hypot(hull.center[0]+a[0],hull.center[2]+a[2])<Math.hypot(hull.center[0]+b[0],hull.center[2]+b[2])?a:b);
+    const p=peak.map((n,i)=>n+hull.center[i]),r=Math.hypot(p[0],p[2]),up=[-p[0]/r,0,-p[2]/r],start=p.map((n,i)=>n+up[i]*200),end=p.map((n,i)=>n-up[i]*200);
+    if(solidDistance(s,start).distance<8)continue;
+    const hit=sweep(s,start,end,7);assert.equal(hit.status,'hit',hit.reason);assert.ok(hit.part>=s.shape.parts.length);tested++;if(tested===4)break outer;
+  }
+  assert.ok(tested>=4);
+});
