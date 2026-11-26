@@ -1,8 +1,9 @@
 # Generation and rendering API
 
-Version 0.14.0 adds opt-in galactic media and regional ring terrain, and
-updates the procedural nebula, gas-giant and stellar renderers. Hosts choose
-which of the catalogue and material APIs to use.
+Version 0.14.1 updates how structured immutable catalogues release volume
+materials when a host moves between distant regions. Version 0.14.0 introduced
+opt-in galactic media and regional ring terrain, and updated the procedural
+nebula, gas-giant and stellar renderers.
 
 ## Local nebula appearance
 
@@ -324,6 +325,13 @@ before drawing. Shrinking immediately disposes removed materials; no spare pool
 is retained. Final `dispose()` releases the remaining materials and shared
 geometry once. This avoids needless program retirement for retained
 slots; it does not precompile new materials or guarantee a frame-time budget.
+
+When `createCosmos({structures: true})` publishes an immutable catalogue more
+than one macro cell away on any axis, it releases the previous catalogue's
+volume materials and creates the destination volumes. Distance wraps at the
+world boundary. Adjacent regions keep their slots, including diagonal and seam
+crossings. Preparing or cancelling a destination leaves active materials in use
+until a new catalogue is published.
 
 `createCosmos({stellarPopulation})` accepts a creation-time provider for legacy
 elliptical tracers. Return `null` or an immutable population with 4096 finite, nonnegative

@@ -32,7 +32,8 @@ import map. There is no AI service, account requirement, or runtime backend.
 Version 0.14.0 adds optional spatial galactic media and paged ring-habitat
 terrain. It updates procedural nebulae, gas-giant weather and stellar surfaces.
 Regional catalogues and image maps are supplied through the host integration
-APIs. The minimal example uses the built-in generator.
+APIs. Version 0.14.1 retires volume materials after distant jumps through
+an immutable structure catalogue. The minimal example uses the built-in generator.
 
 ## Live showcase
 

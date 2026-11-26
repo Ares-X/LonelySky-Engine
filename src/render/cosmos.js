@@ -333,15 +333,16 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
   // Only these producers guarantee that an ID has the same sampling inputs
   // for this instance's fixed seed. Custom providers may change a shape at
   // the same ID; they retain the uncached path and public snapshot contract.
-  const cacheSamples = catalogue?.immutable ?? (descriptorProvider === describeMacro || descriptorProvider === describeCosmicStructures);
+  const immutableCatalogue = catalogue?.immutable ?? (descriptorProvider === describeMacro || descriptorProvider === describeCosmicStructures);
   const sampleCache = new Map();
+  let publishedHazeCell = null;
   let sampleGeneration = 0;
   let lastCell = '', lastMacro = '', lastCount = 0, lastQuality = 'auto', descriptors = [], samples = [], centers = [], disposed = false;
   let pending = null, failure = null;
   let currentIndex = -1, currentCell, key = '', macroKey = '';
   const hazeFrame = { centers: null, cameraPosition: null, camera: null, quality: 'auto', brightness: 1, home: false, viewportHeight: 1, pixelRatio: 1 };
   const stats = { revision: structures ? 3 : COSMOS_VERSION, galaxies: 0, clusters: 0, nebulae: 0, structures: 0, particles: 0, maxParticles: commonPointCapacity, batches: 0, visible: true, rebuilds: 0,
-    sampleCacheLimit: cacheSamples ? SAMPLE_CACHE_BYTE_LIMIT : 0, sampleCacheBytes: 0, sampleCacheHits: 0, sampleGenerations: 0 };
+    sampleCacheLimit: immutableCatalogue ? SAMPLE_CACHE_BYTE_LIMIT : 0, sampleCacheBytes: 0, sampleCacheHits: 0, sampleGenerations: 0 };
   Object.defineProperty(group.userData, 'stats', { get: () => ({ ...stats, sampleCacheEntries: sampleCache.size }) });
   const abortError = message => new DOMException(message, 'AbortError');
   const countFor = quality => COSMOS_QUALITY_COUNTS[quality] ?? COSMOS_QUALITY_COUNTS.auto;
@@ -392,7 +393,7 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     if ((supportFade || catalogue?.capacity !== undefined) && next.length > capacity) throw new RangeError('Cosmos catalogue exceeds its declared structure capacity');
     let commonPointCount = 0;
     for (const descriptor of next) if (!descriptor.medium) commonPointCount+=sampleCountFor(descriptor,count,structures);
-    const cacheBatch = cacheSamples && commonPointCount * 7 * Float32Array.BYTES_PER_ELEMENT <= SAMPLE_CACHE_BYTE_LIMIT;
+    const cacheBatch = immutableCatalogue && commonPointCount * 7 * Float32Array.BYTES_PER_ELEMENT <= SAMPLE_CACHE_BYTE_LIMIT;
     let selectedIndex=-1,selectedConfig=null;
     if(coreRadiometry) for(let i=0;i<next.length;i++){
       const config=coreRadiometry(next[i]);if(config===null)continue;
@@ -530,7 +531,14 @@ export function createCosmos({ seed = 'lonelysky', descriptorProvider = describe
     // Haze creation is deliberately still measured at its existing owner. It
     // is not included in the sliced legacy sampler/assembly budget.
     if (job.macro !== lastMacro) {
-      haze.userData.setDescriptors(job.descriptors);
+      // Retire the previous volume catalogue's compiled materials on a distant jump.
+      // A neighbouring streamed macro, including the world seam, keeps its slots.
+      const distant = structures && immutableCatalogue && publishedHazeCell !== null && AXES.some(axis => {
+        const delta = Math.floor(job.cell[axis] / gridCells) - Math.floor(publishedHazeCell[axis] / gridCells);
+        return Math.abs(wrap(delta, 32768 / gridCells)) > 1;
+      });
+      haze.userData.setDescriptors(job.descriptors, distant);
+      publishedHazeCell = job.cell;
       if(supportFade) for(let i=0;i<job.descriptors.length;i++) material.uniforms.portraitHosts.value[i]=job.descriptors[i].portrait?1:0;
     }
     stats.hazePublishMs = performance.now() - hazeStart;
