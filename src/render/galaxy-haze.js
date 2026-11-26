@@ -950,7 +950,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
     if (mesh.userData.isGalacticMedium) mesh.userData.dispose();
     else mesh.material.dispose();
   }
-  group.userData.setDescriptors = (next) => {
+  group.userData.setDescriptors = (next, retirePrevious = false) => {
     if (disposed) return;
     if (!supportVisibility && next.some(descriptor => descriptor.medium)) throw new TypeError('Galactic media require shared support visibility');
 
@@ -964,7 +964,7 @@ export function createGalaxyHaze({ seed = 'lonelysky', structures = false, suppo
         if (descriptor.medium) {
           volumes[i] = createGalacticMediumVolume(descriptor, galacticMediumOptions?.(descriptor));
           created.push(volumes[i]);
-        } else if (current && !current.userData.isGalacticMedium) {
+        } else if (!retirePrevious && current && !current.userData.isGalacticMedium) {
           volumes[i] = current;
         } else {
           volumes[i] = createVolume();
