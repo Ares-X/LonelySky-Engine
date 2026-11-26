@@ -4,6 +4,7 @@
  * landscapes. Rendering and CCD consume the same local vertices/planes.
  */
 import {createMeshTerrainWorkspace,meshTerrainDistance,visitMeshTerrainSweepRoots} from './mesh-terrain.js';
+import {createRingSurfaceWorkspace,ringSurfaceDistance,visitRingSurfaceSweep} from './ring-surface-lattice.js';
 export class SolidQueryFailure extends RangeError {
   constructor(code,message){super(message);this.name='SolidQueryFailure';this.code=code;}
 }
@@ -11,6 +12,7 @@ const capFeatures = {
   inner: ['inner-bottom', 'inner-top'], outer: ['outer-bottom', 'outer-top'],
   'gap-minus': ['gap-minus-bottom', 'gap-minus-top'], 'gap-plus': ['gap-plus-bottom', 'gap-plus-top'],
 };
+const MAX_LATTICE_SWEEP_CELLS=256,MAX_LATTICE_DISTANCE_CELLS=512;
 const angleDelta = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const makeDistance = () => ({ distance: 0, normal: [0, 0, 0], feature: '', part: -1 });
 function localPoint(solid, point, out) {
@@ -108,10 +110,11 @@ function slabDistance(part, x, y, z, out, scratch) {
 }
 export function createSolidWorkspace() {
   return { point: [0, 0, 0], start: [0, 0, 0], end: [0, 0, 0], probe: [0, 0, 0], scratch: [0, 0],
+    lattice: createRingSurfaceWorkspace({maxCells:MAX_LATTICE_DISTANCE_CELLS}), latticeCells:0,
     terrain:createMeshTerrainWorkspace(),
     // A contact proof runs while the root traversal stack is live. Its distance
     // traversal therefore owns separate scratch, rather than corrupting that stack.
-    contactWorkspace:{point:[0,0,0],scratch:[0,0],partDistance:makeDistance(),terrain:createMeshTerrainWorkspace()},contactDistance:makeDistance(),contactPoint:[0,0,0],sweepStart:[0,0,0],sweepDelta:[0,0,0],sweepSolid:null,sweepRadius:0,sweepLower:0,sweepSpan:1,pruneTerrain:false,contactProofs:0,meshSweepNodes:0,meshSweepTests:0,meshSweepRoots:0,
+    contactWorkspace:{point:[0,0,0],scratch:[0,0],partDistance:makeDistance(),terrain:createMeshTerrainWorkspace(),lattice:createRingSurfaceWorkspace({maxCells:MAX_LATTICE_DISTANCE_CELLS})},contactDistance:makeDistance(),contactPoint:[0,0,0],sweepStart:[0,0,0],sweepDelta:[0,0,0],sweepSolid:null,sweepRadius:0,sweepLower:0,sweepSpan:1,pruneTerrain:false,contactProofs:0,meshSweepNodes:0,meshSweepTests:0,meshSweepRoots:0,
     distance: makeDistance(), partDistance: makeDistance(), roots: Array.from({ length: 5 }, () => new Float64Array(16)), rootCounts: new Uint8Array(5),
     coefficients: Array.from({ length: 5 }, () => new Float64Array(5)), candidates: new Float64Array(1024), candidateCount: 0, evaluations: 0, maxIterations: 32768,
     pointMode: false, pointMeshes: null, pointFaces: null, terrainGroupIndex: -1, pointNormal: makeDistance(),
@@ -140,6 +143,13 @@ export function solidDistance(solid, point, out = makeDistance(), workspace = cr
           out.distance = d.distance; out.normal[0] = d.normal[0]; out.normal[1] = d.normal[1]; out.normal[2] = d.normal[2]; out.feature = d.feature; out.part = i;
         }
       }
+    }
+    for (let i = 0; i < shape.parts.length; i++) {
+      const lattice=shape.parts[i].surfaceLattice;
+      if(!lattice)continue;
+      const previous=out.distance;
+      if(!ringSurfaceDistance(lattice,p[0],p[1],p[2],out,workspace.lattice,slabDistance))throw new RangeError(workspace.lattice.reason);
+      if(out.distance<previous)out.part=i;
     }
     if(shape.terrainGroups)for(let i=0;i<shape.terrainGroups.length;i++){
       const mesh=shape.terrainGroups[i],c=mesh.center;
@@ -297,6 +307,11 @@ function slabRoots(w, part, p, d, radius) {
     }
   }
 }
+function latticeRoots(part,p,d,radius,w){
+  if(++w.latticeCells>MAX_LATTICE_SWEEP_CELLS)return false;
+  slabRoots(w,part,p,d,radius);
+  return true;
+}
 function terrainRoot(t,w,faceIndex=-1){
   if(++w.evaluations>w.maxIterations)throw ROOT_LIMIT;
   const at=w.candidateCount++;w.candidates[at]=t;
@@ -336,13 +351,15 @@ export function sweepSolid(solid, start, end, radius = 8, { maxIterations = 3276
   const w = workspace ?? createSolidWorkspace(), result = out ?? w.result;
   result.status = 'clear'; result.fraction = 1; result.safeFraction = 1; result.feature = ''; result.part = -1; result.reason = undefined;
   w.contactProofs=0;w.meshSweepNodes=0;w.meshSweepTests=0;w.meshSweepRoots=0;w.terrain.maxFraction=1;w.pruneTerrain=false;w.evaluations = 0; w.maxIterations = maxIterations; w.candidateCount = 1; w.candidates[0] = 0;
+  let hasLattice=false;
+  if(solid.shape.type==='compound')for(const part of solid.shape.parts)if(part.surfaceLattice){hasLattice=true;break;}
   // Every emitted terrain candidate consumes the global evaluation budget.
   // Its bound avoids rescanning all mesh faces or reserving an entire world's
-  // roots in the hot path. Slab linear roots retain their own bound.
+  // roots in the hot path. Slab/lattice linear roots retain their own bound.
   const hasTerrain=solid.shape.type==='compound'&&solid.shape.terrainGroups?.length>0;
   let sectionCount=1;
   if(solid.shape.type!=='sphere'){sectionCount=0;for(const part of solid.shape.parts)sectionCount+=part.sections?part.sections.length:1;}
-  const capacity=sectionCount*128+(hasTerrain?maxIterations:0)+1;
+  const capacity=(sectionCount+(hasLattice?MAX_LATTICE_SWEEP_CELLS:0))*128+(hasTerrain?maxIterations:0)+1;
   if (capacity > w.candidates.length) w.candidates = new Float64Array(capacity);
   w.pointMode = radius === 0 && hasTerrain;
   if (w.pointMode) {
@@ -380,6 +397,10 @@ export function sweepSolid(solid, start, end, radius = 8, { maxIterations = 3276
       for (const part of solid.shape.parts) {
         if(part.sections){for(const section of part.sections)slabRoots(w,section,p,d,radius);}
         else slabRoots(w,part,p,d,radius);
+      }
+      w.latticeCells=0;
+      for(const part of solid.shape.parts)if(part.surfaceLattice&&!visitRingSurfaceSweep(part.surfaceLattice,p,d,radius,w.lattice,latticeRoots,w)){
+        result.status='failed';result.reason=w.lattice.reason;result.fraction=0;result.safeFraction=0;return result;
       }
       if(solid.shape.terrainGroups)for(let groupIndex=0;groupIndex<solid.shape.terrainGroups.length;groupIndex++){
         const mesh=solid.shape.terrainGroups[groupIndex];w.terrainGroupIndex=groupIndex;

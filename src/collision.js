@@ -27,6 +27,8 @@ function writeMoveResult(out, position, velocity, contact, distance, corrected, 
   else if ('failure' in out) delete out.failure;
   return out;
 }
+// Detached element trees for provider caches and public contact snapshots.
+const copyOrbit = orbit => orbit.parentOrbit ? {...orbit, parentOrbit:{...orbit.parentOrbit}} : {...orbit};
 const distanceTo = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 const vector = v => Array.isArray(v) && v.length === 3
   && Number.isFinite(v[0]) && Number.isFinite(v[1]) && Number.isFinite(v[2]);
@@ -37,6 +39,7 @@ class RecoveryFailure extends RangeError {
 
 /** Default exclusion envelope around a sphere, in caller-defined world units. */
 export function safeRadius(type, radius) {
+  if (type === 'asteroid') return radius;
   if (type === 'black-hole') return radius * 3 + 100;
   if (type === 'star') return radius * 1.6 + 80;
   return radius + Math.max(40, radius * .025);
@@ -119,7 +122,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
     if (!Number.isFinite(radius) || radius < 0) throw new RangeError('shipRadius must be finite and nonnegative');
     if (Object.is(radius, shipRadius)) return;
     shipRadius = radius;
-    // Macro sphere clearances and candidate bounds both depend on this radius.
+    // Asteroid and macro sphere clearances both depend on the hull.
     macroCache.clear(); neighborhoodIndex = null; sources = [];
   }
   if (!Number.isInteger(solidSweepBudget) || solidSweepBudget < 1) throw new RangeError('solidSweepBudget must be a positive integer');
@@ -195,7 +198,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       const descriptor = { id: body.id, name: body.name,
         type: body.type ?? 'planet', sectorIndex: index, radius: body.radius,
         clearance: bodyCollisionRadius(body, body.type), position: [...body.position],
-        ...(body.orbit == null ? {} : { orbit: { ...body.orbit } }) };
+        ...(body.orbit == null ? {} : { orbit: copyOrbit(body.orbit) }) };
       return { body: descriptor, sample: createBodyStateSampler(descriptor) };
     });
     cache.set(index, bodies);
@@ -219,7 +222,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       ids.add(body.id);
       const descriptor = { id: body.id, name: body.name, type: body.type ?? 'planet', sectorIndex: index,
         radius: body.radius, clearance: body.radius + shipRadius, position: [...body.position],
-        ...(body.orbit == null ? {} : { orbit: { ...body.orbit } }) };
+        ...(body.orbit == null ? {} : { orbit: copyOrbit(body.orbit) }) };
       bodies.push({ body: descriptor, sample: createBodyStateSampler(descriptor) });
     }
     macroCache.set(index, bodies);
@@ -243,7 +246,10 @@ export function createCollisionWorld({ world, sector = world && (index => world.
         const cellIndex = encodeCell({ x: wrap(origin.x + x), y: wrap(origin.y + y), z: wrap(origin.z + z) });
         for (const entry of descriptors(cellIndex)) {
           if (macroIds?.has(entry.body.id)) continue;
-          sources.push({ ...entry, offset: [x * CELL_SIZE, y * CELL_SIZE, z * CELL_SIZE],
+          const body = entry.body.type === 'asteroid'
+            ? { ...entry.body, clearance: entry.body.clearance + shipRadius }
+            : entry.body;
+          sources.push({ body, sample: entry.sample, offset: [x * CELL_SIZE, y * CELL_SIZE, z * CELL_SIZE],
             begin: newState(), finish: newState(), actual: newState(), chordVelocity: [0, 0, 0],
             chordTime: undefined, chordDuration: undefined, chordTimeScale: undefined });
           if (entry.body.orbit) neighborhoodMoving = true;
@@ -337,7 +343,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
   }
   const contactFor = (body, normal, offset) => ({ ...body,
     normal: [...normal], velocity: [...body.velocity],
-    ...(body.orbit ? { orbit: { ...body.orbit } } : {}),
+    ...(body.orbit ? { orbit: copyOrbit(body.orbit) } : {}),
     position: body.position.map((n, i) => n + offset[i]) });
 
   function recoverSpheres(sectorIndex, initialPosition, initialVelocity, timeSeconds = 0, marginSpan = 0, timeScale = 1, out = createMoveResult()) {
@@ -769,7 +775,7 @@ export function createCollisionWorld({ world, sector = world && (index => world.
       if (!Number.isFinite(timeSeconds)) throw new TypeError('timeSeconds must be finite');
       return sampled(index, timeSeconds, 0, timeScale).map(body => ({ ...body,
         position: [...body.position], velocity: [...body.velocity],
-        ...(body.orbit ? { orbit: { ...body.orbit } } : {}) }));
+        ...(body.orbit ? { orbit: copyOrbit(body.orbit) } : {}) }));
     },
     get cacheSize() { return cache.size; } };
 }

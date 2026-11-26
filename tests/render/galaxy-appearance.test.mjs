@@ -74,6 +74,8 @@ test('profiles share bounded volumes, shader and quadrature without extra draw c
   }
   haze.userData.setDescriptors(descriptors);
   assert.equal(materialReleases,0);assert.equal(geometryReleases,0);
+  haze.userData.setDescriptors(descriptors.slice(0,3));
+  assert.equal(materialReleases,3);assert.equal(geometryReleases,0);
   haze.userData.dispose();haze.userData.dispose();
   assert.equal(materialReleases,6);assert.equal(geometryReleases,1);
 });
@@ -139,7 +141,7 @@ test('spiral stellar envelope remains connected, tapered and finite through dust
       if(r===1)assert.equal(amount,0,'existing support edge still ends all added emission');
     }
   }
-  assert.ok(maxArm/minArm<5,'multiscale field changes detail without high-contrast coarse gates');
+  assert.ok(maxArm/minArm<5,'multiscale texture changes detail without high-contrast coarse gates');
   const center=scalar('taper',{r:0,height:0}),outer=scalar('taper',{r:.9,height:0});
   assert.ok(outer<center*.4,'edge-on stellar disk narrows and fades toward its ends');
   assert.ok(scalar('interarm',{coarse:0})>0,'a continuous faint population joins otherwise separated arms');

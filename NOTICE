@@ -5,3 +5,9 @@ Licensed under the Apache License, Version 2.0.
 
 Documentation screenshots show the separate LonelySky game.
 See docs/showcase-credits.md for depicted artwork and third-party credits.
+
+The signed simplex noise in src/render/continuous-noise.js, also used by
+src/render/gas-simplex-noise.js, derives from webgl-noise by Ian McEwan /
+Ashima Arts, maintained by Stefan Gustavson.
+Copyright (C) 2011 Ashima Arts; distributed under the MIT license in
+licenses/webgl-noise.MIT.txt. Other engine code retains its Apache-2.0 license.

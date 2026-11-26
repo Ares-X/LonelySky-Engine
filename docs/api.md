@@ -1,21 +1,17 @@
 # Generation and rendering API
 
-0.12.0 supports a caller-owned RGBA port image on ring habitats.
+Version 0.14.0 adds opt-in galactic media and regional ring terrain, and
+updates the procedural nebula, gas-giant and stellar renderers. Hosts choose
+which of the catalogue and material APIs to use.
 
-0.11.0 adds optional galaxy portraits and child nebula appearance, closed triangle
-solid queries, query workspace disposal and an opt-in normalized bloom helper.
-Generation addresses and default providers retain their published contracts.
-
-## Filtered scenery appearance (0.7.1)
+## Local nebula appearance
 
 Nebula appearance descriptors may supply `rimColor` independently of `colorA`
 and `colorB`. Invalid colors fall back to their profile; a dark-cloud profile
-still cannot gain emission. Directional ray and pixel footprints filter the
-shader’s three procedural bands. Paired quadrature uses 16/32/48 view samples. Density
-and lighting are an appearance revision, while generated body addresses,
-volume bounds and per-seed offsets stay unchanged. The depth-composition API
-below remains supported. More detail does add GPU work; the sample budget is
-not a promise of unchanged render time.
+still cannot gain emission. The procedural field filters three seeded octaves
+against the ray and pixel footprint. Low, auto and high use 32, 64 and 96
+integration cells, respectively. The depth-composition API below supplies the
+opaque-depth snapshot sampled by the volume.
 
 ## Nebula depth composition (0.7)
 
@@ -164,6 +160,17 @@ levels retain 16/32/48 density integration samples.
   from the renderer entry point. The bounded time preserves wind phase and
   frame-scale motion across long-running saves. Hold the previous value to freeze
   the atmosphere.
+- `describePlanetAppearance` selects one of the ten seeded families exposed
+  by `PLANET_APPEARANCE_FAMILIES`. `describeNebulaAppearance` supplies an
+  emission, reflection, dark-dust, planetary-shell or supernova-remnant profile
+  for `createNebula({appearance})`.
+- `createStellarRemnant(body)` renders a `stellarFamily` of `brown-dwarf`,
+  `white-dwarf`, `neutron-star`, `pulsar` or `red-giant`. Provide a positive
+  `radius` and optional `seed`, `color`, `phase`, `spinTilt` and `magneticTilt`.
+  Place the group in the scene and call
+  `userData.update(celestialTime, camera, visibility, quality, reducedMotion)`.
+  The layer's coronae and beams are optical. Call `userData.dispose()`
+  when removing the group.
 - `createNebula(options)` and `createBlackHole(options)` return groups exposing
   `userData.update(camera, seconds, {quality})` and `userData.dispose()`.
   Nebula update also accepts visibility; black holes expose `setVisibility`
@@ -185,6 +192,33 @@ levels retain 16/32/48 density integration samples.
   Both groups expose idempotent `userData.dispose()`. With no supplied maps,
   both backgrounds evaluate the same procedural sky, including the classic
   region’s bulge and broken dust lanes in its local Galactic frame.
+- The optional trusted `skyContinuum` descriptor selects procedural directional
+  continuum in place of `bandStrength`. Supply `strength` in [0, 1], a
+  column-major world-to-region rotation `frame`, the observer's region-local
+  `origin` in parent radii, a noise `offset`, linear RGB `tint`, and
+  `shape` as [form, thickness, asymmetry, variation]. Integer forms 0–5
+  select a spiral ridge, barred spiral, split dust ridge, stellar halo, tidal
+  stream, or nursery rim. Thickness is positive, asymmetry and variation range
+  from 0 to 1. For a spiral disk, the optional pair `arms` gives the arm
+  count and inverse pitch in the logarithmic phase law. These align the
+  young stellar light and dust with the host’s arms at the observer.
+  Strength zero disables the contribution and the legacy band.
+  Omit the descriptor to use the legacy band. The renderer only copies data.
+- An optional trusted `distantSkyField` supplies the diffuse directional
+  population outside resolved hosts. Share it with
+  `directionalStars.userData.setDistantSkyField(field)`. The descriptor has
+  `blend` in [0, 1], a four-component `plane` with a world-space unit normal
+  and positive angular width, an orthogonal world-space unit direction with
+  island weighting in `facing`, and `style` containing strength, warm-tint
+  mix, phase in radians, and warp amount. Strength, tint mix and island
+  weighting range from 0 to 1. Both consumers copy values into existing uniforms.
+  Omit the field or give it zero `blend` to disable it.
+  Its optional `medium` uses the `starSea` shape and supplies procedural
+  directional detail to the sky and lens when `starSea` is absent. Reflection
+  curtains use asymmetric folds, absorbing columns and cavity walls attenuate
+  the unresolved light behind them, and tidal arcs, bridges and tails concentrate
+  the existing distant star glints. The medium uses procedural grain and shares
+  the existing sky rendering pass.
 - The environment may include a trusted `starSea` descriptor: `weights` is six
   finite nonnegative blend weights (all zero disables the layer), `frame` is a
   nine-number column-major rotation matrix mapping sky directions to the sea's
@@ -246,10 +280,10 @@ The canonical V3 renderer, selected by
 gridCells: COSMIC_GRID_CELLS, seed})` with the raw built-in provider, fades each
 whole structure by the distance to its spherical support:
 `max(0, distance(camera, center) - radius)`. It remains fully visible through
-80 million units and fades to zero at 100 million. The parent and each child use
+125 million units and fades to zero at 150 million. The parent and each child use
 their own support; the same weight drives tracer points and emission. This is
 not a per-point or per-ray-sample distance cutoff: with the maximum 42-million
-radius, far-side light can extend to 184 million units. The fixed 5³ streaming
+radius, far-side light can extend to 234 million units. The fixed 5³ streaming
 neighborhood, seeds, physical coordinates and opaque occlusion are unchanged.
 
 This path adds one float descriptor index (4 bytes per point, in both its CPU
@@ -269,13 +303,17 @@ per-sample fading. `descriptor.portrait` opts into resolved associations sharing
 local centers, axes and widths with their analytic haze emission; it does not
 change the source catalogue's physical coordinates or collision state.
 
-Structural nebula descriptors may provide `childAppearance` for seeded branch,
-dust, ion and lighting controls, while `stellarTint` scales their tracer colors.
-The visual cloud integral uses 64 two-node cells. The shader generates
-periodic lattice corners directly from the world seed and derives the density
-gradient in each local domain. The opaque depth snapshot clips the volume
-at foreground surfaces. Slot uniforms and materials retain their storage
-across kind changes.
+
+Structural nebula children accept `childAppearance` for seeded branches, dust,
+ionization and lighting, and `stellarTint` for tracer color. Their cloud shader
+integrates extinction and emission over a finite ray interval clipped by opaque
+scene depth.
+
+Attach `describeGalaxyAppearance(descriptor).portrait` to a descriptor copy
+to opt into a resolved stellar association. Its anchor and cells use the
+parent galaxy's local XYZ axes and radius units. Particle positions and haze
+share the cells' centers, major axes and widths. The association redistributes
+part of the existing point budget and contributes diffuse emission.
 
 `createGalaxyHaze().userData.setDescriptors(next)` retains the currently needed
 mesh, material and uniform slots instead of destroying all shader owners at
@@ -286,6 +324,34 @@ before drawing. Shrinking immediately disposes removed materials; no spare pool
 is retained. Final `dispose()` releases the remaining materials and shared
 geometry once. This avoids needless program retirement for retained
 slots; it does not precompile new materials or guarantee a frame-time budget.
+
+`createCosmos({stellarPopulation})` accepts a creation-time provider for legacy
+elliptical tracers. Return `null` or an immutable population with 4096 finite, nonnegative
+linear RGB triplets in a `Float32Array` named `colors`, a `coreRadius` in
+(0, .95) and a `cumulativeExponent` in (0, 3). Each quality level uses a prefix
+of the supplied colors.
+The host owns calibration and attribution.
+
+`createCosmos({coreRadiometry})` accepts a provider when descriptor support
+indices are enabled. Return `null` or `{coreRadius, axes, maximumExtraGain}`.
+The core radius is in (0, 1) relative to the descriptor radius, and the three
+positive axes set its ellipsoidal metric. The bounded artistic gain fades in
+between four and one core radii, for one active descriptor per batch.
+
+`createCosmos({incremental: true, preparationBudgetMs: 2})` enables cooperative
+particle preparation. `await userData.prepare(frame, {signal})` before
+revealing a cold scene. The method drives the matching `update` until
+publication and rejects on cancellation or supersession. To prepare one target
+ahead while retaining the active batch, use `requestPopulation({sectorIndex,
+quality})`. After applying the matching frame, `isReady({sectorIndex, quality})`
+reports publication. `cancelPreparation()` preserves the active batch.
+The budget covers particle sampling and buffer assembly. Default updates are
+synchronous.
+
+For V3 haze, pass the active Three.js `PerspectiveCamera` in
+`userData.update(frame)` to cull volume hulls outside the four viewport sides.
+The stretched hull includes the current world transform. Physical near and far
+planes are excluded because radial depth compression preserves directions.
 
 Galaxy emission uses 16/32/48 bounded disk samples for low/auto/high quality.
 The smooth core is integrated separately with samples concentrated around the
@@ -300,7 +366,12 @@ physically consistent galaxy-to-planet simulation.
 
 ### Ring habitat terrain
 
-A ring with a fixed surface site can specify `habitatPort.terrainReferenceRadius` in world units. This anchors the procedural terrain phase at the site's longitude if a caller changes the ring radius. Its default is the current body radius. Terrain sampling uses physical lengths and the projected surface footprint, so smaller bands of detail resolve as the camera approaches.
+On a flat annular deck, `habitatPort.terrainReferenceRadius` anchors the
+procedural coastline at the site's longitude when the ring radius changes.
+It defaults to the current ring radius in world units. Regional habitats
+use the heights of their solid terrain mesh to place land and water.
+Both representations support a physical-scale port image and an optional
+`surfaceTexture` for land detail.
 
 ### Optional ring surface image
 
@@ -316,6 +387,20 @@ transition. Sampling uses explicit derivatives and mip filtering, with a small
 outer feather. The image owns its baked surface lighting. No extra geometry,
 collision shapes, traffic, clocks or population state are created. The caller
 owns loading, asset errors and texture disposal.
+
+
+## Optional normalized bloom
+
+`createBloomPass({strength = .35, radius = .65, threshold = 1})` returns a
+Three.js `UnrealBloomPass` for a composer to size. It normalizes the finite
+blur kernels and neutral composite gain. For a constant neutral HDR field above
+the high-pass transition, the added fraction equals `strength` for radii
+between 0 and 1, subject to rounding. Changing tint coefficients changes this
+contract. The bundled view retains its native bloom configuration.
+
+`invalidateGpuResources()` releases GPU allocations while keeping the pass
+usable on context restoration. Idempotent `dispose()` ends its lifetime and
+also releases the Three.js 0.186.1 high-pass material.
 
 ## Elliptic orbital mechanics (0.3)
 
@@ -333,10 +418,12 @@ periapsis maximum with outward numerical slack). Invalid/nonrepresentable input
 throws; there is no silently clamped orbit. Very large input times still have
 IEEE-754 precision limits; choose an epoch near the simulation time.
 
-`evaluateBodyState(body, timeSeconds)` adds the fixed `body.position` focus to
+`evaluateBodyState(body, timeSeconds)` adds the fixed anchor in `body.position` to
 an optional `body.orbit`. Static descriptors return detached positions and zero
-velocity/acceleration/bound. Orbital descriptors preserve the relative orbital
-fields. Applications must use this same sampled state for their moving visuals;
+velocity/acceleration/bound. Supply `body.orbit.parentOrbit` for a body orbiting a
+moving planet. The two ellipses share axes and a clock. State vectors and their
+acceleration bounds add, while radius and anomalies remain parent-relative.
+`orbitExtent(orbit)` returns the summed apoapsis distances from the static anchor. Applications must use this same sampled state for their moving visuals;
 the stock `createUniverseView` does not animate custom orbital providers.
 
 Gravity `sample(index, position, timeSeconds = 0)` samples current orbital poses.
@@ -388,12 +475,15 @@ The default public seed is `lonelysky`. Applications own their world seed,
 names, save provenance and generation-migration decisions. A generator revision
 is not an instruction to replace an application's universe identity.
 
+
 ## Closed triangle solids and query ownership
 
 `src/mesh-terrain.js` exports `buildTerrainMesh(descriptor)`. The descriptor's
 `center`, `radius`, `vertices`, `normals` and outward `faces` describe a closed
 triangle solid in its body's local frame. Construction validates closed topology
-once and builds a bounded BVH. Add built meshes to a compound shape's
+once and builds a bounded BVH. The CPU builder supports up to 8192 vertices
+and 16384 faces. Legacy habitat GPU transport supports 2048 vertices, 4096 faces
+and 2048 BVH nodes per patch. Add built meshes to a compound shape's
 `terrainGroups`; rendering and collision must consume the same vertices.
 `solidDistance` and `sweepSolid` include these meshes, actual finite triangle
 edges and corners, and zero-radius crossings. Root/work budgets return explicit
@@ -412,9 +502,160 @@ contact, for camera booms; default ship motion continues with contact constraint
 `decodeCell(index, out)` writes to an optional caller-owned coordinate object;
 omitting `out` retains the independent snapshot API.
 
-`src/render/bloom.js` exports `createBloomPass(options)`, an opt-in artistic
-bloom pass using the installed Three.js. It normalizes the native blur/composite
-DC gain and releases the omitted native high-pass material on disposal.
-`invalidateGpuResources()` releases GPU allocations while retaining the CPU pass
-for context restoration; final `dispose()` still releases any recreated resources. It is
-not finite-image light transport or a change to existing view defaults.
+## Regional ring habitats
+
+`describeCosmicBody(coordinate, seed, 'regions')` selects paged terrain in place
+of the default `'legacy'` terrain meshes. Pass `terrainMode: 'regions'` to
+`visibleCosmicBodies` and the matching bounds queries so all consumers use the
+same representation. The ring descriptor carries `habitat.terrainRecipes`.
+
+`createRingHabitatRegions({seed, parentsInBounds})` from
+`src/ring-habitat-regions.js` owns the shared physical pages. The parent
+provider receives `{sectorIndex, seed, bounds}`. Use `prepare(sectorIndex,
+bounds, {signal})` to acquire a lease that keeps the complete set of pages
+resident during the query. Query with `query(sectorIndex, bounds, workspace)`
+using `createQueryWorkspace()`. Release the workspace via
+`releaseQuery(workspace)` and the preparation lease via `lease.release()`.
+Unprepared pages and exhausted capacity raise `HaloTerrainUnavailable`.
+`dispose()` retires the registry when its consumers have released their leases.
+
+`sampleTop(body, siteIndex, x, y, point, normal, faceNormal, surfaceInfo)`
+samples the resident triangle in the half-open site chart. Its opportunistic
+counterpart, `samplePreparedTop`, returns false for absent pages and never
+prepares or pins them. Both accept `normal = null` to skip the interpolated
+lighting normal. `createRingHabitatField(recipe).sampleRiver(x, y, output)` reads
+the field's river-bank distance (1 at the nominal bank), progress in scene
+units and unit chart tangent as `distance`, `progressL`, `tangentX` and
+`tangentY`. River shading and cover placement consume the same channels.
+
+Use `createCosmicBodies({haloTerrain: registry})` to draw the prepared regional
+terrain. Call `await group.userData.prepareTerrain(frame)` and check
+`terrainReady(frame)` before applying the matching frame to `update(frame)`.
+Release view-specific leases with `releaseTerrainView()` when leaving
+regional terrain. The group borrows the registry.
+
+## Finite galactic emission and dust fields
+
+`createGalacticMedium(options)` and `createGalacticMediumTask(options)` construct
+revision 2 disk fields. `createSpatialGalacticMedium(options)` and its task
+variant construct opt-in revision 3 fields with independent spatial source and
+dust volumes. Both are available from `src/index.js`.
+
+Options contain a string `seed`, `sourceCenter/sourceAxes`,
+`dustCenter/dustAxes`, three nonnegative `luminosities`, three linear RGB
+`colors`, `dustIntegral`, `extinctionColor` and `resolvedFraction` in [0,1].
+Coordinates and positive half-axes use the body's radius as their length unit.
+At most 32 `sourceKernels` and 24 `dustKernels` are accepted. Each kernel has a
+positive `weight`, `center`, positive `axes` and Euler XYZ `rotation` in radians.
+A source selects `component` 0, 1 or 2; a dust kernel has `contrast` in [0,1].
+Every positive family and positive dust budget must have a resolvable kernel.
+Rotated support requires one voxel of padding from the supplied frame edges;
+unresolved or clipped positive kernels fail explicitly.
+
+The producer bakes 64³ RGBA source texels (R/G/B are scalar family densities,
+A is zero) and 128³ scalar dust texels. Compact ellipsoid profiles are averaged
+with 2×2×2 cell quadrature, then normalized once per family and once for dust.
+Source colors have unit linear RGB luminance. The published Float32 arrays are
+owned read-only by the medium; its frozen wrapper is not permission to mutate
+their elements. Creation owns three private CDFs through a WeakMap, so dropping
+the medium releases their owner. There is no global growing field cache.
+
+The task supports `step()`, `advance(milliseconds = 2)`, `cancel()` and
+`state/result/error/stage/metrics`. It yields at real density rows and integral,
+normalization and CDF phases; 2ms is a cooperative target rather than a hard
+wall-clock ceiling. Only `complete` exposes the result. Cancellation closes the
+generator and releases its unpublished work buffers; failure retains its cause.
+
+`createSpatialGalacticMediumFromVolumes(options)` and
+`createSpatialGalacticMediumFromVolumesTask(options)` accept already compiled
+fields through the same owner and consumers. Supply `seed`,
+`sourceCenter/sourceAxes`, `dustCenter/dustAxes`, `colors`, `extinctionColor`,
+`resolvedFraction`, a `Float32Array` `sourceVolumeTexels` of length 64³×4 and a
+`Float32Array` `dustVolumeTexels` of length 128³. The exported `GALACTIC_SPATIAL_SOURCE_RESOLUTION` (64) and
+`GALACTIC_SPATIAL_DUST_RESOLUTION` (128) define these fixed sizes. Storage is
+x-fastest, then y, then z. Source R/G/B are the three population scalar densities, not RGB emission;
+A must be zero. Values must be finite and nonnegative. The entire outer voxel
+layer of both grids must be zero so their finite tent supports, integration,
+point CDF and renderer frames agree. Nonzero edges fail rather than being clipped.
+Choose a frame with sufficient padding before compiling. SharedArrayBuffer inputs
+are rejected because concurrent writes cannot produce an atomic snapshot.
+
+These entry points preserve density values as-is, without budget normalization
+or gain. Source colors use the same unit-luminance convention as the kernel
+constructor. Each actual population integral is the sum of its Float32 values
+times voxel volume; `sourceComponentIntegrals`, family luminosities,
+`totalLuminosity`, `diskLuminosity` and the private star CDF derive from that same
+measure. `dustIntegral` and `dustCloudIntegral` both report the actual dust field
+integral. At least one source family must have positive finite total measure;
+dust and individual families may be zero. There is no target-luminosity or target-
+dust-integral input. `spatialSynthesis.kind` is `compiled-spatial-volumes` and its
+normalizations are one. This does not alter kernel/brick budget metadata.
+
+The compiled-volume entry points also accept an optional `sourceBrick`:
+`{component, center, axes, rotation, texels}`. `component` is 0, 1 or 2;
+`center` and positive half-`axes` are body-radius vectors; `rotation` is Euler XYZ
+in radians. `texels` is a non-shared Float32Array of length 32³, x-fastest scalar
+density. `GALACTIC_SPATIAL_SOURCE_BRICK_RESOLUTION` exports that fixed size.
+All densities must be finite/nonnegative and the entire outer voxel layer zero.
+The entry point copies the brick array and its frame at task creation. Its
+integral and CDF are completed cooperatively, without normalization or gain.
+
+A compiled brick is additive to its component's base volume. The caller must
+remove any light it replaces before import; the engine does not infer a budget
+or subtract a coarse component. `sourceComponentIntegrals`, family luminosities,
+`totalLuminosity` and the private virtual base/brick CDF include the actual brick
+integral exactly once. Base source may be empty when the brick supplies positive
+light. A zero brick is valid when other source light is positive.
+`spatialSynthesis.sourceRawIntegrals` describes the base; an imported brick adds
+`spatialSynthesis.sourceBrick` with `baseComponentIntegrals`, actual `rawIntegral`
+and normalization one. The published brick contains `component`, `resolution`,
+`texels`, `center`, `axes`, row-major local-to-body `rotation`, body-to-normalized-
+local `inverse`, `pixelVolume` and `integral`. CPU queries, point sampling and the
+existing local-source renderer consume this same formally owned object; callers
+must not construct a substitute medium wrapper. Support includes all rotated
+tent corners and Float32 point-position rounding, independently of the base frame.
+
+Task construction synchronously copies both base input arrays (12 MiB), the
+optional brick (128 KiB) and small frame/color data, so caller mutation after return cannot affect pending or
+completed fields. This atomic copy is outside the cooperative `advance` budget.
+Validation, actual integration, support bounds and private CDF construction yield
+by rows. Completed arrays are medium-owned and read-only by contract, just as for
+kernel-created fields. Cancelled or failed tasks publish nothing and release their
+work buffers. Finite-grid reconstruction remains an approximation to any upstream
+continuous field; importing a budget does not imply continuous-field equivalence.
+
+Existing `sampleGalacticMedium(medium, position, output)` consumes either
+revision in place, without stationary-query allocation. Supply reusable
+`output.emission` and `output.extinction` arrays. `sampleGalacticStars` keeps
+its validated 0–16384 count boundary and returns independent snapshots with
+stable prefixes. Component-conditioned CDF draws and per-axis tent offsets
+follow the same actual Float32 source field, up to returned position rounding.
+The Three.js adapter shares these source/dust fields between volume and points;
+revision 3 compiles out the old planar contribution.
+
+`createGalacticMediumVolume(descriptor, options)` accepts optional `starCounts`
+(`{low: 512, auto: 2048, high: 4096}` by default) and `resolvedFraction`
+(the medium's value by default). Counts must be ordered positive integers up to
+16384; the fraction must be finite in 0–1. Creation snapshots these options and
+allocates the high count once. Quality changes retain the attributes and textures,
+select the requested prefix, and normalize its actual summed raw luminosity to
+`resolvedFraction * totalLuminosity`; the continuum receives the remaining budget.
+The source/dust field, medium object, seed, PSF and 32/64/96 integration steps do
+not change. Higher capacity is explicit; default renderers still allocate 4096.
+
+`createCosmos` and `createGalaxyHaze` accept `galacticMediumOptions(descriptor)`.
+The resolver runs once per medium descriptor installation, returns the above
+options (or `undefined` for defaults), and is not called by frame/quality updates.
+It does not affect legacy descriptors. `userData.stats.starBufferBytes` on the
+volume, haze and cosmos reports the live medium point-attribute payload: 28 bytes
+per capacity point (position, color and raw luminosity). This is the retained CPU
+array size and corresponding GPU upload payload size individually, not their sum,
+texture bytes or a measurement of driver-allocated GPU memory. Sampling also
+briefly creates one component-index byte per point; the renderer does not retain
+that auxiliary array. Disposal clears the live payload statistic.
+
+These are artist-defined emission/extinction measures, not mass, an observed
+star catalogue, fluid evolution or N-body physics. Grid quadrature, trilinear
+reconstruction, half-float upload and radiative-transfer integration each have
+finite approximation error. A matching total luminosity does not imply equal
+local density, equal finite star realizations or equal received image flux.

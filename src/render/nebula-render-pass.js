@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import {isDepthVolumeVisible} from './depth-volume.js';
 
 /** Render depth-writing surfaces once, then depth-limited nebulae and the usual
  * sorted translucent objects once. Intended before bloom/output in a composer.
@@ -20,10 +21,7 @@ export class NebulaRenderPass extends RenderPass {
     this._volumeCount = 0;
     this._objectCount = 0;
     this._collectVolume = object => {
-      if (object.userData.setSceneDepth && object.layers.test(this.camera.layers)
-        && object.material?.visible !== false && object.material.uniforms.uVisibility.value > .001
-        && object.material.uniforms.uDensity.value > 0
-        && object.parent?.userData.isInView?.(this.camera) !== false) this._volumes[this._volumeCount++] = object;
+      if (isDepthVolumeVisible(object,this.camera)) this._volumes[this._volumeCount++] = object;
     };
     this._collectObject = object => {
       if (!object.material) return;
@@ -72,12 +70,13 @@ export class NebulaRenderPass extends RenderPass {
     const resolveDepth = readBuffer.resolveDepthBuffer;
     const storeDepth = readBuffer.storeMultisampledDepthBuffer;
     this._objectCount = 0;
-    this.scene.traverse(this._collectObject);
-    // Capacity follows this scene, and dropped objects are never retained by a
-    // pass-owned record after a frame or a streaming/lifecycle change.
-    this._objects.length = this._objectCount;
     let completed = false;
     try {
+      for (const volume of volumes) if(volume.userData.setVolumePreparation)
+        volume.userData.setVolumePreparation(true);
+      this.scene.traverse(this._collectObject);
+      // Capacity follows this scene; dropped objects do not survive streaming.
+      this._objects.length = this._objectCount;
       if (!readBuffer.depthTexture) {
         const depth = new THREE.DepthTexture(readBuffer.width, readBuffer.height,
           readBuffer.stencilBuffer ? THREE.UnsignedInt248Type : THREE.UnsignedIntType);
@@ -108,6 +107,10 @@ export class NebulaRenderPass extends RenderPass {
       renderer.setRenderTarget(readBuffer);
       for (const volume of volumes) volume.userData.setSceneDepth(
         this._depthTarget.depthTexture, readBuffer.width, readBuffer.height, this.camera);
+      // Optical reconstruction may render to its own targets only after the
+      // current opaque snapshot is bound, before the translucent material draw.
+      for (const volume of volumes) if(volume.userData.prepareVolume)
+        volume.userData.prepareVolume(renderer,readBuffer.width,readBuffer.height,this.camera);
       this._filterMaterials(false);
       // The surface snapshot is complete. Translucency only changes colour;
       // retain MSAA depth for testing without resolving it a second time.
@@ -132,7 +135,10 @@ export class NebulaRenderPass extends RenderPass {
         record.object = record.original = null;
         record.filtered.fill(null);
       }
-      for (const volume of volumes) volume.userData.setSceneDepth(null);
+      for (const volume of volumes) {
+        volume.userData.setSceneDepth(null);
+        if(volume.userData.setVolumePreparation)volume.userData.setVolumePreparation(false);
+      }
       volumes.fill(null);
       this.scene.background = background;
       this.scene.overrideMaterial = overrideMaterial;

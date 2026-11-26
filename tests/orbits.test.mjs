@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluateOrbit, orbitalPeriod, evaluateBodyState } from '../src/orbits.js';
+import { evaluateOrbit, orbitalPeriod, evaluateBodyState, createBodyStateSampler, orbitExtent } from '../src/orbits.js';
 
 const TAU = 2 * Math.PI;
 const close = (actual, expected, tolerance = 2e-12) => assert.ok(
@@ -201,4 +201,33 @@ test('acceleration bound is the periapsis maximum and rejects unrepresentable ma
   // The instantaneous apoapsis state would fit; the maximum at periapsis does not.
   assert.throws(() => evaluateOrbit({ semiMajorAxis: 1e-100, mu: 1e100,
     eccentricity: .999999, meanAnomalyAtEpoch: Math.PI }, 0), /acceleration bound/);
+});
+
+test('a moon follows its moving focus and preserves parent-relative orbital scalars', () => {
+  const parentOrbit = {semiMajorAxis: 42, eccentricity: .35, mu: 74, inclination: .61, ascendingNode: .3};
+  const orbit = {semiMajorAxis: 5, eccentricity: .12, mu: 2.1, inclination: 1.01, argumentOfPeriapsis: .82, parentOrbit};
+  const body = {position:[-12,7,3], orbit}, sample = createBodyStateSampler(body);
+  const out = {position:[0,0,0], velocity:[0,0,0], acceleration:[0,0,0]};
+  for (const t of [-63, 0, 19, 128]) {
+    const parent = evaluateBodyState({position:body.position, orbit:parentOrbit},t);
+    const relative = evaluateOrbit(orbit,t), state = sample(t,out);
+    assert.equal(state,out);
+    for (const key of ['position','velocity','acceleration']) {
+      vectorClose(state[key],relative[key].map((value,i)=>value+parent[key][i]));
+    }
+    for (const key of ['radius','periodSeconds','trueAnomaly']) assert.equal(state[key],relative[key]);
+    assert.equal(state.accelerationBound,parent.accelerationBound+relative.accelerationBound);
+    assert.ok(norm(state.acceleration) <= state.accelerationBound);
+    assert.ok(norm(state.position.map((v,i)=>v-body.position[i])) <= orbitExtent(orbit));
+    const step=1e-4, before=sample(t-step), after=sample(t+step);
+    vectorClose(state.velocity,after.position.map((v,i)=>(v-before.position[i])/(2*step)),1e-8);
+    vectorClose(state.acceleration,after.velocity.map((v,i)=>(v-before.velocity[i])/(2*step)),1e-8);
+  }
+  const baseline=sample(45);
+  parentOrbit.semiMajorAxis*=3;
+  assert.deepEqual(sample(45),baseline);
+  assert.equal(orbitExtent(null),0);
+  assert.throws(()=>orbitExtent({semiMajorAxis:5,eccentricity:-3}),/eccentricity/);
+  assert.throws(()=>orbitExtent({semiMajorAxis:Number.MAX_VALUE,eccentricity:.5}),/range/);
+  assert.throws(()=>createBodyStateSampler({...body, orbit:{...orbit,parentOrbit:orbit}}),/one moving parent/);
 });

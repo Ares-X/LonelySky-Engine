@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { describeNebulaAppearance, NEBULA_APPEARANCE_FAMILIES } from '../../src/render/nebula-appearance.js';
-import { createNebula } from '../../src/render/nebula.js';
+import { createNebula, describeNebulaColumns, describeNebulaStructure } from '../../src/render/nebula.js';
 
 const morphologies = ['columns', 'halo', 'knots', 'rift', 'shell', 'stream', 'wisps'];
 const uniforms = group => group.children[0].material.uniforms;
@@ -43,7 +43,7 @@ test('appearance leaves seeded geometry, stationary noise and legacy defaults in
     assert.deepEqual(styled.children[0].geometry.attributes.position.array, legacy.children[0].geometry.attributes.position.array);
     assert.equal(styled.children.length, 1);
     const camera = new THREE.PerspectiveCamera();
-    for (const [quality, steps] of [['low', 16], ['auto', 32], ['high', 48]]) {
+    for (const [quality, steps] of [['low', 32], ['auto', 64], ['high', 96]]) {
       styled.userData.update(camera, 123, { quality });
       assert.equal(uniforms(styled).uSteps.value, steps);
     }
@@ -67,4 +67,35 @@ test('caller coefficients stay finite and bounded and dark clouds cannot gain em
     assert.ok(uniforms(dark).uScattering.value <= .035);
     assert.ok(uniforms(dark).uRimStrength.value <= .015);
   } finally { extreme.userData.dispose(); dark.userData.dispose(); }
+});
+
+test('seeded macro controls reach every morphology without changing world bounds or drifting with time',()=>{
+  const volumes=['columns','halo','knots','rift','shell','stream'].map(morphology=>({morphology,
+    volume:createNebula({identity:'same-body',seed:9384234789123,morphology})}));
+  const camera=new THREE.PerspectiveCamera();
+  try{
+    for(const {morphology,volume} of volumes){
+      const descriptor={identity:'same-body',seed:9384234789123,morphology},shape=describeNebulaStructure(descriptor),u=uniforms(volume);
+      assert.deepEqual(describeNebulaStructure(descriptor),shape);
+      assert.notDeepEqual(describeNebulaStructure({...descriptor,identity:'another-body'}),shape);
+      assert.notDeepEqual(describeNebulaStructure({...descriptor,seed:descriptor.seed+4294967296}),shape);
+      for(const [name,value] of [['uShapeAxes',shape.axes],['uCurve',shape.curve],['uRift',shape.rift],['uShapePhases',shape.phases],['uStreamWing',shape.streamWing]]){
+        assert.deepEqual(u[name].value.toArray(),value);
+      }
+      assert.equal(u.uShapeRadius.value,shape.radius);assert.equal(u.uShapeThickness.value,shape.thickness);
+      assert.equal(u.uKnotCount.value,shape.knots.length);
+      assert.deepEqual(u.uKnots.value.slice(0,shape.knots.length).map(v=>v.toArray()),shape.knots);
+      const columns=morphology==='columns'?describeNebulaColumns(descriptor):[];
+      assert.equal(u.uColumnCount.value,columns.length);
+      assert.deepEqual(u.uColumns.value.slice(0,columns.length).map(v=>v.toArray()),columns.map(c=>c.shape));
+      assert.deepEqual(u.uColumnLean.value.slice(0,columns.length).map(v=>v.toArray()),columns.map(c=>c.lean));
+      const position=volume.children[0].position.clone(),scale=volume.children[0].scale.clone();
+      for(const time of [0,123,1e6]){
+        volume.userData.update(camera,time,{quality:'high'});
+        assert.deepEqual(u.uShapeAxes.value.toArray(),shape.axes);
+        assert.deepEqual(u.uKnots.value.slice(0,shape.knots.length).map(v=>v.toArray()),shape.knots);
+        assert.deepEqual(volume.children[0].position,position);assert.deepEqual(volume.children[0].scale,scale);
+      }
+    }
+  }finally{for(const {volume} of volumes)volume.userData.dispose();}
 });

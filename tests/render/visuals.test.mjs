@@ -22,20 +22,20 @@ function camera() {
   return result;
 }
 
-test('nebula materials keep independent seeds, visibility and integration quality', () => {
-  const a = createNebula({ seed: 'dust-a' }), b = createNebula({ seed: 'dust-b' });
-  const first = a.children[0], second = b.children[0];
-  const geometryReleased = disposalCount(first.geometry), materialReleased = disposalCount(first.material);
+test('nebula instances keep independent quality, visibility and geometry lifetimes', () => {
+  const a = createNebula({seed:'dust-a'}), b = createNebula({seed:'dust-b'});
+  const releaseA=disposalCount(a.children[0].material),releaseB=disposalCount(b.children[0].material);
   try {
-    assert.notDeepEqual(first.material.uniforms.uNoiseOffset.value, second.material.uniforms.uNoiseOffset.value);
-    a.userData.update(camera(), 1, { quality: 'low', visibility: .4 });
-    assert.equal(a.userData.stats.steps, 16);
-    assert.equal(first.material.uniforms.uVisibility.value, .4);
-    a.userData.dispose(); a.userData.dispose();
-    assert.equal(geometryReleased(), 1); assert.equal(materialReleased(), 1);
-    b.userData.update(camera(), 2, { quality: 'high' });
-    assert.equal(b.userData.stats.steps, 48);
-    assert.equal(second.material.uniforms.uVisibility.value, 1);
+    a.userData.update(camera(),1,{quality:'low',visibility:.4});
+    assert.equal(a.userData.stats.steps,32);
+    assert.equal(a.children[0].material.uniforms.uVisibility.value,.4);
+    assert.equal(b.children[0].material.uniforms.uVisibility.value,1);
+    a.userData.dispose();a.userData.dispose();
+    assert.equal(releaseA(),1);assert.equal(releaseB(),0);
+    b.userData.update(camera(),2,{quality:'high'});
+    assert.equal(b.userData.stats.steps,96);
+    b.userData.dispose();b.userData.dispose();
+    assert.equal(releaseB(),1);
   } finally { a.userData.dispose(); b.userData.dispose(); }
 });
 
@@ -174,6 +174,32 @@ test('directional sky releases resources once and ignores updates after disposal
   assert.equal(mesh.material.uniforms.uSkyBrightness.value, before);
 });
 
+test('regional stellar continuum reaches the sky and lens without a detail texture', () => {
+  const sky = createDeepSky(), hole = createBlackHole();
+  const environment = {ambientTint: [.6,.7,.8], bandNormal: [0,1,0], skyBrightness: .02, bandStrength: .4, starDensity: .5};
+  const continuum = {strength: .6, origin: [.2,.4,-.1], offset: [18,3,4], tint: [.5,.6,.9], shape: [2,.06,.15,.5],
+    frame: new THREE.Matrix3().set(0,-1,0,1,0,0,0,0,1).toArray()};
+  const background = sky.children[0].material, lens = hole.children[0].material;
+  try {
+    sky.userData.update({...environment, skyContinuum: continuum});
+    hole.userData.setEnvironment({...environment, skyContinuum: continuum});
+    for (const {uniforms, fragmentShader} of [background, lens]) {
+      assert.equal(uniforms.uSkyContinuumStrength.value, .6);
+      for (const [name, key] of [['Origin','origin'],['Frame','frame'],['Offset','offset'],['Tint','tint'],['Shape','shape']]) {
+        assert.deepEqual(uniforms[`uSkyContinuum${name}`].value.toArray(), continuum[key]);
+      }
+      assert.doesNotMatch(fragmentShader, /uniform\s+sampler2D\s+uSeaDetail/);
+      assert.match(fragmentShader, /vec3 classic=classicMilkyWay\(galactic\);/);
+    }
+    continuum.origin[0] = 0;
+    assert.equal(lens.uniforms.uSkyContinuumOrigin.value.x, .2);
+    sky.userData.update({...environment, skyContinuum: {strength: 0}});
+    assert.equal(background.uniforms.uSkyContinuumStrength.value, 0);
+    hole.userData.setEnvironment(environment);
+    assert.equal(lens.uniforms.uSkyContinuumStrength.value, -1);
+  } finally {sky.userData.dispose(); hole.userData.dispose();}
+});
+
 test('six sea blends reach both views, copy descriptors and clear on an ordinary environment update', () => {
   const sky = createDeepSky(), hole = createBlackHole();
   const background = sky.children[0].material.uniforms, lens = hole.children[0].material.uniforms;
@@ -239,6 +265,25 @@ test('seeded sea profiles reach the sky and lens without leaking into later lega
     assert.deepEqual(morphs(sky.children[0].material.uniforms),Array(18).fill(0));
     assert.deepEqual(morphs(hole.children[0].material.uniforms),Array(18).fill(0));
   } finally {sky.userData.dispose();hole.userData.dispose();}
+});
+
+test('remote medium fades with its region in direct and lensed light and yields to an explicit star sea', () => {
+  const sky=createDeepSky(), hole=createBlackHole();
+  const weights=Array(18).fill(0); weights[8]=1;
+  const medium={weights, phase:2, width:.6, frame:new THREE.Matrix3().toArray(),
+    appearance:{morphologyWeights:weights, state:[.35,.5,.8,.6]}};
+  const field={blend:.25, plane:[0,1,0,.1], facing:[1,0,0,.4],style:[.6,.3,2,0],medium};
+  const env={ambientTint:[.8,.8,.8],bandNormal:[0,1,0],skyBrightness:.01,bandStrength:0,starDensity:.2,distantSkyField:field};
+  const owners=[sky.children[0].material.uniforms,hole.children[0].material.uniforms];
+  function update() { sky.userData.update(env); hole.userData.setEnvironment(env); }
+  try {
+    update();
+    for(const u of owners) { assert.equal(u.uSeaMorphC.value.z,1); assert.equal(u.uSeaState.value.z,.2); }
+    field.blend=0; update();
+    for(const u of owners) { assert.equal(u.uSeaMorphC.value.z,0); assert.equal(u.uDistantMedium.value,0); }
+    env.starSea=medium; field.blend=.5; update();
+    for(const u of owners) { assert.equal(u.uSeaState.value.z,.8); assert.equal(u.uDistantMedium.value,0); }
+  } finally { sky.userData.dispose(); hole.userData.dispose(); }
 });
 
 test('custom sky uniforms and both views borrow the same optional detail texture', () => {

@@ -12,7 +12,6 @@ const sphereVertex = `
 const surfaceFragment = `
   uniform vec3 tint;uniform float time,visibility,seed;uniform int family;
   varying vec3 vLocal,vNormal,vWorld;
-  float cells(vec3 p){return sin(p.x*1.31+sin(p.y*1.7))*sin(p.y*1.53+sin(p.z*1.4))*sin(p.z*1.17+sin(p.x*1.8))*.5+.5;}
   float hash31(vec3 p){p=fract(p*.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
   float valueNoise(vec3 p){
     vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
@@ -22,21 +21,39 @@ const surfaceFragment = `
       mix(hash31(i+vec3(0,1,1)),hash31(i+vec3(1,1,1)),f.x),f.y),f.z);
   }
   void main(){if(visibility<=0.)discard;
-    vec3 p=vLocal;float view=clamp(dot(normalize(vNormal),normalize(cameraPosition-vWorld)),0.,1.);
-    float coarse=cells(p*9.+vec3(seed,time*.018,0.));
-    float fine=cells(p*38.+vec3(time*.01,seed,0.));
-    float brightness=1.;vec3 base=tint;
-    if(family==0){float belt=sin(p.y*32.+coarse*3.5+seed)*.5+.5;
-      base=mix(tint*.2,tint*.74,belt*.65+fine*.35);brightness=.42+.58*pow(view,.5);}
-    else if(family==4){
+    vec3 p=normalize(vLocal);
+    float view=clamp(dot(normalize(vNormal),normalize(cameraPosition-vWorld)),0.,1.);
+    float pixel=max(length(dFdx(p)),length(dFdy(p)));
+    float brightness;vec3 base=tint;
+    if(family==0){
+      vec3 air=p*vec3(4.,11.,4.)+vec3(seed,time*.008,0.);
+      float shear=valueNoise(air)-.5;
+      float bands=.5+.5*sin(p.y*24.+shear*3.6+seed);
+      float wisps=(valueNoise(air*3.+vec3(shear*2.,0.,0.))-.5)*(1.-smoothstep(.3,1.,pixel*33.));
+      base=tint*mix(.22,.75,bands*.78+.11+wisps*.20);
+      brightness=.42+.58*sqrt(view);
+    }else if(family==4){
       vec3 drift=vec3(seed,time*.018,seed*.17);
-      float convection=valueNoise(p*11.+drift);
-      float granulation=valueNoise(p*27.+drift)*.48+valueNoise(p*67.+drift)*.32+valueNoise(p*153.+drift)*.2;
-      float grain=smoothstep(.23,.77,granulation);
-      base=mix(tint*.5,tint*1.55,convection*.25+grain*.75);
-      brightness=(.84+grain*.2)*(.42+.58*pow(view,.34));}
-    else if(family==1){brightness=(2.15+fine*.12)*(.76+.24*pow(view,.35));}
-    else{brightness=(1.65+fine*.035)*(.82+.18*pow(view,.4));}
+      float rise=valueNoise(p*3.3+drift);
+      vec3 field=p*9.+vec3(rise*1.6,-rise,rise*.8)+drift;
+      float convection=valueNoise(field)-.5;
+      // Narrower streams break up the edges of large thermal plumes.
+      // Their shear follows the broad convective field across the surface.
+      vec3 streams=field*vec3(5.5,8.5,6.)+vec3(2.6,-1.9,1.4)*convection;
+      float stream=(valueNoise(streams)-.5)*(1.-smoothstep(.3,1.,pixel*77.));
+      float flecks=(valueNoise(streams*2.3+vec3(17.,0.,31.))-.5)*(1.-smoothstep(.3,1.,pixel*177.));
+      float edge=1.-smoothstep(.08,.40,abs(convection));
+      float heat=.5+(rise-.5)*.70+convection*.47+stream*(.21+.28*edge)+flecks*.20;
+      base=mix(tint*vec3(.53,.31,.21),mix(tint,vec3(1.,.72,.35),.44)*1.45,clamp(heat,0.,1.));
+      brightness=exp2((heat-.52)*1.4)*(.40+.60*sqrt(view));
+    }else if(family==1){
+      brightness=2.18*(.76+.24*pow(view,.35));
+    }else{
+      // Thermal caps and optical beams share the same magnetic frame.
+      float cap=family==3?exp(-24.*(1.-abs(p.y))):0.;
+      base=mix(tint,vec3(.85,.93,1.),cap*.64);
+      brightness=(1.65+cap*.80)*(.82+.18*pow(view,.4));
+    }
     gl_FragColor=vec4(base*brightness,visibility);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -145,7 +162,7 @@ export function createStellarRemnant(body, { quality = 'high', reducedMotion = f
     // antipodal cones through space. Opacity never pulses the entire star.
     spinFrame.rotation.z = Number.isFinite(body.spinTilt) ? body.spinTilt : .38;
     const magneticFrame = new THREE.Group(); magneticFrame.rotation.z = Number.isFinite(body.magneticTilt) ? body.magneticTilt : .65;
-    group.add(spinFrame); spinFrame.add(beamRotor); beamRotor.add(magneticFrame);
+    group.add(spinFrame); spinFrame.add(beamRotor); beamRotor.add(magneticFrame); magneticFrame.add(core);
     const beamLength = Math.min(2600, radius*54), beamWidth = radius*3.2;
     const beamGeometry = ownGeometry(new THREE.CylinderGeometry(beamWidth,radius*.14,beamLength,16,1,true));
     const beamMaterial = ownMaterial(new THREE.ShaderMaterial({uniforms:{visibility:{value:1},tint:{value:tint},seed:{value:(body.seed??0)%997}},
@@ -176,11 +193,12 @@ export function createStellarRemnant(body, { quality = 'high', reducedMotion = f
     group.visible=v>0;
     beamRotor.rotation.y=phase+(motion?0:t*spinRate);
     const detailFade=1-THREE.MathUtils.smoothstep(distance, radius*70, radius*190);
+    let visibleDetails=0;
     for(const detail of details){detail.visible=v>0&&detailFade>.005&&!(nextQuality==='low'&&family===4);
-      if(detail.material.uniforms)detail.material.uniforms.visibility.value=v*detailFade;
-      else detail.material.opacity=.2*v*detailFade;}
+      if(detail.visible)visibleDetails++;
+      detail.material.uniforms.visibility.value=v*detailFade;}
     stats.lod=lod;stats.visibility=v;stats.reducedMotion=motion;
-    stats.drawCalls=v>0?2+details.filter(detail=>detail.visible).length:0;
+    stats.drawCalls=v>0?2+visibleDetails:0;
   }
   function dispose(){if(disposed)return;disposed=true;for(const geometry of geometries)geometry.dispose();for(const material of materials)material.dispose();}
   group.userData={body,bodyRadius:radius,bodyName:body.name??body.stellarFamily,update,dispose,stats};
