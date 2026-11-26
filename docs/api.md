@@ -366,11 +366,12 @@ physically consistent galaxy-to-planet simulation.
 
 ### Ring habitat terrain
 
-A ring with a fixed surface site can specify
-`habitatPort.terrainReferenceRadius` in world units. This anchors procedural
-terrain phase at the site's longitude when the ring radius changes. The
-default is the current body radius. Terrain uses physical lengths and filters
-detail by the projected surface footprint.
+On a flat annular deck, `habitatPort.terrainReferenceRadius` anchors the
+procedural coastline at the site's longitude when the ring radius changes.
+It defaults to the current ring radius in world units. Regional habitats
+use the heights of their solid terrain mesh to place land and water.
+Both representations support a physical-scale port image and an optional
+`surfaceTexture` for land detail.
 
 ### Optional ring surface image
 
